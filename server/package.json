@@ -1,0 +1,27 @@
+{
+  "name": "ads-dashboard-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "nodemon server.js",
+    "seed": "node seed.js",
+    "verify-supabase": "node verify-supabase.js",
+    "fix-schema-cache": "node fix-schema-cache.js",
+    "migrate-supabase": "node migrate-to-supabase.js",
+    "migrate-supabase:data": "node migrate-to-supabase.js --migrate-data",
+    "import-users": "node import-users-supabase.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.90.1",
+    "axios": "^1.13.2",
+    "bcrypt": "^5.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "jsonwebtoken": "^9.0.0",
+    "mssql": "^9.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  }
+}

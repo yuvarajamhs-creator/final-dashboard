@@ -1,0 +1,547 @@
+/* =========================================
+   1. GLOBAL THEME & VARIABLES
+   (Controls overall page background, colors, and fonts)
+   ========================================= */
+:root {
+  --app-bg: #f0f2f5;
+  --card-bg: #ffffff;
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-white: #ffffff;
+
+  /* KPI Colors (Used for Top Metric Cards) */
+  --kpi-purple: #5b45b0;
+  --kpi-blue: #0d47a1;
+  --kpi-teal: #00897b;
+  --kpi-green: #2e7d32;
+  --kpi-pink: #d81b60;
+  --kpi-orange: #f57c00;
+
+  /* Header Color */
+  --header-bg: #0f2d5e;
+}
+
+/* Main Page Wrapper */
+.dashboard-wrapper {
+  min-height: 100vh;
+  background: var(--app-bg);
+  padding: 1.5rem;
+  font-family: 'Roboto', 'Inter', sans-serif;
+}
+
+/* =========================================
+   2. DASHBOARD HEADER SECTION
+   (Controls the blue banner, Main Title "Ads Analytics...", and Subtitle)
+   ========================================= */
+.dashboard-header {
+  background: var(--header-bg);
+  padding: 1.0rem 1.5rem;
+  border-radius: 12px;
+  border-bottom-right-radius: 32px;
+  /* Stylish Curve */
+  color: white;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 12px rgba(15, 45, 94, 0.2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dashboard-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.title-emoji {
+  font-size: 1.2rem;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 0.4rem;
+  border-radius: 50%;
+}
+
+.dashboard-subtitle {
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+}
+
+/* Toggle Buttons in Header */
+.theme-toggle-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.theme-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* =========================================
+   3. FILTER SECTION (Time Range & Campaign)
+   (Controls Dropdown labels "Time Range", "Select Campaign" and Refresh Button)
+   ========================================= */
+.filter-card {
+  background: white;
+  border-radius: 10px;
+  padding: 0.85rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  border: 1px solid #e2e8f0;
+}
+
+.filter-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.filter-select {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background-color: #f8fafc;
+  color: var(--text-primary);
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+
+.refresh-btn {
+  background: #0f2d5e;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: all 0.2s;
+}
+
+.refresh-btn:hover {
+  background: #1e40af;
+  transform: translateY(-1px);
+}
+
+/* =========================================
+   4. METRICS & KPI CARDS (Top Row)
+   (Controls Colored Cards like "Total Spend", "Impressions")
+   ========================================= */
+.kpi-card {
+  height: 90%;
+  border-radius: 10px;
+  padding: 1.0rem;
+  color: white;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.kpi-card:hover {
+  box-shadow: 0 8px 16px -2px rgba(0, 0, 0, 0.15);
+  transform: translateY(-2px);
+}
+
+/* -- KPI Card Gradients -- */
+.kpi-card-primary {
+  background: linear-gradient(135deg, #5b45b0 0%, #483690 100%);
+}
+
+/* Purple */
+.kpi-card-success {
+  background: linear-gradient(135deg, #0d47a1 0%, #082d6b 100%);
+}
+
+/* Dark Blue */
+.kpi-card-info {
+  background: linear-gradient(135deg, #00897b 0%, #006056 100%);
+}
+
+/* Teal */
+.kpi-card-warning {
+  background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%);
+}
+
+/* Green */
+.kpi-card-purple {
+  background: linear-gradient(135deg, #d81b60 0%, #ad1457 100%);
+}
+
+/* Pink */
+.kpi-card-teal {
+  background: linear-gradient(135deg, #00acc1 0%, #00838f 100%);
+}
+
+/* Cyan */
+.kpi-card-pink {
+  background: linear-gradient(135deg, #8e24aa 0%, #6a1b9a 100%);
+}
+
+/* Violet */
+.kpi-card-orange {
+  background: linear-gradient(135deg, #f57c00 0%, #e65100 100%);
+}
+
+/* Orange */
+
+/* Light Color Variants for Content Marketing Cards */
+.kpi-card-l1 {
+  background: linear-gradient(135deg, #e9d5ff 0%, #d8b4fe 100%);
+  color: #6b21a8;
+}
+
+/* Light Purple/Lavender */
+.kpi-card-l2 {
+  background: linear-gradient(135deg, #bfdbfe 0%, #93c5fd 100%);
+  color: #1e40af;
+}
+
+/* Light Blue/Sky */
+.kpi-card-total {
+  background: linear-gradient(135deg, #a7f3d0 0%, #6ee7b7 100%);
+  color: #065f46;
+}
+
+/* Light Teal/Mint */
+.kpi-card-unfollowers {
+  background: linear-gradient(135deg, #fecdd3 0%, #fda4af 100%);
+  color: #991b1b;
+}
+
+/* Light Pink/Rose */
+
+/* -- KPI Card Content -- */
+.kpi-card-body {
+  position: relative;
+  z-index: 2;
+}
+
+.kpi-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  opacity: 0.9;
+  text-transform: capitalize;
+  display: block;
+}
+
+/* Override label color for light background cards */
+.kpi-card-l1 .kpi-label,
+.kpi-card-l2 .kpi-label,
+.kpi-card-total .kpi-label,
+.kpi-card-unfollowers .kpi-label {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.kpi-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  margin: 0.4rem 0;
+}
+
+/* Override text color for light background cards */
+.kpi-card-l1 .kpi-value,
+.kpi-card-l2 .kpi-value,
+.kpi-card-total .kpi-value,
+.kpi-card-unfollowers .kpi-value {
+  color: inherit;
+}
+
+/* Default white text for dark background cards */
+.kpi-card-primary .kpi-value,
+.kpi-card-success .kpi-value,
+.kpi-card-info .kpi-value,
+.kpi-card-warning .kpi-value,
+.kpi-card-purple .kpi-value,
+.kpi-card-teal .kpi-value,
+.kpi-card-pink .kpi-value,
+.kpi-card-orange .kpi-value {
+  color: white;
+}
+
+.kpi-icon {
+  position: absolute;
+  right: 0.85rem;
+  top: 0.85rem;
+  font-size: 2rem;
+  opacity: 0.2;
+}
+
+/* Increase icon opacity for light background cards */
+.kpi-card-l1 .kpi-icon,
+.kpi-card-l2 .kpi-icon,
+.kpi-card-total .kpi-icon,
+.kpi-card-unfollowers .kpi-icon {
+  opacity: 0.15;
+}
+
+.kpi-subtitle,
+.kpi-change {
+  font-size: 0.75rem;
+  opacity: 0.8;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Override change indicator color for light background cards */
+.kpi-card-l1 .kpi-change,
+.kpi-card-l2 .kpi-change,
+.kpi-card-total .kpi-change,
+.kpi-card-unfollowers .kpi-change {
+  color: inherit;
+  opacity: 0.9;
+}
+
+.kpi-change-positive {
+  background: rgba(255, 255, 255, 0.2);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.kpi-change-negative {
+  background: rgba(255, 200, 200, 0.3);
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: rgba(220, 38, 38, 1);
+}
+
+/* Override change indicator styles for light background cards */
+.kpi-card-l1 .kpi-change-positive,
+.kpi-card-l2 .kpi-change-positive,
+.kpi-card-total .kpi-change-positive,
+.kpi-card-unfollowers .kpi-change-positive {
+  background: rgba(0, 0, 0, 0.1);
+  color: inherit;
+  opacity: 0.9;
+}
+
+.kpi-card-l1 .kpi-change-negative,
+.kpi-card-l2 .kpi-change-negative,
+.kpi-card-total .kpi-change-negative,
+.kpi-card-unfollowers .kpi-change-negative {
+  background: rgba(239, 68, 68, 0.2);
+  color: rgba(220, 38, 38, 1);
+  opacity: 1;
+}
+
+.kpi-sparkle {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  font-size: 1rem;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* =========================================
+   5. REVENUE CARDS (Bottom Row)
+   ========================================= */
+.revenue-card {
+  height: 100%;
+  border-radius: 10px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  padding: 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.revenue-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.revenue-label {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.revenue-value {
+  color: var(--text-primary);
+  font-size: 1.25rem;
+  font-weight: 800;
+  margin: 0.4rem 0;
+}
+
+.revenue-value-highlight {
+  background: linear-gradient(135deg, #d81b60, #f57c00);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.revenue-icon {
+  font-size: 1.25rem;
+  float: right;
+  opacity: 0.5;
+}
+
+/* =========================================
+   6. CHARTS & GRAPHS
+   ========================================= */
+.chart-card {
+  background: white;
+  border-radius: 10px;
+  padding: 1.2rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border: 1px solid #f1f5f9;
+  height: 100%;
+  transition: all 0.2s ease;
+}
+
+.chart-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.chart-title {
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.chart-subtitle {
+  font-weight: 400;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-left: auto;
+}
+
+.chart-emoji {
+  display: inline-block;
+  font-size: 1.25rem;
+}
+
+.chart-container {
+  min-height: 200px;
+  position: relative;
+}
+
+.chart-container-large {
+  min-height: 240px;
+  position: relative;
+  width: 100%;
+}
+
+/* Chart hover animations */
+.chart-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.chart-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* Interactive chart elements */
+.recharts-bar-rectangle:hover {
+  opacity: 0.8;
+  filter: brightness(1.1);
+  transition: all 0.2s ease;
+}
+
+.recharts-area:hover {
+  opacity: 0.9;
+}
+
+/* Smooth chart animations */
+.recharts-wrapper {
+  transition: all 0.3s ease;
+}
+
+/* Tooltip animations */
+.recharts-tooltip-wrapper {
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+
+.kpi-icon {
+  transition: transform 0.2s ease;
+}
+
+.kpi-card:hover .kpi-icon {
+  transform: scale(1.1);
+}
+
+/* Table Enhancements */
+.table tbody tr {
+  transition: background-color 0.2s ease;
+  border-left: 3px solid transparent;
+}
+
+.table tbody tr:hover {
+  background-color: rgba(103, 58, 183, 0.05);
+  border-left-color: #673ab7;
+}
+
+/* =========================================
+   7. RESPONSIVE DESIGN (Mobile)
+   ========================================= */
+@media (max-width: 768px) {
+  .dashboard-wrapper {
+    padding: 0.85rem;
+  }
+
+  .kpi-value {
+    font-size: 1.25rem;
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.85rem;
+  }
+}
+
+/* Enhanced visual effects */
+.chart-card-body {
+  position: relative;
+  z-index: 2;
+}
+
+.filter-card {
+  transition: box-shadow 0.2s ease;
+}
+
+.filter-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}

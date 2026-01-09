@@ -1,0 +1,319 @@
+/* ===========================
+   BEST PERFORMING AD (NEW DESIGN)
+   =========================== */
+
+/* Global Page Background */
+.best-ad-container {
+    background-color: #f0f4f8;
+    /* Light blue-ish gray background from image */
+    min-height: 100vh;
+    padding: 24px;
+    font-family: 'Inter', sans-serif;
+    color: #334155;
+}
+
+/* ===== FILTERS BAR ===== */
+.filters-bar {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.custom-select-wrapper {
+    position: relative;
+    flex: 1;
+}
+
+.filter-select {
+    width: 100%;
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    /* Slate-300 */
+    background-color: white;
+    color: #475569;
+    font-size: 0.9rem;
+    font-weight: 500;
+    appearance: none;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.filter-select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* ===== KPI CARDS ROW ===== */
+.kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.kpi-card-new {
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 100px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    position: relative;
+}
+
+.kpi-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    opacity: 0.9;
+}
+
+.kpi-value-lg {
+    font-size: 1.5rem;
+    font-weight: 800;
+    margin-bottom: 4px;
+    letter-spacing: -0.5px;
+}
+
+.kpi-trend {
+    font-size: 0.75rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* Specific Card Styles */
+.kpi-white {
+    background: white;
+    border: 1px solid #e2e8f0;
+    color: #1e293b;
+}
+
+.kpi-white .kpi-title {
+    color: #64748b;
+}
+
+.kpi-white .kpi-value-lg {
+    color: #1e293b;
+}
+
+.kpi-white .kpi-trend {
+    color: #10b981;
+}
+
+/* Green trend */
+.kpi-white::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background-color: #8b5cf6;
+    /* Purple accent border */
+    border-top-left-radius: 12px;
+    border-bottom-left-radius: 12px;
+}
+
+.kpi-blue-dark {
+    background-color: #0f4c81;
+    /* Deep Blue */
+    color: white;
+}
+
+.kpi-blue-light {
+    background-color: #0088cc;
+    /* Cerulean */
+    color: white;
+}
+
+.kpi-green {
+    background-color: #00bfa5;
+    /* Teal/Green */
+    color: white;
+}
+
+.kpi-red {
+    background-color: #e55368;
+    /* Salmon/Red */
+    color: white;
+}
+
+.kpi-purple {
+    background-color: #7b4397;
+    /* Purple */
+    color: white;
+}
+
+
+/* ===== MIDDLE SECTION (Funnel + Line Chart) ===== */
+.middle-section {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    /* Fixed width funnel, flex chart */
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+/* Card Container for Charts */
+.chart-box {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    border: 1px solid #f1f5f9;
+}
+
+.chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.chart-title-text {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #1e293b;
+}
+
+/* Funnel Styling */
+.funnel-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 300px;
+}
+
+.funnel-step {
+    width: 80%;
+    text-align: center;
+    margin-bottom: 4px;
+    position: relative;
+    color: white;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.step-1 {
+    background-color: #4f46e5;
+    height: 60px;
+    clip-path: polygon(0 0, 100% 0, 85% 100%, 15% 100%);
+    width: 100%;
+    z-index: 3;
+}
+
+.step-2 {
+    background-color: #0ea5e9;
+    height: 60px;
+    clip-path: polygon(0 0, 100% 0, 80% 100%, 20% 100%);
+    width: 85%;
+    margin-top: -5px;
+    z-index: 2;
+}
+
+.step-3 {
+    background-color: #06b6d4;
+    height: 60px;
+    clip-path: polygon(0 0, 100% 0, 50% 100%, 50% 100%);
+    width: 70%;
+    margin-top: -5px;
+    z-index: 1;
+    display: none;
+    /* simple css funnel is hard, will use SVG/Recharts */
+}
+
+
+/* ===== THREE BOTTOM CHARTS ===== */
+.bottom-charts-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+
+/* ===== TABLE SECTION ===== */
+.table-container {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    overflow-x: auto;
+}
+
+.performance-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.performance-table th {
+    text-align: left;
+    padding: 12px 8px;
+    background-color: #f8fafc;
+    color: #64748b;
+    font-weight: 700;
+    border-bottom: 2px solid #e2e8f0;
+    white-space: nowrap;
+}
+
+.performance-table td {
+    padding: 10px 8px;
+    border-bottom: 1px solid #f1f5f9;
+    color: #334155;
+    font-weight: 500;
+}
+
+/* Table Heatmap Colors (Classes applied dynamically) */
+.cell-heatmap-high {
+    background-color: rgba(16, 185, 129, 0.2);
+}
+
+/* Green tint */
+.cell-heatmap-mid {
+    background-color: rgba(59, 130, 246, 0.1);
+}
+
+/* Blue tint */
+.cell-heatmap-low {
+    background-color: rgba(244, 63, 94, 0.1);
+}
+
+/* Red tint */
+.cell-heatmap-neutral {
+    background-color: transparent;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+    .kpi-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .middle-section {
+        grid-template-columns: 1fr;
+    }
+
+    .bottom-charts-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .kpi-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .filters-bar {
+        flex-direction: column;
+    }
+}

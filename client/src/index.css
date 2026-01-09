@@ -1,0 +1,98 @@
+/* global theme variables */
+:root[data-theme='light'] {
+  --bg: #f8f9fa;
+  --text: #212529;
+  --card: #fff;
+  --btn: #0d6efd;
+  --btn-text: #fff;
+  --nav: #ffffff;
+  --nav-text: #212529;
+  --bs-dropdown-bg: #ffffff;
+}
+
+:root[data-theme='dark'] {
+  --bg: #121212;
+  --text: #f1f1f1;
+  --card: #1e1e1e;
+  --btn: #0d6efd;
+  --btn-text: #fff;
+  --nav: #1c1c1c;
+  --nav-text: #fff;
+  --bs-dropdown-bg: #3c3e3d;
+ 
+}
+
+:root[data-theme='primary'] {
+  --bg: #e7f1ff;
+  --text: #002b5c;
+  --card: #fff;
+  --btn: #0d6efd;
+  --btn-text: #fff;
+  --nav: #0d6efd;
+  --nav-text: #fff;
+  --bs-dropdown-bg: #88a7ef;
+}
+
+:root[data-theme='danger'] {
+  --bg: #fff0f0;
+  --text: #a10000;
+  --card: #fff;
+  --btn: #dc3545;
+  --btn-text: #fff;
+  --nav: #dc3545;
+  --nav-text: #fff;
+  --bs-dropdown-bg: #f67f7f;
+}
+
+:root[data-theme='success'] {
+  --bg: #e8f5e9;
+  --text: #004d25;
+  --card: #fff;
+  --btn: #198754;
+  --btn-text: #fff;
+  --nav: #198754;
+  --nav-text: #fff;
+  --bs-dropdown-bg: #8fc69f;
+}
+
+html,
+body {
+  height: 100%
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  transition: all .2s;
+}
+
+.navbar {
+  background: var(--nav) !important;
+}
+
+.navbar .nav-link,
+.navbar .navbar-brand {
+  color: var(--nav-text) !important;
+}
+
+.card,
+.table,
+.form-control {
+  background: var(--card) !important;
+  color: var(--text) !important;
+}
+
+.btn {
+  background: var(--btn) !important;
+  color: var(--btn-text) !important;
+  border: none;
+}
+
+.app-body {
+  background: var(--bg);
+}
+
+.dropdown-menu {
+  background-color: var(--bs-dropdown-bg) !important;
+  border: none !important;
+}

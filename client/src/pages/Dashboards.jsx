@@ -1,0 +1,5317 @@
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
+  BarChart,
+  Bar,
+  ComposedChart,
+  Line,
+} from "recharts";
+import { getCurrentTheme, setTheme } from "../utils/theme";
+import MultiSelectFilter from "../components/MultiSelectFilter";
+import DateRangeFilter from "../components/DateRangeFilter";
+import { downloadCSV } from "../utils/csvExport";
+import * as XLSX from 'xlsx';
+import './Dashboards.css';
+
+const COLORS = ["#4F46E5", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
+
+// Helper to transform Meta "actions" array -> object map
+const transformActions = (actions = []) => {
+  if (!Array.isArray(actions)) return {};
+  const map = {};
+  actions.forEach((a) => {
+    map[a.action_type] = Number(a.value);
+  });
+  return map;
+};
+
+// Helper: safe number
+const num = (v) => Number(v) || 0;
+
+// Helper to get auth token
+const getAuthToken = () => {
+  try {
+    const STORAGE_KEY = process.env.REACT_APP_STORAGE_KEY || "app_auth";
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const data = JSON.parse(stored);
+      return data.token;
+    }
+  } catch (e) {
+    console.error("Error getting token:", e);
+  }
+  return null;
+};
+
+const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
+
+// Fetch Google Sheets revenue metrics
+const fetchSheetsMetrics = async () => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE}/api/google-sheets/revenue-metrics`, { headers });
+    
+    if (!res.ok) {
+      throw new Error(`Failed to fetch sheets metrics: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    return {
+      onlineConversion: data.onlineConversion || 0,
+      offlineConversion: data.offlineConversion || 0,
+      l1Revenue: data.l1Revenue || 0,
+      l2Revenue: data.l2Revenue || 0,
+      totalRevenue: data.totalRevenue || 0,
+      organicLeads: data.organicLeads || 0,
+      organicRevenue: data.organicRevenue || 0,
+      error: data.error || null
+    };
+  } catch (error) {
+    console.error("Error fetching Google Sheets metrics:", error);
+    throw error;
+  }
+};
+
+// Fetch Content Marketing revenue from Google Sheets
+const fetchContentMarketingRevenue = async (dateRange, source) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    // Build query parameters
+    const params = new URLSearchParams();
+    if (dateRange && dateRange.startDate) {
+      params.append('from', dateRange.startDate);
+    }
+    if (dateRange && dateRange.endDate) {
+      params.append('to', dateRange.endDate);
+    }
+    if (source && Array.isArray(source) && source.length > 0) {
+      // Use first source if multiple selected (or can be extended to support multiple)
+      params.append('source', source[0]);
+    } else if (source && typeof source === 'string' && source.trim() !== '') {
+      params.append('source', source);
+    }
+
+    const queryString = params.toString();
+    const url = `${API_BASE}/api/google-sheets/content-marketing-revenue${queryString ? `?${queryString}` : ''}`;
+    
+    console.log('[fetchContentMarketingRevenue] Fetching with filters:', {
+      dateRange,
+      source,
+      url
+    });
+
+    const res = await fetch(url, { headers });
+    
+    if (!res.ok) {
+      throw new Error(`Failed to fetch content marketing revenue: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    return {
+      organicLeads: data.organicLeads || 0,
+      organicConversion: data.organicConversion || 0,
+      l1Revenue: data.l1Revenue || 0,
+      l2Revenue: data.l2Revenue || 0,
+      totalRevenue: data.totalRevenue || 0,
+      error: data.error || null
+    };
+  } catch (error) {
+    console.error("Error fetching Content Marketing revenue:", error);
+    throw error;
+  }
+};
+
+// Fetch performance insights (page insights) for Content Marketing Dashboard
+const fetchPerformanceInsights = async ({ pageId, from, to }) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    // Build URL with query parameters (API expects 'from' and 'to')
+    const params = new URLSearchParams();
+    if (from) {
+      params.append('from', from);
+    }
+    if (to) {
+      params.append('to', to);
+    }
+
+    const queryString = params.toString();
+    const url = `${API_BASE}/api/meta/pages/${pageId}/insights${queryString ? `?${queryString}` : ''}`;
+    
+    console.log('[fetchPerformanceInsights] Fetching page insights:', {
+      pageId,
+      from,
+      to,
+      url
+    });
+
+    const res = await fetch(url, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      
+      // Check for specific error types
+      if (res.status === 401) {
+        const error = new Error(errorData.details || errorData.error || "Authentication failed");
+        error.isAuthError = true;
+        throw error;
+      }
+      
+      if (res.status === 403) {
+        const error = new Error(errorData.details || errorData.error || "Permission denied");
+        error.isPermissionError = true;
+        throw error;
+      }
+      
+      throw new Error(errorData.details || errorData.error || `Failed to fetch performance insights: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    
+    // Return the data structure from the API
+    return data.data || data;
+  } catch (error) {
+    console.error("Error fetching performance insights:", error);
+    throw error;
+  }
+};
+
+// Fetch insights from backend
+const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignIds = [], adIds = [], allCampaigns = false, allAds = false, adAccountId = null }) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    // Build URL with date parameters
+    // Only add date parameters if explicitly provided
+    let url = `${API_BASE}/api/meta/insights?time_increment=1`;
+    
+    // Add from and to dates only if explicitly provided
+    if (from && to) {
+      url += `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+      console.log('[fetchDashboardData] Using date range:', { from, to });
+    } else {
+      // Don't add days parameter - let API use its default or no filter
+      // Only add days if explicitly provided (not defaulting)
+      console.log('[fetchDashboardData] No date range provided - API will use default or no filter');
+    }
+    
+    // Add ad account ID if provided
+    if (adAccountId) {
+      url += `&ad_account_id=${encodeURIComponent(adAccountId)}`;
+    }
+    
+    // Only add campaign filter if not all campaigns are selected
+    // allCampaigns flag indicates all campaigns are selected (or none selected = show all)
+    if (!allCampaigns && campaignIds.length > 0) {
+      // Support multiple campaign IDs - send comma-separated
+      const campaignIdStr = campaignIds.join(',');
+      url += `&campaign_id=${encodeURIComponent(campaignIdStr)}`;
+    }
+    
+    // Only add ad filter if not all ads are selected
+    // allAds flag indicates all ads are selected (or none selected = show all)
+    if (!allAds && adIds.length > 0) {
+      // Support multiple ad IDs - send comma-separated
+      const adIdStr = adIds.join(',');
+      url += `&ad_id=${encodeURIComponent(adIdStr)}`;
+    }
+
+    const res = await fetch(url, {
+      headers,
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error:", errorData);
+      const details = errorData.details || errorData.error || res.statusText || "Failed to fetch insights";
+      console.error("API error details:", details);
+      throw new Error(details);
+    }
+
+    let data = await res.json();
+
+    // Handle { data: [...] } structure from Meta API
+    if (data && !Array.isArray(data) && Array.isArray(data.data)) {
+      data = data.data;
+    }
+
+    if (!Array.isArray(data)) {
+      console.error("API returned non-array:", data);
+      return [];
+    }
+
+    // Log filtering parameters and data level for debugging
+    const hasAdId = adIds.length > 0;
+    const hasCampaignId = campaignIds.length > 0;
+    const sampleRecord = data[0];
+    const dataLevel = sampleRecord?.ad_id ? "ad-level" : "campaign-level";
+    
+    console.log('[fetchDashboardData] Filtering parameters:', {
+      adAccountId,
+      campaignIds,
+      adIds,
+      hasAdId,
+      hasCampaignId,
+      dateRange: { from, to }
+    });
+    
+    console.log('[fetchDashboardData] API response:', {
+      recordCount: data.length,
+      dataLevel,
+      sampleRecord: sampleRecord ? {
+        hasAdId: !!sampleRecord.ad_id,
+        hasAdName: !!sampleRecord.ad_name,
+        campaignId: sampleRecord.campaign_id,
+        impressions: sampleRecord.impressions,
+        clicks: sampleRecord.clicks
+      } : null
+    });
+
+    // Normalize data
+    return data.map((d) => {
+      const aggs = transformActions(d.actions || []);
+      const values = transformActions(d.action_values || []);
+      // "leads" metric might be under actions with type "lead" or "on_facebook_lead"
+      const leadCount = aggs['lead'] || aggs['on_facebook_lead'] || aggs['onsite_conversion.lead_grouped'] || 0;
+      
+      // Calculate conversions (purchase, complete_registration, etc.)
+      const conversions = aggs['purchase'] || aggs['complete_registration'] || aggs['offsite_conversion.fb_pixel_purchase'] || 0;
+      
+      // Calculate CTR
+      const impressions = num(d.impressions);
+      const clicks = num(d.clicks);
+      const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+      
+      // Calculate CPL
+      const spend = num(d.spend);
+      const cpl = leadCount > 0 ? spend / leadCount : 0;
+      
+      // Video metrics for Hook Rate and Hold Rate
+      // Use direct fields from Meta API if available (already percentages)
+      // Fallback to calculation from actions if direct fields not available
+      const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
+      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || 0;
+      const videoThruPlays = aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+      
+      // Hook Rate: Use Meta API direct field if available, otherwise calculate from actions
+      let hookRate = 0;
+      if (d.hook_rate !== undefined && d.hook_rate !== null && d.hook_rate !== '') {
+        // Meta API returns hook_rate as a percentage (already calculated)
+        hookRate = num(d.hook_rate);
+      } else {
+        // Fallback: calculate from video3sViews / impressions
+        hookRate = impressions > 0 ? (video3sViews / impressions) * 100 : 0;
+      }
+      
+      // Hold Rate: Use Meta API direct field if available, otherwise calculate from actions
+      let holdRate = 0;
+      if ((d.Hold_rate !== undefined && d.Hold_rate !== null && d.Hold_rate !== '') ||
+          (d.hold_rate !== undefined && d.hold_rate !== null && d.hold_rate !== '')) {
+        // Meta API returns Hold_rate or hold_rate as a percentage (already calculated)
+        holdRate = num(d.Hold_rate || d.hold_rate);
+      } else {
+        // Fallback: calculate from videoThruPlays / videoViews
+        holdRate = videoViews > 0 ? (videoThruPlays / videoViews) * 100 : 0;
+      }
+
+      return {
+        campaign_id: d.campaign_id,
+        campaign: d.campaign_name || "Unknown Campaign",
+        ad_id: d.ad_id || null,
+        ad_name: d.ad_name || "Unnamed Ad",
+        date: d.date_start || d.date,
+        spend: spend,
+        impressions: impressions,
+        clicks: clicks,
+        leads: leadCount,
+        conversions: conversions,
+        ctr: ctr,
+        cpl: cpl,
+        hookRate: hookRate,
+        holdRate: holdRate,
+        videoViews: videoViews,
+        video3sViews: video3sViews,
+        videoThruPlays: videoThruPlays,
+        actions: aggs,
+        action_values: values,
+        campaign_status: d.campaign_status || d.status || 'ACTIVE',
+        ad_status: d.ad_status || d.effective_status || 'ACTIVE',
+        lead_details: []
+      };
+    });
+  } catch (e) {
+    console.error("Failed to fetch dashboard data", e);
+    return [];
+  }
+};
+
+// Fetch ad accounts from Meta API
+const fetchAdAccounts = async () => {
+  try {
+    console.log('[fetchAdAccounts] ===== Starting Ad Accounts Fetch =====');
+    const token = getAuthToken();
+    console.log('[fetchAdAccounts] Token present:', !!token);
+    console.log('[fetchAdAccounts] Token length:', token ? token.length : 0);
+    
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+      console.log('[fetchAdAccounts] Authorization header added');
+    } else {
+      console.warn('[fetchAdAccounts] ⚠️ No token available - request may fail');
+    }
+
+    const url = `${API_BASE}/api/meta/ad-accounts`;
+    console.log(`[fetchAdAccounts] Fetching from URL: ${url}`);
+    console.log(`[fetchAdAccounts] Headers:`, { ...headers, Authorization: headers.Authorization ? 'Bearer ***' : 'none' });
+    
+    const res = await fetch(url, { headers });
+    
+    console.log('[fetchAdAccounts] Response received:', {
+      status: res.status,
+      statusText: res.statusText,
+      ok: res.ok,
+      headers: Object.fromEntries(res.headers.entries())
+    });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("[fetchAdAccounts] ❌ API error:", {
+        status: res.status,
+        statusText: res.statusText,
+        errorData,
+        fullError: errorData
+      });
+      console.error("[fetchAdAccounts] Possible reasons:");
+      console.error("[fetchAdAccounts] - API endpoint /api/meta/ad-accounts does not exist");
+      console.error("[fetchAdAccounts] - Access token invalid or expired");
+      console.error("[fetchAdAccounts] - Missing permissions (ads_read, business_management)");
+      return [];
+    }
+
+    const data = await res.json();
+    console.log(`[fetchAdAccounts] ===== Response Data =====`);
+    console.log(`[fetchAdAccounts] Raw data:`, data);
+    console.log(`[fetchAdAccounts] Data type:`, typeof data);
+    console.log(`[fetchAdAccounts] Is array:`, Array.isArray(data));
+    console.log(`[fetchAdAccounts] Has data property:`, !!data.data);
+    console.log(`[fetchAdAccounts] Data.data is array:`, Array.isArray(data.data));
+    
+    if (Array.isArray(data)) {
+      console.log(`[fetchAdAccounts] ✅ Returning ${data.length} ad accounts (direct array)`);
+      if (data.length > 0) {
+        console.log(`[fetchAdAccounts] First account:`, data[0]);
+        console.log(`[fetchAdAccounts] Account keys:`, Object.keys(data[0] || {}));
+      }
+      return data;
+    }
+    
+    // If response is wrapped in { data: [...] }, extract it
+    if (data && Array.isArray(data.data)) {
+      console.log(`[fetchAdAccounts] ✅ Found array in data.data, returning ${data.data.length} ad accounts`);
+      if (data.data.length > 0) {
+        console.log(`[fetchAdAccounts] First account:`, data.data[0]);
+        console.log(`[fetchAdAccounts] Account keys:`, Object.keys(data.data[0] || {}));
+      }
+      return data.data;
+    }
+    
+    console.warn("[fetchAdAccounts] ⚠️ Unexpected response format:", {
+      data,
+      dataType: typeof data,
+      keys: data ? Object.keys(data) : 'null/undefined'
+    });
+    console.warn("[fetchAdAccounts] Expected: array or { data: [...] }");
+    return [];
+  } catch (e) {
+    console.error("[fetchAdAccounts] ❌ Exception caught:", {
+      name: e.name,
+      message: e.message,
+      stack: e.stack,
+      fullError: e
+    });
+    return [];
+  } finally {
+    console.log('[fetchAdAccounts] ===== Finished Ad Accounts Fetch =====');
+  }
+}
+
+// Fetch business accounts from Meta API
+const fetchBusinessAccounts = async () => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    console.log(`[Frontend] Fetching business accounts from ${API_BASE}/api/meta/businesses`);
+    const res = await fetch(`${API_BASE}/api/meta/businesses`, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("[Frontend] API error fetching business accounts:", {
+        status: res.status,
+        statusText: res.statusText,
+        errorData
+      });
+      
+      // Handle permission errors gracefully
+      if (res.status === 403 || errorData.isPermissionError) {
+        console.warn("[Frontend] Permission error - business_management permission may be missing");
+        return [];
+      }
+      
+      return [];
+    }
+
+    const data = await res.json();
+    console.log(`[Frontend] Received business accounts response:`, {
+      hasBusinesses: !!data.businesses,
+      isArray: Array.isArray(data.businesses),
+      length: Array.isArray(data.businesses) ? data.businesses.length : 'N/A',
+      sample: Array.isArray(data.businesses) && data.businesses.length > 0 ? data.businesses[0] : null
+    });
+    
+    // API returns { businesses: [...] }
+    if (data && Array.isArray(data.businesses)) {
+      console.log(`[Frontend] Returning ${data.businesses.length} business accounts`);
+      return data.businesses;
+    }
+    
+    console.warn("[Frontend] Unexpected response format for business accounts:", data);
+    return [];
+  } catch (e) {
+    console.error("[Frontend] Error fetching business accounts:", e);
+    return [];
+  }
+}
+
+const fetchCampaigns = async (adAccountId = null) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    let url = `${API_BASE}/api/meta/active-campaigns`;
+    if (adAccountId) {
+      url += `?ad_account_id=${encodeURIComponent(adAccountId)}`;
+    }
+    
+    console.log('[fetchCampaigns] Fetching campaigns:', {
+      adAccountId: adAccountId || 'All Ad Accounts (using default)',
+      url
+    });
+
+    const res = await fetch(url, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error('[fetchCampaigns] API error:', {
+        status: res.status,
+        error: errorData
+      });
+      return [];
+    }
+    
+    const data = await res.json();
+    console.log('[fetchCampaigns] Response:', {
+      isArray: Array.isArray(data),
+      hasData: !!data.data,
+      count: Array.isArray(data) ? data.length : (data.data ? data.data.length : 0)
+    });
+    
+    // Return full objects or empty array
+    if (Array.isArray(data)) {
+      return data; // Return full campaign objects
+    } else if (data && Array.isArray(data.data)) {
+      // Handle case where it might be wrapped in { data: [...] }
+      return data.data;
+    }
+    return [];
+  } catch (e) {
+    console.error('[fetchCampaigns] Error:', e);
+    return [];
+  }
+}
+
+const fetchProjects = async () => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    // TODO: Replace with actual API endpoint when available
+    // For now, using a placeholder endpoint that may not exist yet
+    const res = await fetch(`${API_BASE}/api/meta/projects`, { headers });
+    
+    // If endpoint doesn't exist, return empty array silently
+    if (!res.ok) {
+      if (res.status === 404) {
+        // Endpoint doesn't exist yet - this is expected, return empty array
+        return [];
+      }
+      // For other errors, try to parse but don't throw
+      try {
+        await res.json();
+      } catch {
+        // Ignore JSON parse errors
+      }
+      return [];
+    }
+    
+    const data = await res.json();
+    
+    // Return full objects or empty array
+    if (Array.isArray(data)) {
+      return data;
+    } else if (data && Array.isArray(data.data)) {
+      return data.data;
+    }
+    return [];
+  } catch (e) {
+    // Silently fail if projects endpoint doesn't exist yet
+    // Don't log to console to avoid cluttering error logs
+    return [];
+  }
+}
+
+const fetchAds = async (campaignId) => {
+  try {
+    if (!campaignId || campaignId.trim() === "") {
+      return [];
+    }
+
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE}/api/meta/ads?campaign_id=${campaignId}`, { headers });
+    const data = await res.json();
+    console.log("fetchAds_Tamil", data);
+    // Return full objects or empty array
+    if (Array.isArray(data)) {
+      return data;
+    } else if (data && Array.isArray(data.data)) {
+      return data.data;
+    }
+    return [];
+  } catch (e) {
+    console.error("Error fetching ads:", e);
+    return [];
+  }
+}
+
+// Fetch pages from Meta API
+const fetchPages = async () => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE}/api/meta/pages`, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error fetching pages:", errorData);
+      return [];
+    }
+
+    const data = await res.json();
+    return data.data || [];
+  } catch (e) {
+    console.error("Error fetching pages:", e);
+    return [];
+  }
+}
+
+// Fetch forms for a page from Meta API
+const fetchForms = async (pageId) => {
+  try {
+    if (!pageId) return [];
+    
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE}/api/meta/pages/${pageId}/forms`, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error fetching forms:", errorData);
+      return [];
+    }
+
+    const data = await res.json();
+    return data.data || [];
+  } catch (e) {
+    console.error("Error fetching forms:", e);
+    return [];
+  }
+}
+
+// Fetch forms for a specific ad from Meta API
+const fetchDashboardForms = async ({ adId, from, to, pageId }) => {
+  console.log("fetchDashboardForms", adId, from, to, pageId);
+  try {
+    if (!adId) {
+      return [];
+    }
+    
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    let url = `${API_BASE}/api/meta/forms`;
+    const params = new URLSearchParams();
+    params.append('adId', adId);
+    
+    if (from) {
+      params.append('start', from);
+    }
+    if (to) {
+      params.append('end', to);
+    }
+    if (pageId) {
+      params.append('pageId', pageId);
+    }
+    
+    if (params.toString()) {
+      url += `?${params.toString()}`;
+    }
+
+    const res = await fetch(url, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error fetching dashboard forms:", errorData);
+      
+      // Check for permission errors
+      if (res.status === 403 || errorData.isPermissionError) {
+        const permissionError = new Error(errorData.details || errorData.error || "Permission denied");
+        permissionError.isPermissionError = true;
+        throw permissionError;
+      }
+      
+      // Check for authentication errors
+      if (res.status === 401 || errorData.isAuthError) {
+        const authError = new Error(errorData.details || errorData.error || "Authentication failed");
+        authError.isAuthError = true;
+        throw authError;
+      }
+      
+      return [];
+    }
+
+    const data = await res.json();
+    return data.data || [];
+  } catch (e) {
+    console.error("Error fetching dashboard forms:", e);
+    // Re-throw permission/auth errors so they can be handled by the component
+    if (e.isPermissionError || e.isAuthError) {
+      throw e;
+    }
+    return [];
+  }
+}
+
+// Fetch page insights (followers, reach) from Meta API
+const fetchPageInsights = async ({ pageId, from, to }) => {
+  try {
+    if (!pageId) {
+      return { followers: [], reach: [], current_followers: 0, current_reach: 0 };
+    }
+    
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    let url = `${API_BASE}/api/meta/pages/${pageId}/insights`;
+    const params = new URLSearchParams();
+    
+    if (from) {
+      params.append('from', from);
+    }
+    if (to) {
+      params.append('to', to);
+    }
+    
+    if (params.toString()) {
+      url += `?${params.toString()}`;
+    }
+
+    const res = await fetch(url, { headers });
+    
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error fetching page insights:", errorData);
+      
+      // Check for permission errors
+      if (res.status === 403 || errorData.isPermissionError) {
+        const permissionError = new Error(errorData.details || errorData.error || "Permission denied: pages_read_engagement permission required");
+        permissionError.isPermissionError = true;
+        throw permissionError;
+      }
+      
+      // Check for authentication errors
+      if (res.status === 401 || errorData.isAuthError) {
+        const authError = new Error(errorData.details || errorData.error || "Authentication failed: Please check your Meta Access Token");
+        authError.isAuthError = true;
+        throw authError;
+      }
+      
+      return { followers: [], reach: [], current_followers: 0, current_reach: 0 };
+    }
+
+    const data = await res.json();
+    console.log('[fetchPageInsights] API response:', data);
+    const insightsData = data.data || { followers: [], reach: [], current_followers: 0, current_reach: 0 };
+    console.log('[fetchPageInsights] Processed insights data:', {
+      total_follows: insightsData.total_follows,
+      total_unfollows: insightsData.total_unfollows,
+      total_reached: insightsData.total_reached,
+      current_followers: insightsData.current_followers,
+      current_reach: insightsData.current_reach
+    });
+    return insightsData;
+  } catch (e) {
+    console.error("Error fetching page insights:", e);
+    // Re-throw permission/auth errors so they can be handled by the component
+    if (e.isPermissionError || e.isAuthError) {
+      throw e;
+    }
+    return { followers: [], reach: [], current_followers: 0, current_reach: 0 };
+  }
+}
+    
+// Fetch leads from Meta API - uses enhanced /api/meta/leads endpoint
+const fetchLeads = async ({ formId, from, to, adAccountId, campaignId, adId, pageId }) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+  
+    // Use the enhanced /api/meta/leads endpoint
+    let url = `${API_BASE}/api/meta/leads`;
+    const params = new URLSearchParams();
+    
+    // Filter parameters
+    if (formId) {
+      params.append('formId', formId);
+    }
+    if (adId) {
+      params.append('adId', adId);
+    }
+    if (campaignId) {
+      params.append('campaignId', campaignId);
+    }
+    if (pageId) {
+      params.append('pageId', pageId);
+    }
+    
+    // Date range parameters
+    if (from) {
+      params.append('start', from);
+    }
+    if (to) {
+      params.append('end', to);
+    }
+    
+    // Default limit: fetch up to 1000 leads
+    params.append('limit', '1000');
+    
+    if (params.toString()) {
+      url += `?${params.toString()}`;
+    }
+
+    const res = await fetch(url, { headers });
+    console.log(`[Leads API] Response:`, res);
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error("API error fetching leads:", {
+        status: res.status,
+        statusText: res.statusText,
+        errorData
+      });
+      console.log("errorData", errorData);
+      // Check for permission errors (403 status or explicit permission error flag)
+      if (res.status === 403 || errorData.isPermissionError) {
+        const errorMessage = errorData.details || errorData.error || errorData.message || "Permission denied: leads_retrieval permission required";
+        const permissionError = new Error(errorMessage);
+        permissionError.isPermissionError = true;
+        permissionError.errorCode = errorData.errorCode;
+        permissionError.instruction = errorData.instruction;
+        throw permissionError;
+      }
+      
+      // Check for authentication errors (401)
+      if (res.status === 401 || errorData.isAuthError) {
+        const authError = new Error(errorData.details || errorData.error || "Authentication failed: Please check your Meta Access Token");
+        authError.isAuthError = true;
+        throw authError;
+      }
+      
+      // For other errors, return empty structure but log the error
+      if (errorData.message) {
+        console.warn("Leads API warning:", errorData.message);
+      }
+      return { data: [], meta: null };
+    }
+
+    const data = await res.json();
+    console.log(`[Leads API] Received leads response:`, data);
+    
+    // Enhanced endpoint returns { data: [...], meta: {...} }
+    const result = {
+      data: data.data || [],
+      meta: data.meta || null
+    };
+    
+    console.log(`[fetchLeads] Final leads details:`, {
+      totalLeads: result.data.length,
+      leads: result.data,
+      meta: result.meta,
+      sampleLead: result.data.length > 0 ? result.data[0] : null
+    });
+    
+    return result;
+  } catch (e) {
+    console.error("Error fetching leads:", e);
+    // Re-throw permission errors so they can be handled by the component
+    if (e.message && (e.message.includes('permission') || e.message.includes('leads_retrieval'))) {
+      throw e;
+    }
+    return { data: [], meta: null };
+  }
+}
+
+const aggregateByDate = (rows) => {
+  const map = new Map();
+  rows.forEach((r) => {
+    const key = r.date;
+    const cur = map.get(key) || { date: key, leads: 0, spend: 0, conversions: 0, actions: {} };
+    cur.leads += r.leads || 0;
+    cur.spend += r.spend || 0;
+    cur.conversions += r.conversions || 0;
+    Object.entries(r.actions || {}).forEach(([k, v]) => {
+      cur.actions[k] = (cur.actions[k] || 0) + v;
+    });
+    map.set(key, cur);
+  });
+  // Calculate CPL for each date
+  return Array.from(map.values())
+    .map(item => ({
+      ...item,
+      cpl: item.leads > 0 ? item.spend / item.leads : 0
+    }))
+    .sort((a, b) => (a.date > b.date ? 1 : -1));
+};
+
+export default function AdsDashboardBootstrap() {
+  const [days, setDays] = useState(30);
+  const [adAccounts, setAdAccounts] = useState([]);
+  const [adAccountsLoading, setAdAccountsLoading] = useState(true);
+  const [selectedAdAccount, setSelectedAdAccount] = useState(null);
+  const [campaigns, setCampaigns] = useState([]);
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [ads, setAds] = useState([]);
+  const [data, setData] = useState([]);
+  const [allAdsData, setAllAdsData] = useState([]); // Store all unfiltered data for ad breakdown
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null); // Toast notification state
+
+  // Auto-dismiss toast after 5 seconds
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => {
+        setToast(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+  const [projects, setProjects] = useState([]);
+  const [selectedProjects, setSelectedProjects] = useState([]);
+  const [selectedCampaigns, setSelectedCampaigns] = useState([]);
+  const [selectedAds, setSelectedAds] = useState([]);
+  const [selectedPlatforms, setSelectedPlatforms] = useState([]);
+  const [selectedPlatform, setSelectedPlatform] = useState(null); // Single platform for main dashboard filter
+  const [selectedL1Revenue, setSelectedL1Revenue] = useState([]);
+  const [selectedL2Revenue, setSelectedL2Revenue] = useState([]);
+  const [selectedAction, setSelectedAction] = useState("");
+  const [page, setPage] = useState(1);
+  
+  // Initialize dateFilters with default last 7 days instead of empty
+  // This ensures dates are always available when component loads
+  // Match Meta dashboard behavior: Last 7 complete days, excluding today
+  const getDefaultDates = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday (exclude today, matching Meta)
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6); // 7 days before yesterday (7 complete days)
+    return {
+      startDate: startDate.toISOString().slice(0, 10), // YYYY-MM-DD format
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  };
+  
+  const [dateFilters, setDateFilters] = useState(() => getDefaultDates());
+  const [selectedDateRange, setSelectedDateRange] = useState('last_7_days');
+  const [showDateRangeFilter, setShowDateRangeFilter] = useState(false);
+  const [dateRangeFilterValue, setDateRangeFilterValue] = useState(null);
+  const [showAdBreakdown, setShowAdBreakdown] = useState(true);
+  const [currentTheme, setCurrentTheme] = useState(() => {
+    return document.documentElement.getAttribute("data-theme") || getCurrentTheme() || "light";
+  });
+  const [leads, setLeads] = useState([]);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadsError, setLeadsError] = useState(null);
+  const [pages, setPages] = useState([]);
+  const [forms, setForms] = useState([]);
+  const [selectedPage, setSelectedPage] = useState(null);
+  const [selectedForm, setSelectedForm] = useState(null);
+  const [selectedPlatformForLeads, setSelectedPlatformForLeads] = useState(null); // Platform filter for Total Leads section
+  
+  const [leadsContext, setLeadsContext] = useState(null);
+  const [leadsTimeRange, setLeadsTimeRange] = useState(null); // Time range filter for leads section (null = no filter)
+  const [showLeadsDateRangeFilter, setShowLeadsDateRangeFilter] = useState(false);
+  const [leadsDateRangeFilterValue, setLeadsDateRangeFilterValue] = useState(null);
+  const [downloadingLeads, setDownloadingLeads] = useState(false);
+  const perPage = 10;
+
+  // Pre-load state for leads optimization
+  const [preloadedLeads, setPreloadedLeads] = useState([]);
+  const [preloadedForms, setPreloadedForms] = useState([]);
+  const [preloadedPageId, setPreloadedPageId] = useState(null);
+  const [preloadedDateRange, setPreloadedDateRange] = useState({ start: null, end: null });
+  const [preloadingLeads, setPreloadingLeads] = useState(false);
+
+  // Sorting state for Campaign Performance table
+  const [campaignSortField, setCampaignSortField] = useState(null);
+  const [campaignSortDirection, setCampaignSortDirection] = useState('asc');
+
+  // Sorting state for Ad Performance Breakdown table
+  const [adSortField, setAdSortField] = useState(null);
+  const [adSortDirection, setAdSortDirection] = useState('asc');
+
+  // Content Marketing Dashboard State
+  // Initialize with default last 7 days (matching Meta dashboard behavior)
+  const getContentDefaultDates = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday (exclude today)
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6); // 7 days before yesterday (7 complete days)
+    return {
+      startDate: startDate.toISOString().slice(0, 10), // YYYY-MM-DD format
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  };
+  
+  const [contentFilters, setContentFilters] = useState(() => getContentDefaultDates());
+  const [contentDateRange, setContentDateRange] = useState('last_7_days');
+  const [contentPlatform, setContentPlatform] = useState('');
+  const [selectedSource, setSelectedSource] = useState([]);
+  const [showContentDateRangeFilter, setShowContentDateRangeFilter] = useState(false);
+  const [contentDateRangeFilterValue, setContentDateRangeFilterValue] = useState(null);
+  
+  // Business Accounts State for Content Marketing Dashboard
+  const [businessAccounts, setBusinessAccounts] = useState([]);
+  const [selectedBusinessAccounts, setSelectedBusinessAccounts] = useState([]);
+  
+  // Page Insights State
+  const [pageInsightsLoading, setPageInsightsLoading] = useState(false);
+  const [pageInsightsData, setPageInsightsData] = useState(null);
+  const [pageInsightsError, setPageInsightsError] = useState(null);
+  
+  // Content Marketing Page Insights State
+  const [contentPageInsightsLoading, setContentPageInsightsLoading] = useState(false);
+  const [contentPageInsightsData, setContentPageInsightsData] = useState(null);
+  const [contentPageInsightsError, setContentPageInsightsError] = useState(null);
+  const [performanceInsightsLoading, setPerformanceInsightsLoading] = useState(false);
+  const [performanceInsightsData, setPerformanceInsightsData] = useState(null);
+  const [performanceInsightsError, setPerformanceInsightsError] = useState(null);
+  
+  // Chart-specific Time Range Filter State for "Account Reach by Followers Count"
+  const [chartTimeRange, setChartTimeRange] = useState(() => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6); // 7 days before yesterday
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  });
+  const [chartTimeRangeValue, setChartTimeRangeValue] = useState('last_7_days');
+  const [showChartTimeRangeFilter, setShowChartTimeRangeFilter] = useState(false);
+  const [chartTimeRangeFilterValue, setChartTimeRangeFilterValue] = useState(null);
+  
+  // Google Sheets metrics state
+  const [sheetsMetrics, setSheetsMetrics] = useState({
+    onlineConversion: 0,
+    offlineConversion: 0,
+    l1Revenue: 0,
+    l2Revenue: 0,
+    totalRevenue: 0,
+    organicLeads: 0,
+    organicRevenue: 0,
+    loading: false,
+    error: null
+  });
+
+  // Content Marketing revenue state (separate from main dashboard)
+  const [contentMarketingRevenue, setContentMarketingRevenue] = useState({
+    organicLeads: 0,
+    organicConversion: 0,
+    l1Revenue: 0,
+    l2Revenue: 0,
+    totalRevenue: 0,
+    loading: false,
+    error: null
+  });
+
+  const toggleTheme = () => {
+    const newTheme = currentTheme === "light" ? "dark" : "light";
+    setTheme(newTheme);
+    setCurrentTheme(newTheme);
+  };
+
+  const load = async () => {
+    setLoading(true);
+    setCampaignsLoading(true);
+    setError(null);
+
+    try {
+      console.log('[Dashboard] Loading data with adAccount:', selectedAdAccount || 'All Ad Accounts');
+      
+      // First, fetch campaigns to determine if all are selected
+      const [campData, projectsData] = await Promise.all([
+        fetchCampaigns(selectedAdAccount),
+        fetchProjects()
+      ]);
+
+      // The active-campaigns API only returns active campaigns, so we can use the list directly
+      const activeCampaignsList = campData || [];
+      const activeCampaignIds = new Set(activeCampaignsList.map(c => c.id));
+
+      // Update campaigns state
+      if (activeCampaignsList.length > 0) {
+        setCampaigns(activeCampaignsList);
+      } else {
+        setCampaigns([]);
+      }
+
+      // Reset selected campaigns if they don't exist in the new list
+      // This handles the case when ad account changes and old campaign selections are invalid
+      if (selectedCampaigns.length > 0 && activeCampaignsList.length > 0) {
+        const validCampaigns = selectedCampaigns.filter(cid => 
+          activeCampaignsList.some(c => c.id === cid)
+        );
+        if (validCampaigns.length !== selectedCampaigns.length) {
+          console.log('[Dashboard] Some selected campaigns are not valid for this ad account, resetting');
+          setSelectedCampaigns(validCampaigns.length > 0 ? validCampaigns : []);
+        }
+      } else if (selectedCampaigns.length > 0 && activeCampaignsList.length === 0) {
+        // No campaigns available for this account, clear selections
+        setSelectedCampaigns([]);
+      }
+
+      // Now check if all campaigns/ads are selected (after campaigns are loaded)
+      const allCampaignsSelected = selectedCampaigns.length === 0 || 
+        (activeCampaignsList.length > 0 && selectedCampaigns.length === activeCampaignsList.length);
+      const allAdsSelected = selectedAds.length === 0 || 
+        (ads.length > 0 && selectedAds.length === ads.length);
+      
+      console.log('[Dashboard] Loading with filters:', {
+        adAccount: selectedAdAccount || 'All',
+        selectedCampaigns: selectedCampaigns.length,
+        selectedAds: selectedAds.length,
+        allCampaigns: allCampaignsSelected,
+        allAds: allAdsSelected,
+        totalCampaigns: activeCampaignsList.length
+      });
+
+      // Fetch dashboard data with proper flags and date range
+      // This includes ad filter for main data display
+      const rows = await fetchDashboardData({ 
+        days, 
+        from: dateFilters.startDate || null,
+        to: dateFilters.endDate || null,
+        campaignIds: selectedCampaigns, 
+        adIds: selectedAds,
+        allCampaigns: allCampaignsSelected,
+        allAds: allAdsSelected,
+        adAccountId: selectedAdAccount || null
+      });
+
+      // Fetch ALL ads data separately for Ad Performance Breakdown table
+      // This ignores the "Ad Name" filter so the table always shows all ads
+      const allAdsRows = await fetchDashboardData({ 
+        days, 
+        from: dateFilters.startDate || null,
+        to: dateFilters.endDate || null,
+        campaignIds: selectedCampaigns, 
+        adIds: [], // Don't filter by ads - fetch all ads
+        allCampaigns: allCampaignsSelected,
+        allAds: true, // Force all ads for the breakdown table 
+        adAccountId: selectedAdAccount || null
+      });
+
+      console.log("Active Campaign IDs:", Array.from(activeCampaignIds));
+      console.log("Fetched Rows Count:", rows.length);
+      console.log("All Ads Rows Count (for breakdown table):", allAdsRows.length);
+      console.log("All Campaigns Selected:", allCampaignsSelected);
+
+      // Only filter by active campaigns if specific campaigns are selected
+      // If all campaigns are selected, show all data without filtering
+      let filteredData = rows;
+      if (!allCampaignsSelected && selectedCampaigns.length > 0) {
+        // Filter rows to only include those from selected campaigns (which should be active)
+        filteredData = rows.filter(r => {
+          const isSelected = selectedCampaigns.includes(r.campaign_id);
+          return isSelected;
+        });
+      } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
+        // If no campaigns selected but not "all", filter by active campaigns
+        filteredData = rows.filter(r => {
+          const isActive = activeCampaignIds.has(r.campaign_id);
+          return isActive;
+        });
+      }
+      // If allCampaignsSelected is true, filteredData = rows (show all)
+
+      // Apply the same campaign filtering to allAdsRows for consistency
+      // This ensures the breakdown table shows all ads from the selected campaigns
+      let filteredAllAdsData = allAdsRows;
+      if (!allCampaignsSelected && selectedCampaigns.length > 0) {
+        filteredAllAdsData = allAdsRows.filter(r => {
+          const isSelected = selectedCampaigns.includes(r.campaign_id);
+          return isSelected;
+        });
+      } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
+        filteredAllAdsData = allAdsRows.filter(r => {
+          const isActive = activeCampaignIds.has(r.campaign_id);
+          return isActive;
+        });
+      }
+      // If allCampaignsSelected is true, filteredAllAdsData = allAdsRows (show all)
+
+      console.log("Filtered Data Count:", filteredData.length);
+      console.log("Filtered All Ads Data Count:", filteredAllAdsData.length);
+
+      setData(filteredData);
+      // Store all ads data (without ad filter) for ad breakdown table
+      // This ensures the table always shows all ads regardless of "Ad Name" filter
+      setAllAdsData(filteredAllAdsData);
+
+      if (filteredData.length === 0) {
+        // If we have rows but they were all filtered out
+        if (rows.length > 0 && !allCampaignsSelected) {
+          setToast({
+            type: 'warning',
+            title: 'Warning',
+            message: 'No data found for selected campaigns.'
+          });
+        } else if (rows.length === 0) {
+          setToast({
+            type: 'warning',
+            title: 'Warning',
+            message: 'No data available. Please configure Meta credentials in Settings.',
+            link: '/meta-settings',
+            linkText: 'Go to Meta Settings'
+          });
+        }
+      } else {
+        setError(null); // Clear error if we have data
+        setToast(null); // Clear toast if we have data
+      }
+
+      setPage(1);
+    } catch (e) {
+      console.error(e);
+      const errorMessage = e.message || "Failed to load data. Please check your Meta credentials.";
+      setToast({
+        type: 'error',
+        title: 'Error',
+        message: errorMessage
+      });
+      setCampaigns([]);
+    } finally {
+      setCampaignsLoading(false);
+      setLoading(false);
+    }
+  };
+
+  // Load ad accounts on mount
+  useEffect(() => {
+    const loadAdAccounts = async () => {
+      console.log('[Dashboard] ===== Loading Ad Accounts =====');
+      console.log('[Dashboard] API_BASE:', API_BASE);
+      console.log('[Dashboard] Starting fetchAdAccounts...');
+      
+      try {
+        setAdAccountsLoading(true);
+        const accountsData = await fetchAdAccounts();
+        
+        console.log('[Dashboard] ===== Ad Accounts Response =====');
+        console.log('[Dashboard] Raw response:', accountsData);
+        console.log('[Dashboard] Response type:', typeof accountsData);
+        console.log('[Dashboard] Is array:', Array.isArray(accountsData));
+        console.log('[Dashboard] Length:', Array.isArray(accountsData) ? accountsData.length : 'N/A');
+        
+        if (Array.isArray(accountsData) && accountsData.length > 0) {
+          console.log('[Dashboard] Sample account:', accountsData[0]);
+          console.log('[Dashboard] Account structure:', {
+            keys: Object.keys(accountsData[0] || {}),
+            account_id: accountsData[0]?.account_id,
+            account_name: accountsData[0]?.account_name
+          });
+        }
+        
+        setAdAccounts(accountsData || []);
+        
+        if (accountsData && accountsData.length > 0) {
+          console.log(`[Dashboard] ✅ Successfully loaded ${accountsData.length} ad accounts`);
+        } else {
+          console.warn('[Dashboard] ⚠️ No ad accounts loaded - check API response');
+          console.warn('[Dashboard] This could mean:');
+          console.warn('[Dashboard] 1. API returned empty array');
+          console.warn('[Dashboard] 2. API endpoint does not exist');
+          console.warn('[Dashboard] 3. Access token missing or invalid');
+        }
+      } catch (error) {
+        console.error('[Dashboard] ❌ Error in loadAdAccounts:', error);
+        setAdAccounts([]);
+      } finally {
+        setAdAccountsLoading(false);
+        console.log('[Dashboard] ===== Finished Loading Ad Accounts =====');
+      }
+    };
+    loadAdAccounts();
+  }, []);
+
+  // Load pages on mount
+  useEffect(() => {
+    const loadPages = async () => {
+      const pagesData = await fetchPages();
+      setPages(pagesData);
+    };
+    loadPages();
+  }, []);
+
+
+  // Pre-load leads when page + date range available
+  useEffect(() => {
+    const preloadLeadsForPage = async () => {
+      // Only pre-load if:
+      // 1. Page is selected
+      // 2. Date range is available
+      // 3. Not already loading
+      // 4. Not already loaded for this page + date range
+      
+      if (!selectedPage || !dateFilters.startDate || !dateFilters.endDate || preloadingLeads) {
+        return;
+      }
+      
+      // Check if already pre-loaded for this page + date range
+      if (preloadedPageId === selectedPage && 
+          preloadedDateRange.start === dateFilters.startDate &&
+          preloadedDateRange.end === dateFilters.endDate &&
+          preloadedLeads.length > 0) {
+        console.log('[Pre-load] Already loaded for this page + date range');
+        return;
+      }
+      
+      setPreloadingLeads(true);
+      try {
+        const token = getAuthToken();
+        const headers = { "Content-Type": "application/json" };
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+        
+        const url = `${API_BASE}/api/meta/leads/preload?pageId=${selectedPage}&start=${dateFilters.startDate}&end=${dateFilters.endDate}`;
+        const response = await fetch(url, { headers });
+        
+        if (response.ok) {
+          const data = await response.json();
+          setPreloadedLeads(data.leads || []);
+          setPreloadedForms(data.forms || []);
+          setPreloadedPageId(selectedPage);
+          setPreloadedDateRange({
+            start: dateFilters.startDate,
+            end: dateFilters.endDate
+          });
+          console.log(`[Pre-load] Loaded ${data.leads?.length || 0} leads, ${data.forms?.length || 0} forms`);
+        } else {
+          console.warn('[Pre-load] Failed to pre-load leads:', response.statusText);
+        }
+      } catch (error) {
+        console.error('[Pre-load] Error pre-loading leads:', error);
+      } finally {
+        setPreloadingLeads(false);
+      }
+    };
+    
+    preloadLeadsForPage();
+  }, [selectedPage, dateFilters.startDate, dateFilters.endDate]);
+
+  // Clear pre-loaded data when page or date range changes significantly
+  useEffect(() => {
+    if (preloadedPageId && 
+        (preloadedPageId !== selectedPage || 
+         preloadedDateRange.start !== dateFilters.startDate ||
+         preloadedDateRange.end !== dateFilters.endDate)) {
+      console.log('[Pre-load] Clearing pre-loaded data - page or date range changed');
+      setPreloadedLeads([]);
+      setPreloadedForms([]);
+      setPreloadedPageId(null);
+      setPreloadedDateRange({ start: null, end: null });
+    }
+  }, [selectedPage, dateFilters.startDate, dateFilters.endDate]);
+
+  // Auto-trigger leads display when pre-loaded leads become available
+  useEffect(() => {
+    if (preloadedLeads.length > 0 &&
+        selectedPage &&
+        preloadedPageId === selectedPage &&
+        preloadedDateRange.start === dateFilters.startDate &&
+        preloadedDateRange.end === dateFilters.endDate) {
+      console.log('[Auto-trigger] Pre-loaded leads available, automatically loading leads table');
+      loadLeads();
+    }
+  }, [preloadedLeads.length, selectedPage, dateFilters.startDate, dateFilters.endDate, preloadedPageId, preloadedDateRange]);
+
+
+  // Load leads from database (filtered by campaign and ad)
+  const loadLeads = async () => {
+    setLeadsLoading(true);
+    setLeadsError(null); // Clear previous errors
+    try {
+      // Use main dashboard date filters
+      const from = dateFilters.startDate || null;
+      const to = dateFilters.endDate || null;
+      
+    // Extract filter IDs - support multiple selections
+    const campaignIds = selectedCampaigns.length > 0 ? selectedCampaigns.map(String) : [];
+    const adIds = selectedAds.length > 0 ? selectedAds.map(String) : [];
+      
+      console.log("Loading leads from database with filters:", {
+        campaignIds,
+        adIds,
+        from,
+        to
+      });
+      
+      // Build query parameters
+      const params = new URLSearchParams();
+    if (campaignIds.length > 0) params.append('campaignId', campaignIds.join(','));
+    if (adIds.length > 0) params.append('adId', adIds.join(','));
+      if (from) params.append('startDate', from);
+      if (to) params.append('endDate', to);
+      
+      // Fetch from database endpoint
+      const token = getAuthToken();
+      const headers = { "Content-Type": "application/json" };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+      
+      const url = `${API_BASE}/api/meta/leads/db?${params.toString()}`;
+      const response = await fetch(url, { headers });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.details || errorData.error || `HTTP ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const leadsData = data.data || [];
+      
+      console.log("Fetched leads from database:", {
+        leadsCount: leadsData.length,
+        filters: { campaignIds, adIds, from, to }
+      });
+      
+      // Format leads for display (ensure all required fields are present)
+      const formattedLeads = leadsData.map(lead => ({
+        ...lead,
+        Name: lead.Name || lead.name || 'N/A',
+        Phone: lead.Phone || lead.phone || 'N/A',
+        Date: lead.Date || lead.DateChar || (lead.created_time ? lead.created_time.split('T')[0] : ''),
+        Time: lead.Time || lead.TimeUtc || lead.created_time || '',
+        TimeUtc: lead.TimeUtc || lead.created_time || '',
+        DateChar: lead.DateChar || (lead.created_time ? lead.created_time.split('T')[0] : ''),
+        Street: lead.Street || lead.street || lead.address || 'N/A',
+        City: lead.City || lead.city || 'N/A',
+        page_name: lead.page_name || 'N/A',
+        campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
+        ad_name: lead.ad_name || 'N/A',
+        form_name: lead.form_name || 'N/A'
+      }));
+      
+      setLeads(formattedLeads);
+      setLeadsContext(null);
+      setPage(1);
+      setLeadsError(null); // Clear error on success
+    } catch (e) {
+      console.error("Error loading leads from database:", e);
+      const errorMessage = e.message || "Failed to fetch leads from database";
+      
+      // Set error state
+      setLeadsError({
+        type: 'error',
+        message: "Failed to fetch leads from database",
+        details: errorMessage
+      });
+      setLeads([]);
+      setLeadsContext(null);
+    } finally {
+      setLeadsLoading(false);
+    }
+  };
+
+
+  // Auto-load leads when pre-loaded data is available OR when ad is selected
+  useEffect(() => {
+    const hasPreloadedData = 
+      preloadedLeads.length > 0 &&
+      selectedPage &&
+      preloadedPageId === selectedPage &&
+      preloadedDateRange.start === dateFilters.startDate &&
+      preloadedDateRange.end === dateFilters.endDate;
+    
+    // Check if we have valid date range
+    const hasValidDateRange = dateFilters.startDate && dateFilters.endDate;
+    
+    // Trigger loadLeads if:
+    // 1. Pre-loaded data is available (requires selectedPage), OR
+    // 2. An ad is selected (for Total Leads API call - doesn't require selectedPage)
+    const shouldLoadLeads = 
+      hasValidDateRange && (
+        (hasPreloadedData && selectedPage) ||
+        (selectedAds.length > 0 && selectedAds.length <= 1) // Single ad selected - Total Leads API
+      );
+    
+    if (shouldLoadLeads) {
+      if (hasPreloadedData) {
+        console.log('[Auto-load] Pre-loaded data available, triggering loadLeads');
+      } else if (selectedAds.length > 0) {
+        console.log('[Auto-load] Ad selected, triggering loadLeads for Total Leads API');
+      }
+      loadLeads();
+    } else if (!hasPreloadedData && !(selectedAds.length > 0 && selectedAds.length <= 1)) {
+      // Clear leads only if no ad selected AND no pre-loaded data
+      setLeads([]);
+    }
+  }, [selectedPage, dateFilters.startDate, dateFilters.endDate, selectedAds, selectedCampaigns, preloadedLeads, preloadedPageId, preloadedDateRange]);
+
+  // Load ads when campaigns change
+  useEffect(() => {
+    const loadAds = async () => {
+      // Wait for campaigns to be loaded first
+      if (campaigns.length === 0 && selectedCampaigns.length > 0) {
+        // If campaigns haven't loaded yet but we have selections, wait
+        return;
+      }
+
+      // Check if all campaigns are selected
+      const allCampaignsSelected = selectedCampaigns.length === 0 || 
+        (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
+      
+      console.log("Loading ads - allCampaignsSelected:", allCampaignsSelected, "selectedCampaigns:", selectedCampaigns.length, "totalCampaigns:", campaigns.length);
+      
+      if (allCampaignsSelected) {
+        // If all campaigns selected, fetch all ads from ad account
+        try {
+          const token = getAuthToken();
+          const headers = { "Content-Type": "application/json" };
+          if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
+          }
+          
+          console.log("Fetching all ads from ad account...");
+          const res = await fetch(`${API_BASE}/api/meta/ads?all=true`, { headers });
+          if (res.ok) {
+            const data = await res.json();
+            const allAdsData = data.data || [];
+            console.log("Fetched all ads:", allAdsData.length);
+            setAds(allAdsData);
+          } else {
+            console.warn("Failed to fetch all ads, trying fallback...");
+            // Fallback to fetching ads for each campaign
+            if (campaigns.length > 0) {
+              const allAds = [];
+              for (const campaign of campaigns) {
+                const adsData = await fetchAds(campaign.id);
+                allAds.push(...adsData);
+              }
+              // Remove duplicates based on ad id
+              const uniqueAds = Array.from(
+                new Map(allAds.map(ad => [ad.id, ad])).values()
+              );
+              // Sort by name
+              uniqueAds.sort((a, b) => {
+                const nameA = (a.name || '').toLowerCase();
+                const nameB = (b.name || '').toLowerCase();
+                return nameA.localeCompare(nameB);
+              });
+              console.log("Fallback: Fetched ads from campaigns:", uniqueAds.length);
+              setAds(uniqueAds);
+            } else {
+              setAds([]);
+            }
+          }
+        } catch (e) {
+          console.error("Error fetching all ads:", e);
+          setAds([]);
+        }
+      } else if (selectedCampaigns.length > 0) {
+        // Fetch ads for selected campaigns only
+        console.log("Fetching ads for selected campaigns:", selectedCampaigns);
+        const allAds = [];
+        for (const campaignId of selectedCampaigns) {
+          const adsData = await fetchAds(campaignId);
+          allAds.push(...adsData);
+        }
+        // Remove duplicates based on ad id
+        const uniqueAds = Array.from(
+          new Map(allAds.map(ad => [ad.id, ad])).values()
+        );
+        // Sort by name
+        uniqueAds.sort((a, b) => {
+          const nameA = (a.name || '').toLowerCase();
+          const nameB = (b.name || '').toLowerCase();
+          return nameA.localeCompare(nameB);
+        });
+        console.log("Fetched ads for selected campaigns:", uniqueAds.length);
+        setAds(uniqueAds);
+      } else {
+        // No campaigns selected - clear ads
+        setAds([]);
+        setSelectedAds([]); // Reset ad selection when no campaign is selected
+      }
+    };
+    loadAds();
+  }, [selectedCampaigns, campaigns]);
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line
+  }, [days, selectedAdAccount, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue]);
+
+  // Load leads when form or date filters change
+
+  // Fetch page insights when selectedPage or chartTimeRange changes
+  useEffect(() => {
+    if (selectedPage && chartTimeRange.startDate && chartTimeRange.endDate) {
+      setPageInsightsLoading(true);
+      setPageInsightsError(null);
+      fetchPageInsights({
+        pageId: selectedPage,
+        from: chartTimeRange.startDate,
+        to: chartTimeRange.endDate
+      })
+        .then((data) => {
+          if (data) {
+            setPageInsightsData(data);
+          }
+        })
+        .catch((error) => {
+          console.error("Error fetching page insights:", error);
+          if (error.isPermissionError) {
+            setPageInsightsError({
+              type: 'permission',
+              message: "Permission Error: Your Meta Access Token needs 'pages_read_engagement' permission.",
+              details: "Please ensure your Meta Access Token has the 'pages_read_engagement' permission. You may need to regenerate your token after adding this permission in Meta App Dashboard."
+            });
+          } else if (error.isAuthError) {
+            setPageInsightsError({
+              type: 'auth',
+              message: "Authentication Error: Your Meta Access Token is invalid or expired.",
+              details: error.message
+            });
+          } else {
+            setPageInsightsError({
+              type: 'error',
+              message: "Failed to fetch page insights.",
+              details: error.message
+            });
+          }
+          setPageInsightsData(null);
+        })
+        .finally(() => {
+          setPageInsightsLoading(false);
+        });
+    } else {
+      setPageInsightsData(null);
+      setPageInsightsError(null);
+    }
+  }, [selectedPage, chartTimeRange.startDate, chartTimeRange.endDate]);
+
+  // Auto-select first page if no page is selected and pages are loaded
+  useEffect(() => {
+    if (!selectedPage && pages.length > 0) {
+      console.log('[Content Marketing] Auto-selecting first page:', pages[0].id);
+      setSelectedPage(pages[0].id);
+    }
+  }, [pages, selectedPage]);
+
+  // Fetch page insights for Content Marketing Dashboard when selectedPage or contentFilters change
+  useEffect(() => {
+    const pageIdToUse = selectedPage || (pages.length > 0 ? pages[0]?.id : null);
+    
+    if (pageIdToUse && contentFilters.startDate && contentFilters.endDate) {
+      console.log('[Content Marketing] Fetching page insights:', {
+        pageId: pageIdToUse,
+        from: contentFilters.startDate,
+        to: contentFilters.endDate
+      });
+      
+      setContentPageInsightsLoading(true);
+      setContentPageInsightsError(null);
+      fetchPageInsights({
+        pageId: pageIdToUse,
+        from: contentFilters.startDate,
+        to: contentFilters.endDate
+      })
+        .then((data) => {
+          console.log('[Content Marketing] Page insights data received:', data);
+          if (data) {
+            setContentPageInsightsData(data);
+            console.log('[Content Marketing] Set page insights data:', {
+              total_follows: data.total_follows,
+              total_unfollows: data.total_unfollows,
+              total_reached: data.total_reached
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Error fetching Content Marketing page insights:", error);
+          if (error.isPermissionError) {
+            setContentPageInsightsError({
+              type: 'permission',
+              message: "Permission Error: Your Meta Access Token needs 'pages_read_engagement' permission.",
+              details: "Please ensure your Meta Access Token has the 'pages_read_engagement' permission. You may need to regenerate your token after adding this permission in Meta App Dashboard."
+            });
+          } else if (error.isAuthError) {
+            setContentPageInsightsError({
+              type: 'auth',
+              message: "Authentication Error: Your Meta Access Token is invalid or expired.",
+              details: error.message
+            });
+          } else {
+            setContentPageInsightsError({
+              type: 'error',
+              message: "Failed to fetch page insights.",
+              details: error.message
+            });
+          }
+          setContentPageInsightsData(null);
+        })
+        .finally(() => {
+          setContentPageInsightsLoading(false);
+        });
+    } else {
+      if (!pageIdToUse) {
+        console.warn('[Content Marketing] No page selected and no pages available');
+      }
+      if (!contentFilters.startDate || !contentFilters.endDate) {
+        console.warn('[Content Marketing] Date range not set:', {
+          startDate: contentFilters.startDate,
+          endDate: contentFilters.endDate
+        });
+      }
+      setContentPageInsightsData(null);
+      setContentPageInsightsError(null);
+    }
+  }, [selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
+
+  // Fetch performance insights (views, interactions, reach, follows, unfollows) for Content Marketing Dashboard
+  useEffect(() => {
+    const pageIdToUse = selectedPage || (pages.length > 0 ? pages[0]?.id : null);
+    
+    if (pageIdToUse && contentFilters.startDate && contentFilters.endDate) {
+      setPerformanceInsightsLoading(true);
+      setPerformanceInsightsError(null);
+      fetchPerformanceInsights({
+        pageId: pageIdToUse,
+        from: contentFilters.startDate,
+        to: contentFilters.endDate
+      })
+        .then((data) => {
+          setPerformanceInsightsData(data);
+        })
+        .catch((error) => {
+          console.error("Error fetching performance insights:", error);
+          if (error.isPermissionError) {
+            setPerformanceInsightsError({
+              type: 'permission',
+              message: "Permission Error: Your Meta Access Token needs 'pages_read_engagement' permission.",
+              details: error.message
+            });
+          } else if (error.isAuthError) {
+            setPerformanceInsightsError({
+              type: 'auth',
+              message: "Authentication Error: Your Meta Access Token is invalid or expired.",
+              details: error.message
+            });
+          } else {
+            setPerformanceInsightsError({
+              type: 'error',
+              message: "Failed to fetch performance insights.",
+              details: error.message
+            });
+          }
+          setPerformanceInsightsData(null);
+        })
+        .finally(() => {
+          setPerformanceInsightsLoading(false);
+        });
+    } else {
+      setPerformanceInsightsData(null);
+      setPerformanceInsightsError(null);
+    }
+  }, [selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
+
+  // Fetch Content Marketing revenue when filters change
+  useEffect(() => {
+    const fetchContentRevenue = async () => {
+      // Only fetch if date range is available
+      if (!contentFilters.startDate || !contentFilters.endDate) {
+        console.warn('[Content Marketing Revenue] Date range not set, skipping fetch');
+        return;
+      }
+
+      setContentMarketingRevenue(prev => ({ ...prev, loading: true, error: null }));
+      
+      try {
+        const dateRange = {
+          startDate: contentFilters.startDate,
+          endDate: contentFilters.endDate
+        };
+        
+        // Map source filter IDs to Google Sheets source names
+        // The API will handle the mapping, but we pass the filter IDs
+        const sourceFilter = selectedSource && selectedSource.length > 0 ? selectedSource : null;
+        
+        console.log('[Content Marketing Revenue] Fetching with filters:', {
+          dateRange,
+          source: sourceFilter
+        });
+        
+        const revenue = await fetchContentMarketingRevenue(dateRange, sourceFilter);
+        setContentMarketingRevenue({
+          ...revenue,
+          loading: false,
+          error: revenue.error
+        });
+      } catch (error) {
+        console.error("Error fetching Content Marketing revenue:", error);
+        setContentMarketingRevenue(prev => ({
+          ...prev,
+          loading: false,
+          error: error.message
+        }));
+      }
+    };
+
+    fetchContentRevenue();
+  }, [contentFilters.startDate, contentFilters.endDate, selectedSource]);
+
+  // Fetch Google Sheets metrics on mount and poll every 30 seconds
+  useEffect(() => {
+    const fetchMetrics = async () => {
+      setSheetsMetrics(prev => ({ ...prev, loading: true, error: null }));
+      try {
+        const metrics = await fetchSheetsMetrics();
+        setSheetsMetrics({
+          ...metrics,
+          loading: false,
+          error: metrics.error
+        });
+      } catch (error) {
+        console.error("Error fetching Google Sheets metrics:", error);
+        setSheetsMetrics(prev => ({
+          ...prev,
+          loading: false,
+          error: error.message
+        }));
+      }
+    };
+
+    // Fetch immediately on mount
+    fetchMetrics();
+
+    // Set up interval to poll every 30 seconds
+    const intervalId = setInterval(fetchMetrics, 30000);
+
+    // Cleanup interval on unmount
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, []); // Empty dependency array - only run on mount
+
+  // Sync theme state with document attribute changes
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const theme = document.documentElement.getAttribute("data-theme") || "light";
+      setCurrentTheme(theme);
+    });
+
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+
+    return () => observer.disconnect();
+  }, []);
+
+  const filteredRows = useMemo(() => {
+    // If all campaigns are selected (or none selected), show all campaigns
+    const allCampaignsSelected = selectedCampaigns.length === 0 || 
+      (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
+    
+    // If all ads are selected (or none selected), show all ads
+    const allAdsSelected = selectedAds.length === 0 || 
+      (ads.length > 0 && selectedAds.length === ads.length);
+
+    return data.filter((r) => {
+      // Campaign filter: if all selected or none selected, show all
+      const matchesCampaign = allCampaignsSelected 
+        ? true 
+        : selectedCampaigns.includes(r.campaign_id);
+      
+      // Ad filter: if all selected or none selected, show all
+      const matchesAd = allAdsSelected 
+        ? true 
+        : selectedAds.includes(r.ad_id);
+      const matchesProject = selectedProjects.length > 0 
+        ? selectedProjects.includes(r.project_id || r.project?.id) 
+        : true;
+      
+      // Platform filter (placeholder - update when platform data is available)
+      const matchesPlatform = selectedPlatforms.length > 0 
+        ? selectedPlatforms.includes(r.platform || r.platform_id) 
+        : true;
+      
+      // L1 Revenue filter (placeholder - update when L1 revenue data is available)
+      const matchesL1Revenue = selectedL1Revenue.length > 0 
+        ? selectedL1Revenue.some(range => {
+            const l1Rev = r.l1Revenue || 0;
+            if (range === '0-1000') return l1Rev >= 0 && l1Rev <= 1000;
+            if (range === '1000-5000') return l1Rev > 1000 && l1Rev <= 5000;
+            if (range === '5000-10000') return l1Rev > 5000 && l1Rev <= 10000;
+            if (range === '10000+') return l1Rev > 10000;
+            return false;
+          })
+        : true;
+      
+      // L2 Revenue filter (placeholder - update when L2 revenue data is available)
+      const matchesL2Revenue = selectedL2Revenue.length > 0 
+        ? selectedL2Revenue.some(range => {
+            const l2Rev = r.l2Revenue || 0;
+            if (range === '0-500') return l2Rev >= 0 && l2Rev <= 500;
+            if (range === '500-2000') return l2Rev > 500 && l2Rev <= 2000;
+            if (range === '2000-5000') return l2Rev > 2000 && l2Rev <= 5000;
+            if (range === '5000+') return l2Rev > 5000;
+            return false;
+          })
+        : true;
+      
+      return matchesCampaign && matchesAd && matchesProject && matchesPlatform && matchesL1Revenue && matchesL2Revenue;
+    });
+  }, [data, selectedCampaigns, selectedAds, selectedProjects, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, campaigns.length, ads.length]);
+
+  const timeseries = useMemo(() => aggregateByDate(filteredRows), [filteredRows]);
+
+  const byCampaign = useMemo(() => {
+    const map = new Map();
+    data.forEach((r) => {
+      const key = r.campaign;
+      const cur = map.get(key) || { campaign: key, leads: 0, spend: 0 };
+      cur.leads += r.leads || 0;
+      cur.spend += r.spend || 0;
+      map.set(key, cur);
+    });
+    return Array.from(map.values());
+  }, [data]);
+
+  const actionBreakdown = useMemo(() => {
+    // Allowed action types to display
+    const allowedActions = [
+      'lead',
+      'link_click',
+      'like',
+      'comment',
+    ];
+    
+    const map = new Map();
+    filteredRows.forEach((r) => {
+      Object.entries(r.actions || {}).forEach(([k, v]) => {
+        // Only include allowed action types
+        if (allowedActions.includes(k)) {
+        map.set(k, (map.get(k) || 0) + v);
+        }
+      });
+    });
+    return Array.from(map.entries())
+      .map(([name, value]) => ({ name, value }))
+      .filter(item => item.value > 0); // Only show actions with values > 0
+  }, [filteredRows]);
+
+  const totals = useMemo(() => {
+    // Check if all campaigns are selected
+    const allCampaignsSelected = selectedCampaigns.length === 0 || 
+      (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
+    
+    // Check if all ads are selected
+    const allAdsSelected = selectedAds.length === 0 || 
+      (ads.length > 0 && selectedAds.length === ads.length);
+
+    const t = {
+      leads: 0, spend: 0, impressions: 0, clicks: 0, actions: {},
+      onlineConv: 0, offlineConv: 0, l1Revenue: 0, l2Revenue: 0, totalRevenue: 0,
+      conversions: 0, videoViews: 0, video3sViews: 0, videoThruPlays: 0
+    };
+    
+    // Use filteredRows instead of data to respect all filters
+    filteredRows.forEach((r) => {
+      t.leads += r.leads || 0;
+      t.spend += r.spend || 0;
+      t.impressions += r.impressions || 0;
+      t.clicks += r.clicks || 0;
+      t.conversions += r.conversions || 0;
+      t.videoViews += r.videoViews || 0;
+      t.video3sViews += r.video3sViews || 0;
+      t.videoThruPlays += r.videoThruPlays || 0;
+
+      // Online/Offline metrics (assumed mappings) - only calculate if sheets data not available
+      const acts = r.actions || {};
+      t.onlineConv += acts['purchase'] || acts['website_purchase'] || 0;
+      t.offlineConv += acts['offline_conversion'] || 0;
+
+      // Revenue - only calculate if sheets data not available
+      const vals = r.action_values || {};
+      t.totalRevenue += vals['purchase'] || vals['website_purchase'] || 0;
+      // L1/L2 placeholders
+      t.l1Revenue += 0;
+      t.l2Revenue += 0;
+
+      Object.entries(r.actions || {}).forEach(([k, v]) => {
+        t.actions[k] = (t.actions[k] || 0) + v;
+      });
+    });
+
+    // Override with Google Sheets values if available (not loading and no error)
+    if (!sheetsMetrics.loading && !sheetsMetrics.error) {
+      // Use Google Sheets values for these metrics
+      t.onlineConv = sheetsMetrics.onlineConversion || t.onlineConv;
+      t.offlineConv = sheetsMetrics.offlineConversion || t.offlineConv;
+      t.l1Revenue = sheetsMetrics.l1Revenue || t.l1Revenue;
+      t.l2Revenue = sheetsMetrics.l2Revenue || t.l2Revenue;
+      t.totalRevenue = sheetsMetrics.totalRevenue || t.totalRevenue;
+    }
+
+    // Calculate real metrics
+    t.cpl = t.leads ? t.spend / t.leads : 0;
+    t.ctr = t.impressions ? (t.clicks / t.impressions) * 100 : 0;
+    t.uniqueLeads = t.leads; // Using total leads as proxy for unique
+    
+    // Hook Rate and Hold Rate: Calculate weighted average from individual rows
+    // Since Meta API returns these as percentages, we need to aggregate properly
+    let totalHookRateWeight = 0;
+    let totalHoldRateWeight = 0;
+    let weightedHookRate = 0;
+    let weightedHoldRate = 0;
+    
+    filteredRows.forEach((r) => {
+      // For Hook Rate: weight by impressions
+      if (r.hookRate !== undefined && r.hookRate !== null && r.impressions > 0) {
+        weightedHookRate += r.hookRate * r.impressions;
+        totalHookRateWeight += r.impressions;
+      }
+      
+      // For Hold Rate: weight by videoViews
+      if (r.holdRate !== undefined && r.holdRate !== null && r.videoViews > 0) {
+        weightedHoldRate += r.holdRate * r.videoViews;
+        totalHoldRateWeight += r.videoViews;
+      }
+    });
+    
+    // Calculate weighted averages
+    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight : 
+                 (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
+    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
+                 (t.videoViews ? (t.videoThruPlays / t.videoViews) * 100 : 0);
+    
+    t.roas = t.spend ? t.totalRevenue / t.spend : 0;
+
+    return t;
+  }, [filteredRows, selectedCampaigns, selectedAds, campaigns.length, ads.length, sheetsMetrics]);
+
+  // Get all individual ad sets for Campaign Performance table (not aggregated)
+  // Always show ALL campaigns and ad names regardless of filter selections
+  const campaignPerformanceRows = useMemo(() => {
+    return data
+      .filter(r => r.ad_id && r.ad_name && r.campaign_id)
+      .map(r => ({
+        ...r,
+        cpm: r.impressions > 0 ? (r.spend / (r.impressions / 1000)) : 0,
+        ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
+        cpl: r.leads > 0 ? r.spend / r.leads : 0,
+        conversionRate: r.clicks > 0 ? (r.conversions / r.clicks) * 100 : 0
+      }));
+  }, [data]);
+
+  // Aggregate data by Ad for detailed table view
+  // Show all ads from filtered data (Time Range, Ad Account, Campaign filters)
+  // This table always shows all ads, not filtered by "Ad Name" selection
+  const adBreakdown = useMemo(() => {
+    // Use allAdsData which contains all rows matching the applied filters
+    // (Time Range, Ad Account, Campaign) - this respects those filters
+    // but shows ALL ads, not filtered by selectedAds
+    let sourceData = allAdsData.length > 0 ? allAdsData : data;
+    
+    // If specific campaigns are selected, filter to show only ads from those campaigns
+    // This ensures the table shows ads from the selected campaign(s)
+    const allCampaignsSelected = selectedCampaigns.length === 0 || 
+      (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
+    
+    if (!allCampaignsSelected && selectedCampaigns.length > 0) {
+      // Filter to show ads only from selected campaigns
+      sourceData = sourceData.filter(r => selectedCampaigns.includes(r.campaign_id));
+    }
+    // If all campaigns selected or none selected, show all ads from the filtered data
+    // (sourceData already respects Time Range and Ad Account filters)
+    
+    const map = new Map();
+    sourceData.forEach((r) => {
+      if (!r.ad_id || !r.ad_name) return;
+      const key = r.ad_id;
+      const cur = map.get(key) || {
+        ad_id: r.ad_id,
+        ad_name: r.ad_name,
+        campaign: r.campaign,
+        campaign_id: r.campaign_id,
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        leads: 0,
+        conversions: 0,
+        videoViews: 0,
+        video3sViews: 0,
+        videoThruPlays: 0,
+        ad_status: r.ad_status || 'ACTIVE',
+        campaign_status: r.campaign_status || 'ACTIVE'
+      };
+      cur.spend += r.spend || 0;
+      cur.impressions += r.impressions || 0;
+      cur.clicks += r.clicks || 0;
+      cur.leads += r.leads || 0;
+      cur.conversions += r.conversions || 0;
+      cur.videoViews += r.videoViews || 0;
+      cur.video3sViews += r.video3sViews || 0;
+      cur.videoThruPlays += r.videoThruPlays || 0;
+      map.set(key, cur);
+    });
+    
+    // Calculate metrics for each ad
+    // For hookRate and holdRate, we need to aggregate from sourceData for each ad
+    const result = Array.from(map.values()).map(ad => {
+      // Find all rows for this ad to aggregate hookRate and holdRate properly
+      const adRows = sourceData.filter(r => r.ad_id === ad.ad_id);
+      
+      // Calculate weighted average for Hook Rate (weight by impressions)
+      let totalHookRateWeight = 0;
+      let weightedHookRate = 0;
+      
+      // Calculate weighted average for Hold Rate (weight by videoViews)
+      let totalHoldRateWeight = 0;
+      let weightedHoldRate = 0;
+      
+      adRows.forEach(row => {
+        if (row.hookRate !== undefined && row.hookRate !== null && row.impressions > 0) {
+          weightedHookRate += row.hookRate * row.impressions;
+          totalHookRateWeight += row.impressions;
+        }
+        if (row.holdRate !== undefined && row.holdRate !== null && row.videoViews > 0) {
+          weightedHoldRate += row.holdRate * row.videoViews;
+          totalHoldRateWeight += row.videoViews;
+        }
+      });
+      
+      const hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
+                      (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
+      
+      const holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
+                      (ad.videoViews > 0 ? (ad.videoThruPlays / ad.videoViews) * 100 : 0);
+      
+      return {
+        ...ad,
+        ctr: ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0,
+        cpl: ad.leads > 0 ? ad.spend / ad.leads : 0,
+        hookRate: hookRate,
+        holdRate: holdRate,
+        conversionRate: ad.clicks > 0 ? (ad.conversions / ad.clicks) * 100 : 0
+      };
+    });
+    
+    console.log('[Ad Performance Breakdown] Showing all ads:', {
+      totalAds: result.length,
+      sourceDataRows: sourceData.length,
+      allAdsDataRows: allAdsData.length,
+      dataRows: data.length,
+      selectedCampaigns: selectedCampaigns.length,
+      allCampaignsSelected: allCampaignsSelected
+    });
+    
+    return result;
+  }, [data, allAdsData, selectedCampaigns, campaigns.length]);
+    
+  // Sort helper function
+  const sortData = (data, field, direction) => {
+    if (!field) return data;
+    
+    const sorted = [...data].sort((a, b) => {
+      let aVal = a[field];
+      let bVal = b[field];
+    
+      // Handle numeric fields
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      
+      // Handle string fields
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return direction === 'asc' 
+          ? aVal.localeCompare(bVal)
+          : bVal.localeCompare(aVal);
+      }
+      
+      // Handle null/undefined
+      if (aVal == null) return direction === 'asc' ? -1 : 1;
+      if (bVal == null) return direction === 'asc' ? 1 : -1;
+      
+      return 0;
+    });
+    
+    return sorted;
+  };
+
+  // Sorted Campaign Performance rows
+  const sortedCampaignPerformanceRows = useMemo(() => {
+    return sortData(campaignPerformanceRows, campaignSortField, campaignSortDirection);
+  }, [campaignPerformanceRows, campaignSortField, campaignSortDirection]);
+      
+  // Sorted Ad Breakdown rows
+  const sortedAdBreakdown = useMemo(() => {
+    return sortData(adBreakdown, adSortField, adSortDirection);
+  }, [adBreakdown, adSortField, adSortDirection]);
+      
+  // Use leads from Meta API - already filtered by form
+  // IMPORTANT: Meta Graph API does NOT provide ad_id/campaign_id per lead
+  // Campaign column shows filter context, not lead attribution
+  const leadDetails = useMemo(() => {
+    console.log("Total leads:", leads.length);
+
+    // Filter by date range if provided
+    let filtered = leads;
+    if (dateFilters.startDate && dateFilters.endDate) {
+      const startDate = new Date(dateFilters.startDate);
+      startDate.setHours(0, 0, 0, 0);
+      const endDate = new Date(dateFilters.endDate);
+      endDate.setHours(23, 59, 59, 999);
+      
+      filtered = leads.filter(lead => {
+        const leadTime = lead.created_time || lead.TimeUtc || lead.Time;
+        if (!leadTime) return false;
+        const leadDate = new Date(leadTime);
+        return leadDate >= startDate && leadDate <= endDate;
+      });
+    }
+
+    // Sort by created_time descending (most recent first)
+    return filtered.sort((a, b) => {
+      const timeA = new Date(a.created_time || a.TimeUtc || a.Time || 0).getTime();
+      const timeB = new Date(b.created_time || b.TimeUtc || b.Time || 0).getTime();
+      return timeB - timeA;
+    });
+  }, [leads, dateFilters.startDate, dateFilters.endDate]);
+
+  // Get campaign context from filters (NOT from lead data)
+  // Meta API doesn't provide campaign attribution per lead
+  const getCampaignContext = useMemo(() => {
+    // If context from API is available, use it (most accurate)
+    if (leadsContext?.campaign_name) {
+      return leadsContext.campaign_name;
+    }
+    // Fallback to filter-based context
+    if (selectedCampaigns.length === 0 || 
+        (campaigns.length > 0 && selectedCampaigns.length === campaigns.length)) {
+      return "Multiple / Not Attributed";
+    }
+    if (selectedCampaigns.length === 1) {
+      const campaign = campaigns.find(c => c.id === selectedCampaigns[0] || c.id?.toString() === selectedCampaigns[0]?.toString());
+      if (campaign && campaign.name) {
+        return campaign.name;
+      }
+      // If campaign not found, try to use the ID to find it
+      return "Multiple / Not Attributed";
+    }
+    // Multiple campaigns selected - show names if possible
+    if (selectedCampaigns.length > 1 && selectedCampaigns.length <= 5) {
+      const campaignNames = selectedCampaigns
+        .map(id => {
+          const campaign = campaigns.find(c => c.id === id || c.id?.toString() === id?.toString());
+          return campaign?.name;
+        })
+        .filter(Boolean);
+      if (campaignNames.length > 0) {
+        return campaignNames.length === 1 ? campaignNames[0] : `${campaignNames.length} Campaigns`;
+      }
+    }
+    // Multiple campaigns selected
+    return `${selectedCampaigns.length} Campaigns Selected`;
+  }, [selectedCampaigns, campaigns, leadsContext]);
+
+  // Get ad context from filters (NOT from lead data)
+  // Meta API doesn't provide ad attribution per lead
+  const getAdContext = useMemo(() => {
+    // If context from API is available, use it (most accurate)
+    if (leadsContext?.ad_name) {
+      return leadsContext.ad_name;
+    }
+    // Fallback to filter-based context
+    if (selectedAds.length === 0 || (ads.length > 0 && selectedAds.length === ads.length)) {
+      return "Multiple / Not Attributed";
+    }
+    if (selectedAds.length === 1) {
+      const ad = ads.find(a => a.id === selectedAds[0] || a.id?.toString() === selectedAds[0]?.toString());
+      if (ad && ad.name) {
+        return ad.name;
+      }
+      // If ad not found, return default
+      return "Multiple / Not Attributed";
+    }
+    // Multiple ads selected - show names if possible
+    if (selectedAds.length > 1 && selectedAds.length <= 5) {
+      const adNames = selectedAds
+        .map(id => {
+          const ad = ads.find(a => a.id === id || a.id?.toString() === id?.toString());
+          return ad?.name;
+        })
+        .filter(Boolean);
+      if (adNames.length > 0) {
+        return adNames.length === 1 ? adNames[0] : `${adNames.length} Ads`;
+      }
+    }
+    // Multiple ads selected
+    return `${selectedAds.length} Ads Selected`;
+  }, [selectedAds, ads, leadsContext]);
+
+  const totalPages = Math.max(1, Math.ceil(leadDetails.length / perPage));
+  const visibleLeads = useMemo(() => {
+    return leadDetails.slice((page - 1) * perPage, page * perPage);
+  }, [leadDetails, page, perPage]);
+  const actionOptions = useMemo(() => {
+    const set = new Set();
+    data.forEach((r) => Object.keys(r.actions || {}).forEach((k) => set.add(k)));
+    return Array.from(set);
+  }, [data]);
+
+  // Sortable header component with up/down arrows
+  const SortableHeader = ({ field, currentField, currentDirection, onClick, children, className = '' }) => {
+    const isActive = currentField === field;
+    const isRightAligned = className.includes('text-end');
+    return (
+      <th 
+        className={`fw-bold ${className}`}
+        style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}
+      >
+        <button
+          type="button"
+          onClick={onClick}
+          className={`d-flex align-items-center gap-1 w-100 border-0 bg-transparent p-0 fw-bold ${isRightAligned ? 'justify-content-end' : ''}`}
+          style={{ 
+            fontSize: '0.7rem', 
+            color: '#64748b', 
+            textTransform: 'uppercase', 
+            letterSpacing: '0.5px',
+            cursor: 'pointer',
+            outline: 'none'
+          }}
+        >
+          <span>{children}</span>
+          <span className="d-flex flex-column" style={{ fontSize: '0.55rem', lineHeight: '0.7', marginLeft: '2px' }}>
+            <span style={{ 
+              color: isActive && currentDirection === 'asc' ? '#2563eb' : '#9ca3af',
+              opacity: isActive && currentDirection === 'asc' ? 1 : 0.5
+            }}>▲</span>
+            <span style={{ 
+              color: isActive && currentDirection === 'desc' ? '#2563eb' : '#9ca3af',
+              opacity: isActive && currentDirection === 'desc' ? 1 : 0.5,
+              marginTop: '-3px'
+            }}>▼</span>
+          </span>
+        </button>
+      </th>
+    );
+  };
+
+  const formatMoney = (v) => `₹${(v || 0).toFixed(2)}`;
+  const formatNum = (v) => (v || 0).toLocaleString();
+  const formatPerc = (v) => `${((v || 0)).toFixed(2)}%`;
+  const formatChange = (v) => {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    const arrow = v >= 0 ? '↑' : '↓';
+    return `${arrow} ${Math.abs(v).toFixed(1)}%`;
+  };
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[date.getMonth()]} ${date.getDate()}`;
+  };
+  const formatDateTime = (dateStr, timeStr) => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formattedDate = `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+    if (timeStr) {
+      try {
+        const time = new Date(timeStr);
+        const hours = time.getHours().toString().padStart(2, '0');
+        const minutes = time.getMinutes().toString().padStart(2, '0');
+        return `${formattedDate} ${hours}:${minutes}`;
+      } catch (e) {
+        return formattedDate;
+      }
+    }
+    return formattedDate;
+  };
+
+  // Helper function to calculate date range from time range preset (for leads section)
+  const getDateRangeFromPreset = (preset) => {
+    // If no preset provided, return null dates (no filter)
+    if (!preset) {
+      return { startDate: null, endDate: null };
+    }
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    let startDate, endDate;
+    
+    switch (preset) {
+      case 'last_7_days':
+        endDate = new Date(yesterday);
+        startDate = new Date(endDate);
+        startDate.setDate(startDate.getDate() - 6);
+        break;
+      case 'last_14_days':
+        endDate = new Date(yesterday);
+        startDate = new Date(endDate);
+        startDate.setDate(startDate.getDate() - 13);
+        break;
+      case 'last_30_days':
+        endDate = new Date(yesterday);
+        startDate = new Date(endDate);
+        startDate.setDate(startDate.getDate() - 29);
+        break;
+      case 'last_90_days':
+        endDate = new Date(yesterday);
+        startDate = new Date(endDate);
+        startDate.setDate(startDate.getDate() - 89);
+        break;
+      case 'this_month':
+        startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+        endDate = new Date(yesterday);
+        break;
+      case 'last_month':
+        startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+        endDate = new Date(today.getFullYear(), today.getMonth(), 0);
+        break;
+      default:
+        // Unknown preset - return null dates (no filter)
+        return { startDate: null, endDate: null };
+    }
+    
+    // Ensure start date is 00:00:00 and end date is 23:59:59
+    startDate.setHours(0, 0, 0, 0);
+    endDate.setHours(23, 59, 59, 999);
+    
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  };
+
+  // Fetch all filtered leads for download (without pagination limit)
+  const fetchAllFilteredLeads = async () => {
+    // Use main dashboard date filters
+    const from = dateFilters.startDate || null;
+    const to = dateFilters.endDate || null;
+    
+    // Extract filter IDs for contextual insights
+    const adAccountId = selectedAdAccount || null;
+    const campaignId = selectedCampaigns.length > 0 ? selectedCampaigns[0] : null;
+    const adId = selectedAds.length > 0 ? selectedAds[0] : null;
+    
+    try {
+      const response = await fetchLeads({
+        formId: null, // No form filter
+        from,
+        to,
+        adAccountId,
+        campaignId,
+        adId,
+        pageId: selectedPage
+      });
+      
+      return {
+        leads: response.data || [],
+        meta: response.meta || null
+      };
+    } catch (e) {
+      console.error("Error fetching all leads for download:", e);
+      throw e;
+    }
+  };
+
+  // Helper to get campaign context for a lead (for download)
+  const getCampaignContextForDownload = (context) => {
+    if (context?.campaign_name) {
+      return context.campaign_name;
+    }
+    if (selectedCampaigns.length === 0 || 
+        (campaigns.length > 0 && selectedCampaigns.length === campaigns.length)) {
+      return "Multiple / Not Attributed";
+    }
+    if (selectedCampaigns.length === 1) {
+      const campaign = campaigns.find(c => c.id === selectedCampaigns[0] || c.id?.toString() === selectedCampaigns[0]?.toString());
+      if (campaign && campaign.name) {
+        return campaign.name;
+      }
+      return "Multiple / Not Attributed";
+    }
+    return `${selectedCampaigns.length} Campaigns Selected`;
+  };
+
+  // Helper to get ad context for a lead (for download)
+  const getAdContextForDownload = (context) => {
+    if (context?.ad_name) {
+      return context.ad_name;
+    }
+    if (selectedAds.length === 0 || (ads.length > 0 && selectedAds.length === ads.length)) {
+      return "Multiple / Not Attributed";
+    }
+    if (selectedAds.length === 1) {
+      const ad = ads.find(a => a.id === selectedAds[0] || a.id?.toString() === selectedAds[0]?.toString());
+      if (ad && ad.name) {
+        return ad.name;
+      }
+      return "Multiple / Not Attributed";
+    }
+    return `${selectedAds.length} Ads Selected`;
+  };
+
+  // Handle CSV download
+  const handleDownloadCSV = async () => {
+    if (leadDetails.length === 0) {
+      setToast({
+        type: 'warning',
+        title: 'Warning',
+        message: 'No leads available to download.'
+      });
+      return;
+    }
+    
+    setDownloadingLeads(true);
+    try {
+      // Use currently displayed leads (already filtered and sorted)
+      const allLeads = leadDetails;
+      
+      // Prepare CSV data
+      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Page', 'Campaign', 'Ad Name', 'Form'];
+      
+      // Escape commas and quotes in CSV
+      const escapeCSV = (val) => {
+        if (val === null || val === undefined) return '';
+        const str = String(val);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+      
+      const rows = allLeads.map(lead => {
+        const leadName = lead.Name || lead.name || 'N/A';
+        const phone = lead.Phone || lead.phone || 'N/A';
+        const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
+        const street = lead.Street || lead.street || 'N/A';
+        const city = lead.City || lead.city || 'N/A';
+        
+        return [
+          escapeCSV(leadName),
+          escapeCSV(phone),
+          escapeCSV(dateTime),
+          escapeCSV(street),
+          escapeCSV(city),
+          escapeCSV(lead.page_name || 'N/A'),
+          escapeCSV(lead.campaign_name || 'N/A'),
+          escapeCSV(lead.ad_name || 'N/A'),
+          escapeCSV(lead.form_name || 'N/A')
+        ];
+      });
+      
+      // Generate filename with date
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const filename = `leads_${dateStr}.csv`;
+      
+      // Use existing CSV export utility
+      downloadCSV(filename, [headers, ...rows]);
+      
+      setToast({
+        type: 'success',
+        title: 'Success',
+        message: `Successfully downloaded ${allLeads.length} leads as CSV.`
+      });
+    } catch (e) {
+      console.error("Error downloading CSV:", e);
+      setToast({
+        type: 'error',
+        title: 'Error',
+        message: 'Failed to download leads. Please try again.'
+      });
+    } finally {
+      setDownloadingLeads(false);
+    }
+  };
+
+  // Handle Excel download
+  const handleDownloadExcel = async () => {
+    if (leadDetails.length === 0) {
+      setToast({
+        type: 'warning',
+        title: 'Warning',
+        message: 'No leads available to download.'
+      });
+      return;
+    }
+    
+    setDownloadingLeads(true);
+    try {
+      // Use currently displayed leads (already filtered and sorted)
+      const allLeads = leadDetails;
+      
+      // Prepare Excel data
+      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Page', 'Campaign', 'Ad Name', 'Form'];
+      
+      const rows = allLeads.map(lead => {
+        const leadName = lead.Name || lead.name || 'N/A';
+        const phone = lead.Phone || lead.phone || 'N/A';
+        const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
+        const street = lead.Street || lead.street || lead.address || 'N/A';
+        const city = lead.City || lead.city || 'N/A';
+        
+        return [
+          leadName, 
+          phone, 
+          dateTime, 
+          street, 
+          city, 
+          lead.page_name || 'N/A',
+          lead.campaign_name || 'N/A',
+          lead.ad_name || 'N/A',
+          lead.form_name || 'N/A'
+        ];
+      });
+      
+      // Create workbook and worksheet
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Lead Name
+        { wch: 15 }, // Phone Number
+        { wch: 20 }, // Date & Time
+        { wch: 30 }, // Street
+        { wch: 20 }, // City
+        { wch: 30 }, // Campaign
+        { wch: 30 }  // Ad Name
+      ];
+      
+      XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+      
+      // Generate filename with date
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const filename = `leads_${dateStr}.xlsx`;
+      
+      // Download file
+      XLSX.writeFile(wb, filename);
+      
+      setToast({
+        type: 'success',
+        title: 'Success',
+        message: `Successfully downloaded ${allLeads.length} leads as Excel.`
+      });
+    } catch (e) {
+      console.error("Error downloading Excel:", e);
+      setToast({
+        type: 'error',
+        title: 'Error',
+        message: 'Failed to download leads. Please try again.'
+      });
+    } finally {
+      setDownloadingLeads(false);
+    }
+  };
+
+  // Handle time range filter apply for leads section
+  const handleLeadsDateRangeApply = (payload) => {
+    console.log('[LeadsDateRangeFilter] handleLeadsDateRangeApply called with payload:', payload);
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[LeadsDateRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[LeadsDateRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setLeadsDateRangeFilterValue(payload);
+    setLeadsTimeRange(payload.range_type || 'custom');
+    
+    // Update date filters - useEffect will automatically reload leads
+    setDateFilters({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[LeadsDateRangeFilter] Date filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date,
+      rangeType: payload.range_type
+    });
+    
+    // Close the modal
+    setShowLeadsDateRangeFilter(false);
+  };
+
+  // Helper to get display text for leads time range
+  const getLeadsTimeRangeDisplay = () => {
+    if (leadsDateRangeFilterValue) {
+      if (leadsDateRangeFilterValue.range_type === 'custom') {
+        const start = new Date(leadsDateRangeFilterValue.start_date);
+        const end = new Date(leadsDateRangeFilterValue.end_date);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[leadsDateRangeFilterValue.range_type] || leadsTimeRange;
+    }
+    const presetLabels = {
+      'last_7_days': 'Last 7 days',
+      'last_14_days': 'Last 14 days',
+      'last_30_days': 'Last 30 days',
+      'last_90_days': 'Last 90 days',
+      'this_month': 'This month',
+      'last_month': 'Last month'
+    };
+    return presetLabels[leadsTimeRange] || 'Last 7 days';
+  };
+
+  // Content Marketing Date Range filter handler
+  const handleContentDateRangeApply = (payload) => {
+    console.log('[ContentDateRangeFilter] handleContentDateRangeApply called with payload:', payload);
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[ContentDateRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[ContentDateRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setContentDateRangeFilterValue(payload);
+    setContentDateRange(payload.range_type || 'custom');
+    
+    // Update content filters
+    setContentFilters({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[ContentDateRangeFilter] Content filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date,
+      rangeType: payload.range_type
+    });
+    
+    // Close the modal
+    setShowContentDateRangeFilter(false);
+  };
+
+  // Helper to get display text for content date range
+  const getContentDateRangeDisplay = () => {
+    if (contentDateRangeFilterValue) {
+      if (contentDateRangeFilterValue.range_type === 'custom') {
+        const start = new Date(contentDateRangeFilterValue.start_date);
+        const end = new Date(contentDateRangeFilterValue.end_date);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[contentDateRangeFilterValue.range_type] || contentDateRange;
+    }
+    const presetLabels = {
+      'last_7_days': 'Last 7 days',
+      'last_14_days': 'Last 14 days',
+      'last_30_days': 'Last 30 days',
+      'this_week': 'This week',
+      'last_week': 'Last week',
+      'this_month': 'This month',
+      'last_month': 'Last month'
+    };
+    return presetLabels[contentDateRange] || 'Last 7 days';
+  };
+
+  // Chart Time Range filter handler for "Account Reach by Followers Count"
+  const handleChartTimeRangeApply = (payload) => {
+    console.log('[ChartTimeRangeFilter] handleChartTimeRangeApply called with payload:', payload);
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[ChartTimeRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[ChartTimeRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setChartTimeRangeFilterValue(payload);
+    setChartTimeRangeValue(payload.range_type || 'custom');
+    
+    // Update chart time range filters
+    setChartTimeRange({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[ChartTimeRangeFilter] Chart time range filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date,
+      rangeType: payload.range_type
+    });
+    
+    // Close the modal
+    setShowChartTimeRangeFilter(false);
+  };
+
+  // Helper to get display text for chart time range
+  const getChartTimeRangeDisplay = () => {
+    if (chartTimeRangeFilterValue) {
+      if (chartTimeRangeFilterValue.range_type === 'custom') {
+        const start = new Date(chartTimeRangeFilterValue.start_date);
+        const end = new Date(chartTimeRangeFilterValue.end_date);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[chartTimeRangeFilterValue.range_type] || chartTimeRangeValue;
+    }
+    const presetLabels = {
+      'last_7_days': 'Last 7 days',
+      'last_14_days': 'Last 14 days',
+      'last_30_days': 'Last 30 days',
+      'this_week': 'This week',
+      'last_week': 'Last week',
+      'this_month': 'This month',
+      'last_month': 'Last month'
+    };
+    return presetLabels[chartTimeRangeValue] || 'Last 7 days';
+  };
+
+  // Date range filter handler
+  const handleDateRangeApply = (payload) => {
+    console.log('[DateRangeFilter] handleDateRangeApply called with payload:', payload);
+    console.log('[DateRangeFilter] Dates received:', {
+      start_date: payload.start_date,
+      end_date: payload.end_date,
+      range_type: payload.range_type
+    });
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[DateRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[DateRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setDateRangeFilterValue(payload);
+    setDateFilters({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[DateRangeFilter] Date filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    // Update selected date range label
+    if (payload.range_type === 'custom') {
+      const start = new Date(payload.start_date);
+      const end = new Date(payload.end_date);
+      const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      setSelectedDateRange(`${startDisplay} - ${endDisplay}`);
+    } else {
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      setSelectedDateRange(presetLabels[payload.range_type] || payload.range_type);
+    }
+    
+    // Calculate days from date range
+    const start = new Date(payload.start_date);
+    const end = new Date(payload.end_date);
+    const diffTime = Math.abs(end - start);
+    const calculatedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+    setDays(calculatedDays);
+  };
+
+  // Helper to format date range display
+  const getDateRangeDisplay = () => {
+    if (dateRangeFilterValue) {
+      if (dateRangeFilterValue.range_type === 'custom') {
+        const start = new Date(dateRangeFilterValue.start_date);
+        const end = new Date(dateRangeFilterValue.end_date);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[dateRangeFilterValue.range_type] || selectedDateRange;
+    }
+    
+    // selectedDateRange is a string, check if it includes 'Week'
+    return selectedDateRange.includes('Week') ? selectedDateRange : `${dateFilters.startDate ? 'Custom' : 'Select Date'}: ${selectedDateRange}`;
+  };
+
+  // Legacy date filter handlers (keeping for backward compatibility)
+  const handleDateFilterChange = (e) => {
+    const { name, value } = e.target;
+    setDateFilters(prev => ({ ...prev, [name]: value }));
+  };
+
+  const applyDatePreset = (type) => {
+    const today = new Date();
+    const day = today.getDay();
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(today.setDate(diff));
+    const sunday = new Date(today.setDate(diff + 6));
+
+    let start = new Date(monday);
+    let end = new Date(sunday);
+
+    if (type === 'last_week') {
+      start.setDate(start.getDate() - 7);
+      end.setDate(end.getDate() - 7);
+      setSelectedDateRange('Last Week');
+    } else if (type === 'next_week') {
+      start.setDate(start.getDate() + 7);
+      end.setDate(end.getDate() + 7);
+      setSelectedDateRange('Next Week');
+    } else {
+      setSelectedDateRange('This Week');
+    }
+
+    setDateFilters({
+      startDate: start.toISOString().split('T')[0],
+      endDate: end.toISOString().split('T')[0]
+    });
+    
+    // Calculate days from date range
+    const diffTime = Math.abs(end - start);
+    const calculatedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+    setDays(calculatedDays);
+  };
+
+  // Platform options
+  const platformOptions = [
+    { id: 'facebook', name: 'Facebook' },
+    { id: 'instagram', name: 'Instagram' },
+    { id: 'youtube', name: 'YouTube' },
+    { id: 'tiktok', name: 'TikTok' },
+    { id: 'twitter', name: 'Twitter' },
+    { id: 'linkedin', name: 'LinkedIn' },
+  ];
+
+  // New data for content marketing charts
+  
+  // 1. Followers Count vs Platform - Use real data from page insights if available
+  const followersByPlatformData = useMemo(() => {
+    // If we have real page insights data, use it
+    if (pageInsightsData && pageInsightsData.current_followers > 0) {
+      // For now, show the selected page's followers
+      // If multiple pages/platforms are needed, we can aggregate later
+      return [
+        { platform: selectedPage && pages.find(p => p.id === selectedPage)?.name || 'Facebook', followers: pageInsightsData.current_followers }
+      ];
+    }
+    // Fallback to mock data
+    return [
+      { platform: 'Facebook', followers: 25000 },
+      { platform: 'Instagram', followers: 18000 },
+      { platform: 'YouTube', followers: 12000 },
+      { platform: 'LinkedIn', followers: 5000 },
+      { platform: 'Twitter', followers: 2500 },
+    ];
+  }, [pageInsightsData, selectedPage, pages]);
+
+  // 2. Leads Count vs Source
+  const leadsBySourceData = [
+    { source: 'Facebook', leads: 850 },
+    { source: 'Instagram', leads: 620 },
+    { source: 'Online leads', leads: 450 },
+    { source: 'Incoming call', leads: 320 },
+    { source: 'Website Leads', leads: 280 },
+    { source: 'Comments', leads: 150 },
+    { source: 'Direct Message', leads: 170 },
+  ];
+
+  // 3. Organic Revenue vs Date
+  const organicRevenueByDateData = [
+    { date: '01 Nov', revenue: 45000 },
+    { date: '05 Nov', revenue: 46500 },
+    { date: '10 Nov', revenue: 48000 },
+    { date: '15 Nov', revenue: 49500 },
+    { date: '20 Nov', revenue: 51000 },
+    { date: '25 Nov', revenue: 52500 },
+    { date: '30 Nov', revenue: 54000 },
+  ];
+
+  // 4. Leads Count vs Date
+  const leadsCountByDateData = [
+    { date: '01 Nov', leads: 2800 },
+    { date: '05 Nov', leads: 2900 },
+    { date: '10 Nov', leads: 3000 },
+    { date: '15 Nov', leads: 3100 },
+    { date: '20 Nov', leads: 3200 },
+    { date: '25 Nov', leads: 3300 },
+    { date: '30 Nov', leads: 3400 },
+  ];
+
+  // 5. Account Reach by Followers Count - Use real data from page insights if available
+  const accountReachByFollowersData = useMemo(() => {
+    // If we have real page insights data, use it
+    if (pageInsightsData && pageInsightsData.current_followers > 0 && pageInsightsData.current_reach > 0) {
+      const pageName = selectedPage && pages.find(p => p.id === selectedPage)?.name || 'Facebook';
+      return [
+        { platform: pageName, followers: pageInsightsData.current_followers, reach: pageInsightsData.current_reach }
+      ];
+    }
+    // Fallback to mock data
+    return [
+      { platform: 'Facebook', followers: 25000, reach: 125000 },
+      { platform: 'Instagram', followers: 18000, reach: 95000 },
+      { platform: 'YouTube', followers: 12000, reach: 78000 },
+    ];
+  }, [pageInsightsData, selectedPage, pages]);
+
+
+  return (
+    <div className="dashboard-wrapper">
+      {/* Header with Theme Toggle */}
+      <div className="dashboard-header">
+        <div className="d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div>
+            <h1 className="dashboard-title">
+              <span className="title-emoji">📊</span> Ads Analytics Dashboard
+            </h1>
+            <p className="dashboard-subtitle">Track your campaign performance in real-time</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Toast Notifications */}
+      {toast && (
+        <>
+          <style>
+            {`
+              @keyframes slideInRight {
+                from {
+                  transform: translateX(100%);
+                  opacity: 0;
+                }
+                to {
+                  transform: translateX(0);
+                  opacity: 1;
+                }
+              }
+              @keyframes slideOutRight {
+                from {
+                  transform: translateX(0);
+                  opacity: 1;
+                }
+                to {
+                  transform: translateX(100%);
+                  opacity: 0;
+                }
+              }
+            `}
+          </style>
+          <div
+            style={{
+              position: 'fixed',
+              top: '20px',
+              right: '20px',
+              zIndex: 9999,
+              minWidth: '320px',
+              maxWidth: '500px',
+              borderRadius: '8px',
+              padding: '16px 20px',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '14px',
+              backgroundColor: toast.type === 'success' ? '#4caf50' : 
+                             toast.type === 'warning' ? '#8b6914' : 
+                             '#d32f2f',
+              color: 'white',
+              animation: 'slideInRight 0.3s ease-out',
+              fontFamily: 'system-ui, -apple-system, sans-serif'
+            }}
+          >
+            {/* Icon */}
+            <div style={{ 
+              fontSize: '22px', 
+              flexShrink: 0, 
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '28px',
+              height: '28px'
+            }}>
+              {toast.type === 'success' && (
+                <span style={{ 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  width: '24px',
+                  height: '24px',
+                  borderRadius: '50%',
+                  backgroundColor: 'rgba(255,255,255,0.25)',
+                  color: 'white',
+                  fontSize: '16px',
+                  fontWeight: 'bold'
+                }}>✓</span>
+              )}
+              {toast.type === 'warning' && (
+                <span style={{ 
+                  display: 'inline-block',
+                  fontSize: '22px',
+                  lineHeight: '1'
+                }}>⚠</span>
+              )}
+              {toast.type === 'error' && (
+                <span style={{ 
+                  display: 'inline-block',
+                  fontSize: '22px',
+                  lineHeight: '1'
+                }}>⚠</span>
+              )}
+            </div>
+            
+            {/* Content */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ 
+                fontWeight: 'bold', 
+                fontSize: '16px', 
+                marginBottom: '6px',
+                lineHeight: '1.3'
+              }}>
+                {toast.title}
+              </div>
+              <div style={{ 
+                fontSize: '14px', 
+                lineHeight: '1.5',
+                marginBottom: toast.link ? '8px' : '0',
+                opacity: 0.95
+              }}>
+                {toast.message}
+              </div>
+              {toast.link && (
+                <a
+                  href={toast.link}
+                  style={{
+                    color: 'white',
+                    textDecoration: 'underline',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    display: 'inline-block',
+                    marginTop: '4px'
+                  }}
+                >
+                  {toast.linkText || toast.link}
+                </a>
+              )}
+            </div>
+            
+            {/* Close Button */}
+          <button
+            type="button"
+              onClick={() => setToast(null)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'white',
+                fontSize: '20px',
+                cursor: 'pointer',
+                padding: '0',
+                marginLeft: '8px',
+                flexShrink: 0,
+                opacity: 0.85,
+                transition: 'opacity 0.2s',
+                lineHeight: '1',
+                width: '20px',
+                height: '20px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+              onMouseEnter={(e) => e.target.style.opacity = '1'}
+              onMouseLeave={(e) => e.target.style.opacity = '0.85'}
+            aria-label="Close"
+            >
+              ×
+            </button>
+        </div>
+        </>
+      )}
+
+      {/* Filters */}
+      <div className="filter-card">
+        <div className="filter-card-body">
+          <div className="row g-3 align-items-center">
+            <div className="col-12 col-md-auto">
+              <label className="filter-label">
+                <span className="filter-emoji">🌐</span> Platform
+              </label>
+              <select
+                className="form-select form-select-sm"
+                value={selectedPlatform || ''}
+                onChange={(e) => {
+                  setSelectedPlatform(e.target.value || null);
+                  setPage(1);
+                }}
+                style={{ 
+                  fontSize: '0.875rem', 
+                  height: '36px',
+                  borderRadius: '5px',
+                  border: '1px solid #cbd5e1',
+                  background: 'white'
+                }}
+              >
+                <option value="">All Platforms</option>
+                {platformOptions.map(platform => (
+                  <option key={platform.id} value={platform.id}>
+                    {platform.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="col-12 col-md-auto">
+              <label className="filter-label">
+                <span className="filter-emoji">📅</span> Time Range
+              </label>
+              <button
+                type="button"
+                className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                onClick={() => setShowDateRangeFilter(true)}
+                  style={{
+                    borderRadius: '5px',
+                    color: '#64748b',
+                    borderColor: '#cbd5e1',
+                    transition: 'all 0.2s ease',
+                    height: '36px',
+                  minWidth: '180px',
+                  border: '1px solid #cbd5e1',
+                  background: 'white',
+                  width: '100%'
+                  }}
+                >
+                  <i className="far fa-calendar-alt text-secondary opacity-75"></i>
+                  <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.8rem' }}>
+                  {getDateRangeDisplay()}
+                  </span>
+                  <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                      </button>
+                </div>
+            <div className="col-12 col-md-auto">
+              <label className="filter-label">
+                <span className="filter-emoji">📄</span> Page
+              </label>
+              <select
+                className="form-select form-select-sm"
+                value={selectedPage || ''}
+                onChange={(e) => {
+                  setSelectedPage(e.target.value || null);
+                }}
+                style={{ 
+                  fontSize: '0.875rem', 
+                  height: '36px',
+                  borderRadius: '5px',
+                  border: '1px solid #cbd5e1',
+                  background: 'white'
+                }}
+              >
+                <option value="">All Pages</option>
+                {pages && pages.length > 0 ? (
+                  pages.map(page => (
+                    <option key={page.id} value={page.id}>
+                      {page.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="" disabled>Loading pages...</option>
+                )}
+              </select>
+            </div>
+            <div className="col-12 col-md-auto">
+              <label className="filter-label">
+                <span className="filter-emoji">🏢</span> Ad Account
+              </label>
+              <select
+                className="form-select form-select-sm"
+                value={selectedAdAccount || ''}
+                onChange={(e) => {
+                  const accountId = e.target.value || null;
+                  console.log('[Dashboard] ===== Ad Account Changed =====');
+                  console.log('[Dashboard] Previous selectedAdAccount:', selectedAdAccount);
+                  console.log('[Dashboard] New accountId from select:', accountId);
+                  console.log('[Dashboard] Available adAccounts:', adAccounts);
+                  console.log('[Dashboard] adAccounts length:', adAccounts.length);
+                  console.log('[Dashboard] Selected account details:', accountId 
+                    ? adAccounts.find(acc => acc.account_id === accountId)
+                    : 'All Ad Accounts (null)'
+                  );
+                  
+                  setSelectedAdAccount(accountId);
+                  // Clear campaign and ad selections and state when ad account changes
+                  setSelectedCampaigns([]);
+                  setSelectedAds([]);
+                  setCampaigns([]); // Clear campaigns state to trigger reload
+                  setAds([]); // Clear ads state
+                  setPage(1);
+                  
+                  console.log('[Dashboard] State updated - load() will be triggered by useEffect');
+                  console.log('[Dashboard] ===== End Ad Account Change =====');
+                }}
+                
+                style={{ 
+                  fontSize: '0.875rem', 
+                  height: '36px',
+                  borderRadius: '5px',
+                  border: '1px solid #cbd5e1',
+                  background: 'white'
+                }}
+              >
+                <option value="">All Ad Accounts</option>
+                {(() => {
+                  // Debug log for rendering
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log('[Dashboard] Rendering Ad Account select:', {
+                      adAccountsLoading,
+                      adAccountsLength: adAccounts?.length || 0,
+                      adAccounts: adAccounts,
+                      selectedAdAccount,
+                      hasAccounts: adAccounts && adAccounts.length > 0
+                    });
+                  }
+                  
+                  if (adAccountsLoading) {
+                    return <option value="" disabled>Loading ad accounts...</option>;
+                  }
+                  
+                  if (!adAccounts || adAccounts.length === 0) {
+                    return <option value="" disabled>No ad accounts available</option>;
+                  }
+                  
+                  return adAccounts.map(account => {
+                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                    const value = account.account_id || account.id;
+                    console.log('[Dashboard] Rendering account option:', { value, displayName, account });
+                    return (
+                      <option key={value} value={value}>
+                        {displayName}
+                      </option>
+                    );
+                  });
+                })()}
+              </select>
+            </div>
+            <div className="col-12 col-md-auto">
+              <MultiSelectFilter
+                label="Campaign"
+                emoji="🎯"
+                options={campaigns}
+                selectedValues={selectedCampaigns}
+                onChange={(values) => {
+                  setSelectedCampaigns(values);
+                  setSelectedAds([]); // Reset ad selection when campaign changes
+                  setPage(1);
+                }}
+                placeholder="All Campaigns"
+                getOptionLabel={(opt) => opt.name}
+                getOptionValue={(opt) => opt.id}
+                disabled={campaignsLoading}
+                loading={campaignsLoading}
+              />
+            </div>
+            <div className="col-12 col-md-auto">
+              <MultiSelectFilter
+                label="Ad Name"
+                emoji="📢"
+                options={ads}
+                selectedValues={selectedAds}
+                onChange={(values) => {
+                  setSelectedAds(values);
+                  setPage(1);
+                }}
+                placeholder="All Ads"
+                getOptionLabel={(opt) => opt.name}
+                getOptionValue={(opt) => opt.id}
+                disabled={
+                  // Disable only if ads haven't been loaded yet
+                  // Enable when: all campaigns selected (and ads loaded) OR specific campaigns selected (and ads loaded)
+                  ads.length === 0
+                }
+              />
+            </div>
+            <div className="col-12 col-md-auto ms-md-auto">
+              <button
+                className="refresh-btn"
+                onClick={load}
+                disabled={loading}
+              >
+                <span className="refresh-emoji">{loading ? "⏳" : "🔄"}</span>
+                {loading ? "Refreshing..." : "Refresh Data"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* KPI Row - Animated Cards */}
+      <div className="row g-3 mb-4">
+        {/* 1. Ad Spend */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-primary">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">💰</div>
+              <small className="kpi-label">Ad Spend</small>
+              <div className="kpi-value">{formatMoney(totals.spend)}</div>
+              <small className="kpi-change kpi-change-positive">
+                ↑ 12.5%
+              </small>
+            </div>
+          </div>
+        </div>
+
+        {/* 2. Total Leads */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-success">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">👥</div>
+              <small className="kpi-label">Total Leads</small>
+              <div className="kpi-value">{formatNum(totals.leads)}</div>
+              <small className="kpi-subtitle">Volume</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 3. Unique Leads */}
+        {/*<div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-info">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">✨</div>
+              <small className="kpi-label">Unique Leads</small>
+              <div className="kpi-value">{formatNum(totals.uniqueLeads)}</div>
+              <small className="kpi-subtitle">New</small>
+            </div>
+          </div>
+        </div>*/}
+
+        {/* 4. CPL */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-warning">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">💵</div>
+              <small className="kpi-label">Cost Per Lead</small>
+              <div className="kpi-value">{formatMoney(totals.cpl)}</div>
+              <small className="kpi-subtitle">Target: ₹5.00</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 5. CTR */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-purple">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">🖱️</div>
+              <small className="kpi-label">CTR (Link)</small>
+              <div className="kpi-value">{formatPerc(totals.ctr)}</div>
+              <small className="kpi-subtitle">Click Rate</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 6. Hook Rate */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-teal">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">🎣</div>
+              <small className="kpi-label">Hook Rate</small>
+              <div className="kpi-value">{formatPerc(totals.hookRate)}</div>
+              <small className="kpi-subtitle">3s Views</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 7. Hold Rate */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-pink">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">⏸️</div>
+              <small className="kpi-label">Hold Rate</small>
+              <div className="kpi-value">{formatPerc(totals.holdRate)}</div>
+              <small className="kpi-subtitle">ThruPlays</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 8. ROAS */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-orange">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">📈</div>
+              <small className="kpi-label">ROAS</small>
+              <div className="kpi-value">{formatNum(totals.roas)}x</div>
+              <small className="kpi-subtitle">Return on Ad Spend</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Additional Metrics Row */}
+      <div className="row g-3 mb-4">
+        {/* Impressions */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-info">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">👁️</div>
+              <small className="kpi-label">Impressions</small>
+              <div className="kpi-value">{formatNum(totals.impressions)}</div>
+              <small className="kpi-subtitle">Views</small>
+            </div>
+          </div>
+        </div>
+
+        {/* Clicks */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-success">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">🖱️</div>
+              <small className="kpi-label">Clicks</small>
+              <div className="kpi-value">{formatNum(totals.clicks)}</div>
+              <small className="kpi-subtitle">Total Clicks</small>
+            </div>
+          </div>
+        </div>
+
+        {/* Conversions */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-warning">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">✅</div>
+              <small className="kpi-label">Conversions</small>
+              <div className="kpi-value">{formatNum(totals.conversions)}</div>
+              <small className="kpi-subtitle">Total Conversions</small>
+            </div>
+          </div>
+        </div>
+
+        {/* Conversion Rate */}
+        <div className="col-6 col-md-4 col-lg-3 col-xl">
+          <div className="kpi-card kpi-card-purple">
+            <div className="kpi-card-body">
+              <div className="kpi-icon">📊</div>
+              <small className="kpi-label">Conversion Rate</small>
+              <div className="kpi-value">{formatPerc(totals.clicks > 0 ? (totals.conversions / totals.clicks) * 100 : 0)}</div>
+              <small className="kpi-subtitle">Clicks to Conversions</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Revenue Row */}
+      <div className="row g-3 mb-4">
+        {/* Online Conversion */}
+        <div className="col-6 col-md-4 col-lg-2 col-xl">
+          <div className="revenue-card revenue-card-online">
+            <div className="revenue-card-body">
+              <div className="revenue-icon">🛒</div>
+              <small className="revenue-label">Online Conversion</small>
+              <div className="revenue-value">{formatNum(totals.onlineConv)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Offline Conversion */}
+        <div className="col-6 col-md-4 col-lg-2 col-xl">
+          <div className="revenue-card revenue-card-offline">
+            <div className="revenue-card-body">
+              <div className="revenue-icon">🏪</div>
+              <small className="revenue-label">Offline Conversion</small>
+              <div className="revenue-value">{formatNum(totals.offlineConv)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* L1 Revenue */}
+        <div className="col-6 col-md-4 col-lg-2 col-xl">
+          <div className="revenue-card revenue-card-l1">
+            <div className="revenue-card-body">
+              <div className="revenue-icon">💎</div>
+              <small className="revenue-label">L1 Revenue</small>
+              <div className="revenue-value">{formatMoney(totals.l1Revenue)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* L2 Revenue */}
+        <div className="col-6 col-md-4 col-lg-2 col-xl">
+          <div className="revenue-card revenue-card-l2">
+            <div className="revenue-card-body">
+              <div className="revenue-icon">💠</div>
+              <small className="revenue-label">L2 Revenue</small>
+              <div className="revenue-value">{formatMoney(totals.l2Revenue)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Total Revenue */}
+        <div className="col-6 col-md-4 col-lg-2 col-xl">
+          <div className="revenue-card revenue-card-total">
+            <div className="revenue-card-body">
+              <div className="revenue-icon">💸</div>
+              <small className="revenue-label">Total Revenue</small>
+              <div className="revenue-value revenue-value-highlight">{formatMoney(totals.totalRevenue)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Charts */}
+{/* Spend vs Leads & Campaign performance */}
+<div className="row g-4 mb-4">
+        <div className="col-12 col-lg-6">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              <div className="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                  <strong className="chart-title">
+                    <span className="chart-emoji">📈</span> Leads over time
+                  </strong>
+                </div>
+                <small className="chart-subtitle">
+                  {days}-day range
+                </small>
+              </div>
+              <div className="chart-container">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={timeseries} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="colorLeads" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#4F46E5" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#4F46E5" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                    <YAxis />
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <Tooltip />
+                    <Area 
+                      type="monotone" 
+                      dataKey="leads" 
+                      stroke="#4F46E5" 
+                      fill="url(#colorLeads)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="col-12 col-lg-6">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              <strong className="chart-title">
+                <span className="chart-emoji">📊</span> Leads & CPL
+              </strong>
+              <div className="chart-container-large mt-3" style={{ height: '300px' }}>
+                {timeseries && timeseries.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={timeseries} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                      <XAxis 
+                        dataKey="date" 
+                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={formatDate}
+                      />
+                      <YAxis 
+                        yAxisId="left"
+                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        yAxisId="right"
+                        orientation="right"
+                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `₹${value.toFixed(0)}`}
+                      />
+                      <Tooltip 
+                        contentStyle={{ 
+                          borderRadius: '6px', 
+                          border: 'none', 
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                          padding: '8px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value, name) => {
+                          if (name === 'CPL (INR)') {
+                            return [formatMoney(value), 'CPL (INR)'];
+                          }
+                          if (name === 'Leads') {
+                            return [formatNum(value), 'Leads'];
+                          }
+                          return [formatNum(value), name];
+                        }}
+                        labelFormatter={(label) => `Date: ${formatDate(label)}`}
+                      />
+                      <Legend 
+                        wrapperStyle={{ paddingTop: '8px', fontSize: '11px' }}
+                        iconType="circle"
+                      />
+                      <Bar 
+                        yAxisId="left"
+                        dataKey="leads" 
+                        name="Leads" 
+                        fill="#6A4CAF"
+                        radius={[8, 8, 0, 0]}
+                        barSize={40}
+                      />
+                      <Line 
+                        yAxisId="right"
+                        type="monotone"
+                        dataKey="cpl"
+                        name="CPL (INR)" 
+                        stroke="#10B981"
+                        strokeWidth={2}
+                        dot={{ fill: '#10B981', r: 3 }}
+                        activeDot={{ r: 5 }}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="d-flex align-items-center justify-content-center" style={{ height: '100%', color: '#64748b' }}>
+                    <div className="text-center">
+                      <p className="mb-2">No data available</p>
+                      <small>Select a time range and campaigns to view Leads & CPL</small>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="col-12 col-lg-12">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              <strong className="chart-title d-block mb-3">
+                <span className="chart-emoji">🥧</span> Action Types (Breakdown)
+              </strong>
+              <div className="chart-container">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={actionBreakdown}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={90}
+                      label
+                    >
+                      {actionBreakdown.map((entry, i) => (
+                        <Cell 
+                          key={`cell-${i}`} 
+                          fill={COLORS[i % COLORS.length]}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                    <Legend verticalAlign="bottom" height={36} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Total Leads Table - Separate Row */}
+      <div className="row g-4 mb-4">
+        <div className="col-12">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              <div className="d-flex justify-content-between align-items-center mb-3">
+                <strong className="chart-title">
+                  <span className="chart-emoji">👥</span> Total Leads
+                </strong>
+                <div className="d-flex gap-2">
+                  <div className="dropdown">
+                    <button
+                      className="btn btn-sm btn-outline-success dropdown-toggle"
+                      type="button"
+                      id="downloadLeadsDropdown"
+                      data-bs-toggle="dropdown"
+                      aria-expanded="false"
+                      disabled={downloadingLeads || leadDetails.length === 0}
+                      style={{ fontSize: '0.75rem' }}
+                      title={leadDetails.length === 0 ? 'No leads available to download' : 'Download leads as CSV or Excel'}
+                    >
+                      {downloadingLeads ? (
+                        <>
+                          <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                          Downloading...
+                        </>
+                      ) : (
+                        <>
+                          <i className="fas fa-download me-1"></i>
+                          Download Leads
+                        </>
+                      )}
+                    </button>
+                    <ul className="dropdown-menu" aria-labelledby="downloadLeadsDropdown">
+                      <li>
+                        <button
+                          className="dropdown-item"
+                          onClick={handleDownloadCSV}
+                          disabled={downloadingLeads || leadDetails.length === 0}
+                        >
+                          <i className="fas fa-file-csv me-2"></i>
+                          Download as CSV
+                        </button>
+                      </li>
+                      <li>
+                        <button
+                          className="dropdown-item"
+                          onClick={handleDownloadExcel}
+                          disabled={downloadingLeads || leadDetails.length === 0}
+                        >
+                          <i className="fas fa-file-excel me-2"></i>
+                          Download as Excel
+                        </button>
+                      </li>
+                    </ul>
+                  </div>
+                <button
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={loadLeads}
+                  disabled={leadsLoading || !dateFilters.startDate || !dateFilters.endDate}
+                  style={{ fontSize: '0.75rem' }}
+                  title="Manually refresh leads (requires date range to be selected)"
+                >
+                  {leadsLoading ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                      Loading...
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-sync-alt me-1"></i>
+                      Refresh
+                    </>
+                  )}
+                </button>
+              </div>
+              </div>
+              
+              {/* Note: Filters are now in the main dashboard filters section at the top */}
+              {leadDetails.length === 0 && !leadsLoading && (
+                <div className="alert alert-info mb-3" style={{ fontSize: '0.875rem', padding: '12px' }}>
+                  <i className="fas fa-info-circle me-2"></i>
+                  Leads will appear automatically after pre-loading.
+                </div>
+              )}
+              <div className="mt-3">
+                {leadsLoading ? (
+                  <div className="text-center py-5">
+                    <div className="spinner-border text-primary" role="status">
+                      <span className="visually-hidden">Loading leads...</span>
+                    </div>
+                    <p className="mt-3 text-muted">Loading leads from Meta API...</p>
+                  </div>
+                ) : (
+                  <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto' }}>
+                    <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem' }}>
+                        <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+                          <tr>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Lead Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Phone Number</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Date & Time</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Street</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>City</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Page</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Campaign</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Ad Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Form</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {leadDetails.length > 0 ? (
+                          <>
+                            {visibleLeads.map((lead, idx) => (
+                              <tr key={lead.lead_id || lead.Id || lead.id || idx} style={{ cursor: 'pointer' }}>
+                                <td className="fw-medium" style={{ color: '#1e293b' }}>{lead.Name || lead.name || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.Phone || lead.phone || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
+                                <td style={{ color: '#64748b' }}>{lead.Street || lead.street || lead.address || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.City || lead.city || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.page_name || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.campaign_name || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.ad_name || 'N/A'}</td>
+                                <td style={{ color: '#64748b' }}>{lead.form_name || 'N/A'}</td>
+                              </tr>
+                            ))}
+                            <tr className="table-active">
+                              <td colSpan="9" className="fw-bold text-center" style={{ color: '#1e293b' }}>
+                                Total Leads: {formatNum(leadDetails.length)} {totalPages > 1 && `(Page ${page} of ${totalPages})`}
+                              </td>
+                            </tr>
+                          </>
+                        ) : (
+                          <tr>
+                            <td colSpan="7" className="text-center py-4" style={{ color: '#64748b' }}>
+                              {leadsLoading ? (
+                                <span>Loading leads...</span>
+                              ) : leadsError ? (
+                                <div className="p-3">
+                                  <div className="alert alert-warning mb-3" role="alert">
+                                    <h6 className="alert-heading mb-2">
+                                      <i className="fas fa-exclamation-triangle me-2"></i>
+                                      {leadsError.type === 'permission' ? 'Permission Error' : 'Error'}
+                                    </h6>
+                                    <p className="mb-2">{leadsError.message}</p>
+                                    {leadsError.details && (
+                                      <small className="text-muted d-block mb-2">{leadsError.details}</small>
+                                    )}
+                                    {leadsError.type === 'permission' && (
+                                      <div className="mt-3">
+                                        <a href="/meta-settings" className="btn btn-sm btn-primary me-2">
+                                          <i className="fas fa-cog me-1"></i>
+                                          Go to Meta Settings
+                                        </a>
+                                        <button 
+                                          className="btn btn-sm btn-outline-secondary"
+                                          onClick={() => {
+                                            setLeadsError(null);
+                                            loadLeads();
+                                          }}
+                                        >
+                                          <i className="fas fa-redo me-1"></i>
+                                          Retry
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="text-start mt-3" style={{ fontSize: '0.85rem' }}>
+                                    <strong>Steps to fix:</strong>
+                                    <ol className="mt-2 mb-0">
+                                      <li>Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer">Facebook Graph API Explorer</a></li>
+                                      <li>Select your app and generate a new access token</li>
+                                      <li>Ensure <code>leads_retrieval</code> permission is selected</li>
+                                      <li>Copy the new token and update it in Meta Settings</li>
+                                    </ol>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div>
+                                  <p className="mb-2">No leads data available.</p>
+                                  <small className="text-muted">Please check your Meta API connection or filters.</small>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {/* Pagination */}
+                {leadDetails.length > 0 && totalPages > 1 && (
+                  <div className="d-flex justify-content-between align-items-center mt-3">
+                    <div>
+                      <small className="text-muted">
+                        Showing {((page - 1) * perPage) + 1} to {Math.min(page * perPage, leadDetails.length)} of {leadDetails.length} leads
+                      </small>
+                    </div>
+                    <div className="d-flex gap-2">
+                      <button
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                        disabled={page === 1}
+                      >
+                        Previous
+                      </button>
+                      <button
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                        disabled={page === totalPages}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Ad Performance Table - Detailed Breakdown */}
+        <div className="row mb-4">
+          <div className="col-12">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div className="d-flex justify-content-between align-items-center mb-3">
+                  <strong className="chart-title">
+                    <span className="chart-emoji">📊</span> Ad Performance Breakdown
+                  </strong>
+                  <div className="d-flex align-items-center gap-3">
+                    <small className="text-muted">Real-time insights from Meta Ads API</small>
+                  </div>
+                </div>
+                <div className="table-responsive">
+                {sortedAdBreakdown.length > 0 ? (
+                  <table className="table table-hover align-middle mb-0">
+                    <thead className="table-light">
+                      <tr>
+                        <SortableHeader
+                          field="ad_name"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'ad_name') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('ad_name');
+                              setAdSortDirection('asc');
+                            }
+                          }}
+                        >
+                          Ad Name
+                        </SortableHeader>
+                        <SortableHeader
+                          field="campaign"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'campaign') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('campaign');
+                              setAdSortDirection('asc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Campaign
+                        </SortableHeader>
+                        <SortableHeader
+                          field="ad_status"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'ad_status') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('ad_status');
+                              setAdSortDirection('asc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Status
+                        </SortableHeader>
+                        <SortableHeader
+                          field="spend"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'spend') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('spend');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Spend
+                        </SortableHeader>
+                        <SortableHeader
+                          field="impressions"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'impressions') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('impressions');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Impressions
+                        </SortableHeader>
+                        <SortableHeader
+                          field="clicks"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'clicks') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('clicks');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Clicks
+                        </SortableHeader>
+                        <SortableHeader
+                          field="ctr"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'ctr') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('ctr');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          CTR
+                        </SortableHeader>
+                        <SortableHeader
+                          field="leads"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'leads') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('leads');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Total Leads
+                        </SortableHeader>
+                        <SortableHeader
+                          field="leads"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'leads') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('leads');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Unique Leads
+                        </SortableHeader>
+                        <SortableHeader
+                          field="cpl"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'cpl') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('cpl');
+                              setAdSortDirection('asc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          CPL
+                        </SortableHeader>
+                        <SortableHeader
+                          field="conversions"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'conversions') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('conversions');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Conversions
+                        </SortableHeader>
+                        <SortableHeader
+                          field="hookRate"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'hookRate') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('hookRate');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Hook Rate
+                        </SortableHeader>
+                        <SortableHeader
+                          field="holdRate"
+                          currentField={adSortField}
+                          currentDirection={adSortDirection}
+                          onClick={() => {
+                            if (adSortField === 'holdRate') {
+                              setAdSortDirection(adSortDirection === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setAdSortField('holdRate');
+                              setAdSortDirection('desc');
+                            }
+                          }}
+                          className="text-end"
+                        >
+                          Hold Rate
+                        </SortableHeader>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedAdBreakdown.map((ad, idx) => (
+                        <tr
+                          key={ad.ad_id}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <td className="fw-medium">{ad.ad_name}</td>
+                          <td className="text-end text-muted small">{ad.campaign}</td>
+                          <td className="text-end">
+                            <span className={`badge ${ad.ad_status === 'ACTIVE' ? 'bg-success' : ad.ad_status === 'PAUSED' ? 'bg-warning' : 'bg-secondary'}`}>
+                              {ad.ad_status}
+                            </span>
+                          </td>
+                          <td className="text-end fw-bold">{formatMoney(ad.spend)}</td>
+                          <td className="text-end">{formatNum(ad.impressions)}</td>
+                          <td className="text-end">{formatNum(ad.clicks)}</td>
+                          <td className="text-end fw-medium">{formatPerc(ad.ctr)}</td>
+                          <td className="text-end fw-bold text-primary">{formatNum(ad.leads)}</td>
+                          <td className="text-end">{formatNum(ad.leads)}</td>
+                          <td className="text-end fw-medium">{formatMoney(ad.cpl)}</td>
+                          <td className="text-end">{formatNum(ad.conversions)}</td>
+                          <td className="text-end">{formatPerc(ad.hookRate)}</td>
+                          <td className="text-end">{formatPerc(ad.holdRate)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="table-light fw-bold">
+                      <tr>
+                        <td colSpan="3">Total</td>
+                        <td className="text-end">{formatMoney(sortedAdBreakdown.reduce((sum, ad) => sum + ad.spend, 0))}</td>
+                        <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.impressions, 0))}</td>
+                        <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.clicks, 0))}</td>
+                        <td className="text-end">{formatPerc(totals.ctr)}</td>
+                        <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.leads, 0))}</td>
+                        <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.leads, 0))}</td>
+                        <td className="text-end">{formatMoney(totals.cpl)}</td>
+                        <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.conversions, 0))}</td>
+                        <td className="text-end">{formatPerc(totals.hookRate)}</td>
+                        <td className="text-end">{formatPerc(totals.holdRate)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                ) : (
+                  <div className="text-center py-5" style={{ color: '#64748b' }}>
+                    <p className="mb-0">No ad data available. Please select filters or check your Meta API connection.</p>
+                </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Content Marketing - Dashboard Section */}
+      <div
+        className="dashboard-wrapper"
+        style={{ marginTop: '50px', paddingTop: '32px', borderTop: '2px solid #e2e8f0' }}
+      >
+        {/* Header */}
+        <div className="dashboard-header">
+          <div className="d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+              <h1 className="dashboard-title">
+                <span className="title-emoji">📱</span> Content Marketing - Dashboard
+              </h1>
+              <p className="dashboard-subtitle">Track your content performance and organic growth</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div className="filter-card">
+          <div className="filter-card-body">
+            <div className="row g-3 align-items-center">
+              {/* Date Filter - Using DateRangeFilter Modal */}
+              <div className="col-12 col-md-auto">
+                <label className="filter-label">
+                  <span className="filter-emoji">📅</span> Time Range
+                </label>
+                <button
+                  type="button"
+                  className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                  onClick={() => setShowContentDateRangeFilter(true)}
+                  style={{
+                    borderRadius: '5px',
+                    color: '#64748b',
+                    borderColor: '#cbd5e1',
+                    transition: 'all 0.2s ease',
+                    height: '36px',
+                    minWidth: '180px',
+                    border: '1px solid #cbd5e1',
+                    background: 'white',
+                    width: '100%'
+                  }}
+                >
+                  <i className="far fa-calendar-alt text-secondary opacity-75"></i>
+                  <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.8rem' }}>
+                    {getContentDateRangeDisplay()}
+                  </span>
+                  <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                </button>
+              </div>
+              {/* Business Accounts Filter */}
+              <div className="col-12 col-md-auto">
+                <MultiSelectFilter
+                  label="Business Accounts"
+                  emoji="🏢"
+                  options={businessAccounts}
+                  selectedValues={selectedBusinessAccounts}
+                  onChange={(values) => {
+                    setSelectedBusinessAccounts(values);
+                  }}
+                  placeholder="All Business Accounts"
+                  getOptionLabel={(opt) => opt.business_name || `Business ${opt.business_id}`}
+                  getOptionValue={(opt) => opt.business_id}
+                />
+              </div>
+              {/* Platform Filter */}
+              <div className="col-12 col-md-auto">
+                <MultiSelectFilter
+                  label="Platform"
+                  emoji="🌐"
+                  options={platformOptions}
+                  selectedValues={selectedPlatforms}
+                  onChange={(values) => {
+                    setSelectedPlatforms(values);
+                  }}
+                  placeholder="All Platforms"
+                  getOptionLabel={(opt) => opt.name}
+                  getOptionValue={(opt) => opt.id}
+                />
+              </div>
+              {/* Source Filter */}
+              <div className="col-12 col-md-auto">
+                <MultiSelectFilter
+                  label="Source"
+                  emoji="🔗"
+                  options={[
+                    { id: 'facebook', name: 'Facebook' },
+                    { id: 'instagram', name: 'Instagram' },
+                    { id: 'online_leads', name: 'Online leads' },
+                    { id: 'incoming_call', name: 'Incoming call' },
+                    { id: 'website_leads', name: 'Website Leads' },
+                    { id: 'comments', name: 'Comments' },
+                    { id: 'direct_message', name: 'Direct Message' },
+                  ]}
+                  selectedValues={selectedSource}
+                  onChange={(values) => {
+                    setSelectedSource(values);
+                  }}
+                  placeholder="All Sources"
+                  getOptionLabel={(opt) => opt.name}
+                  getOptionValue={(opt) => opt.id}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Content Marketing Page Insights Error */}
+        {contentPageInsightsError && (
+          <div className="alert alert-warning mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+            <small>
+              <i className="fas fa-exclamation-triangle me-1"></i>
+              {contentPageInsightsError.message}
+              {contentPageInsightsError.details && (
+                <div className="mt-1" style={{ fontSize: '0.8rem' }}>{contentPageInsightsError.details}</div>
+              )}
+            </small>
+          </div>
+        )}
+        
+        {/* Info message if no page is selected */}
+        {!selectedPage && pages.length === 0 && (
+          <div className="alert alert-info mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+            <small>
+              <i className="fas fa-info-circle me-1"></i>
+              No pages available. Please ensure your Meta Access Token has access to pages.
+            </small>
+          </div>
+        )}
+        
+        {!selectedPage && pages.length > 0 && (
+          <div className="alert alert-info mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+            <small>
+              <i className="fas fa-info-circle me-1"></i>
+              Please select a page from the filters above to view insights.
+            </small>
+          </div>
+        )}
+
+        {/* KPI Row - Content Marketing */}
+        <div className="row g-3 mb-4">
+          {/* 0. Views */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-info">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">👁️</div>
+                <small className="kpi-label">Views</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(performanceInsightsData?.total_views || 0)
+                  )}
+                </div>
+                {performanceInsightsData && (
+                  <small className={`kpi-change ${performanceInsightsData.viewsChange >= 0 ? 'kpi-change-positive' : 'kpi-change-negative'}`}>
+                    {formatChange(performanceInsightsData.viewsChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 0.1 Interactions */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-teal">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">🤝</div>
+                <small className="kpi-label">Interactions</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(performanceInsightsData?.total_interactions || 0)
+                  )}
+                </div>
+                {performanceInsightsData && (
+                  <small className={`kpi-change ${performanceInsightsData.interactionsChange >= 0 ? 'kpi-change-positive' : 'kpi-change-negative'}`}>
+                    {formatChange(performanceInsightsData.interactionsChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 1. Follows */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-primary">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">👥</div>
+                <small className="kpi-label">Follows</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(performanceInsightsData?.total_follows || 0)
+                  )}
+                </div>
+                {performanceInsightsData && (
+                  <small className={`kpi-change ${performanceInsightsData.followsChange >= 0 ? 'kpi-change-positive' : 'kpi-change-negative'}`}>
+                    {formatChange(performanceInsightsData.followsChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Reached */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-success">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">📱</div>
+                <small className="kpi-label">Reached</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(performanceInsightsData?.total_reached || 0)
+                  )}
+                </div>
+                {performanceInsightsData && (
+                  <small className={`kpi-change ${performanceInsightsData.reachChange >= 0 ? 'kpi-change-positive' : 'kpi-change-negative'}`}>
+                    {formatChange(performanceInsightsData.reachChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 3. Organic Leads */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-info">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">🌱</div>
+                <small className="kpi-label">Organic Leads</small>
+                <div className="kpi-value">
+                  {contentMarketingRevenue.loading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(contentMarketingRevenue.organicLeads || 0)
+                  )}
+                </div>
+                {contentMarketingRevenue.organicLeads > 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    ↑
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 4. Organic Conversion */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-warning">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">💵</div>
+                <small className="kpi-label">Organic Conversion</small>
+                <div className="kpi-value">
+                  {contentMarketingRevenue.loading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(contentMarketingRevenue.organicConversion || 0)
+                  )}
+                </div>
+                {contentMarketingRevenue.organicConversion > 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    ↑
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Additional KPI Row - Content Marketing */}
+        <div className="row g-3 mb-4">
+          {/* 5. L1 Revenue */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-l1">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">💎</div>
+                <small className="kpi-label">L1 Revenue Organic </small>
+                <div className="kpi-value">
+                  {contentMarketingRevenue.loading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatMoney(contentMarketingRevenue.l1Revenue || 0)
+                  )}
+                </div>
+                {contentMarketingRevenue.l1Revenue > 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    ↑
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 6. L2 Revenue */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-l2">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">💠</div>
+                <small className="kpi-label">L2 Revenue Organic</small>
+                <div className="kpi-value">
+                  {contentMarketingRevenue.loading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatMoney(contentMarketingRevenue.l2Revenue || 0)
+                  )}
+                </div>
+                {contentMarketingRevenue.l2Revenue > 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    ↑
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 7. Total Revenue */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-total">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">💰</div>
+                <small className="kpi-label">Total Organic Revenue</small>
+                <div className="kpi-value">
+                  {contentMarketingRevenue.loading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatMoney(contentMarketingRevenue.totalRevenue || 0)
+                  )}
+                </div>
+                {contentMarketingRevenue.totalRevenue > 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    ↑
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 8. Unfollows */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-unfollowers">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">👋</div>
+                <small className="kpi-label">Unfollows</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    formatNum(performanceInsightsData?.total_unfollows || 0)
+                  )}
+                </div>
+                {performanceInsightsData && (
+                  <small className={`kpi-change ${performanceInsightsData.unfollowsChange >= 0 ? 'kpi-change-negative' : 'kpi-change-positive'}`}>
+                    {formatChange(performanceInsightsData.unfollowsChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      
+      
+        {/* Content Marketing Charts */}
+        {/* Chart 1: Followers Count vs Platform & Chart 2: Leads Count vs Source */}
+        <div className="row g-4 mb-4">
+          <div className="col-12 col-lg-6">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div className="d-flex justify-content-between align-items-center">
+                  <strong className="chart-title">
+                    <span className="chart-emoji">👥</span> Followers Count vs Platform
+                  </strong>
+                  {pageInsightsLoading && (
+                    <small className="text-muted">
+                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                      Loading...
+                    </small>
+                  )}
+                </div>
+                {pageInsightsError && (
+                  <div className="alert alert-warning mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+                    <small>
+                      <i className="fas fa-exclamation-triangle me-1"></i>
+                      {pageInsightsError.message}
+                      {pageInsightsError.details && (
+                        <div className="mt-1" style={{ fontSize: '0.8rem' }}>{pageInsightsError.details}</div>
+                      )}
+                    </small>
+                  </div>
+                )}
+                {!selectedPage && (
+                  <div className="alert alert-info mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+                    <small>
+                      <i className="fas fa-info-circle me-1"></i>
+                      Please select a page to view real followers data
+                    </small>
+                  </div>
+                )}
+                <div className="chart-container-large mt-3" style={{ height: '350px' }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={followersByPlatformData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                      <XAxis 
+                        dataKey="platform" 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `${(value / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: 'rgba(79, 70, 229, 0.1)' }}
+                        contentStyle={{ 
+                          borderRadius: '8px', 
+                          border: '1px solid #e2e8f0', 
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                          padding: '10px 12px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value) => [formatNum(value), 'Followers']}
+                        animationDuration={200}
+                      />
+                      <Bar 
+                        dataKey="followers" 
+                        fill="#4F46E5" 
+                        radius={[8, 8, 0, 0]}
+                        barSize={50}
+                        animationBegin={0}
+                        animationDuration={1500}
+                        animationEasing="ease-out"
+                      >
+                        {followersByPlatformData.map((entry, index) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill="#4F46E5"
+                            style={{ 
+                              transition: 'all 0.3s ease',
+                              cursor: 'pointer'
+                            }}
+                      />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="col-12 col-lg-6">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div>
+                  <strong className="chart-title">
+                    <span className="chart-emoji">📊</span> Leads Count vs Source
+                  </strong>
+                </div>
+                <div className="chart-container-large mt-3" style={{ height: '350px' }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={leadsBySourceData} margin={{ top: 10, right: 20, left: 10, bottom: 70 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                      <XAxis 
+                        dataKey="source" 
+                        tick={{ fontSize: 10, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                        angle={-45}
+                        textAnchor="end"
+                        height={80}
+                      />
+                      <YAxis 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: 'rgba(16, 185, 129, 0.1)' }}
+                        contentStyle={{ 
+                          borderRadius: '8px', 
+                          border: '1px solid #e2e8f0', 
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                          padding: '10px 12px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value) => [formatNum(value), 'Leads']}
+                        animationDuration={200}
+                      />
+                      <Bar 
+                        dataKey="leads" 
+                        fill="#10B981" 
+                        radius={[8, 8, 0, 0]}
+                        barSize={40}
+                        animationBegin={200}
+                        animationDuration={1500}
+                        animationEasing="ease-out"
+                      >
+                        {leadsBySourceData.map((entry, index) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill="#10B981"
+                            style={{ 
+                              transition: 'all 0.3s ease',
+                              cursor: 'pointer'
+                            }}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Chart 3: Organic Revenue vs Date & Chart 4: Leads Count vs Date */}
+        <div className="row g-4 mb-4">
+          <div className="col-12 col-lg-6">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div>
+                  <strong className="chart-title">
+                    <span className="chart-emoji">💵</span> Organic Revenue vs Date
+                  </strong>
+                </div>
+                <div className="chart-container-large mt-3" style={{ height: '350px' }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={organicRevenueByDateData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
+                      <defs>
+                        <linearGradient id="colorRevenueChart" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.6} />
+                          <stop offset="50%" stopColor="#F59E0B" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="#F59E0B" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis 
+                        dataKey="date" 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }} 
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `₹${(value / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        cursor={{ stroke: '#F59E0B', strokeWidth: 2, strokeDasharray: '5 5' }}
+                        contentStyle={{ 
+                          borderRadius: '8px', 
+                          border: '1px solid #e2e8f0', 
+                          boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                          padding: '10px 12px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value) => [`₹${value.toLocaleString()}`, 'Organic Revenue']}
+                        animationDuration={200}
+                        labelStyle={{ fontWeight: 600, marginBottom: '4px' }}
+                      />
+                      <Area 
+                        type="monotone" 
+                        dataKey="revenue" 
+                        stroke="#F59E0B" 
+                        strokeWidth={3}
+                        fill="url(#colorRevenueChart)" 
+                        name="Organic Revenue"
+                        animationBegin={0}
+                        animationDuration={1800}
+                        animationEasing="ease-out"
+                        dot={{ r: 5, fill: '#F59E0B', strokeWidth: 2, stroke: '#fff' }}
+                        activeDot={{ r: 8, fill: '#F59E0B', strokeWidth: 3, stroke: '#fff', cursor: 'pointer' }}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="col-12 col-lg-6">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div>
+                  <strong className="chart-title">
+                    <span className="chart-emoji">📈</span> Leads Count vs Date
+                  </strong>
+                </div>
+                <div className="chart-container-large mt-3" style={{ height: '350px' }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={leadsCountByDateData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
+                      <defs>
+                        <linearGradient id="colorLeadsChart" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10B981" stopOpacity={0.6} />
+                          <stop offset="50%" stopColor="#10B981" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis 
+                        dataKey="date" 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }} 
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ stroke: '#10B981', strokeWidth: 2, strokeDasharray: '5 5' }}
+                        contentStyle={{ 
+                          borderRadius: '8px', 
+                          border: '1px solid #e2e8f0', 
+                          boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                          padding: '10px 12px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value) => [formatNum(value), 'Leads']}
+                        animationDuration={200}
+                        labelStyle={{ fontWeight: 600, marginBottom: '4px' }}
+                      />
+                      <Area 
+                        type="monotone" 
+                        dataKey="leads" 
+                        stroke="#10B981" 
+                        strokeWidth={3}
+                        fill="url(#colorLeadsChart)" 
+                        name="Leads Count"
+                        animationBegin={200}
+                        animationDuration={1800}
+                        animationEasing="ease-out"
+                        dot={{ r: 5, fill: '#10B981', strokeWidth: 2, stroke: '#fff' }}
+                        activeDot={{ r: 8, fill: '#10B981', strokeWidth: 3, stroke: '#fff', cursor: 'pointer' }}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Chart 5: Account Reach by Followers Count */}
+        <div className="row g-4 mb-4">
+          <div className="col-12">
+            <div className="chart-card">
+              <div className="chart-card-body">
+                <div className="d-flex justify-content-between align-items-center">
+                  <strong className="chart-title">
+                    <span className="chart-emoji">📱</span> Account Reach by Followers Count
+                  </strong>
+                  <div className="d-flex align-items-center gap-2">
+                    {/* Time Range Filter Button */}
+                    <button
+                      type="button"
+                      className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                      onClick={() => setShowChartTimeRangeFilter(true)}
+                      style={{
+                        borderRadius: '5px',
+                        color: '#64748b',
+                        borderColor: '#cbd5e1',
+                        transition: 'all 0.2s ease',
+                        height: '36px',
+                        minWidth: '160px',
+                        border: '1px solid #cbd5e1',
+                        background: 'white',
+                        fontSize: '0.8rem'
+                      }}
+                    >
+                      <i className="far fa-calendar-alt text-secondary opacity-75"></i>
+                      <span className="fw-medium small text-dark" style={{ fontSize: '0.8rem' }}>
+                        {getChartTimeRangeDisplay()}
+                      </span>
+                      <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                    </button>
+                    {pageInsightsLoading && (
+                      <small className="text-muted">
+                        <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                        Loading...
+                      </small>
+                    )}
+                  </div>
+                </div>
+                {pageInsightsError && (
+                  <div className="alert alert-warning mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+                    <small>
+                      <i className="fas fa-exclamation-triangle me-1"></i>
+                      {pageInsightsError.message}
+                      {pageInsightsError.details && (
+                        <div className="mt-1" style={{ fontSize: '0.8rem' }}>{pageInsightsError.details}</div>
+                      )}
+                    </small>
+                  </div>
+                )}
+                {!selectedPage && (
+                  <div className="alert alert-info mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+                    <small>
+                      <i className="fas fa-info-circle me-1"></i>
+                      Please select a page to view real reach and followers data
+                    </small>
+                  </div>
+                )}
+                <div className="chart-container-large mt-3" style={{ height: '400px' }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={accountReachByFollowersData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                      <XAxis 
+                        dataKey="platform" 
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        yAxisId="left"
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `${(value / 1000).toFixed(0)}k`}
+                      />
+                      <YAxis 
+                        yAxisId="right"
+                        orientation="right"
+                        tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `${(value / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: 'rgba(79, 70, 229, 0.05)' }}
+                        contentStyle={{ 
+                          borderRadius: '8px', 
+                          border: '1px solid #e2e8f0', 
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                          padding: '10px 12px',
+                          backgroundColor: 'white'
+                        }}
+                        formatter={(value, name) => {
+                          if (name === 'followers') {
+                            return [formatNum(value), 'Followers'];
+                          }
+                          if (name === 'reach') {
+                            return [formatNum(value), 'Reach'];
+                          }
+                          return [value, name];
+                        }}
+                        animationDuration={200}
+                        labelStyle={{ fontWeight: 600, marginBottom: '4px' }}
+                      />
+                      <Legend 
+                        wrapperStyle={{ paddingTop: '12px', fontSize: '12px', fontWeight: 500 }}
+                        iconType="circle"
+                      />
+                      <Bar 
+                        yAxisId="left"
+                        dataKey="followers" 
+                        fill="#4F46E5" 
+                        name="Followers"
+                        radius={[8, 8, 0, 0]}
+                        barSize={60}
+                        animationBegin={0}
+                        animationDuration={1500}
+                        animationEasing="ease-out"
+                      >
+                        {accountReachByFollowersData.map((entry, index) => (
+                          <Cell 
+                            key={`cell-followers-${index}`} 
+                            fill="#4F46E5"
+                            style={{ 
+                              transition: 'all 0.3s ease',
+                              cursor: 'pointer'
+                            }}
+                      />
+                        ))}
+                      </Bar>
+                      <Bar 
+                        yAxisId="right"
+                        dataKey="reach" 
+                        fill="#06B6D4" 
+                        name="Reach"
+                        radius={[8, 8, 0, 0]}
+                        barSize={60}
+                        animationBegin={300}
+                        animationDuration={1500}
+                        animationEasing="ease-out"
+                      >
+                        {accountReachByFollowersData.map((entry, index) => (
+                          <Cell 
+                            key={`cell-reach-${index}`} 
+                            fill="#06B6D4"
+                            style={{ 
+                              transition: 'all 0.3s ease',
+                              cursor: 'pointer'
+                            }}
+                      />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Date Range Filter Modal for Main Dashboard */}
+      <DateRangeFilter
+        isOpen={showDateRangeFilter}
+        onClose={() => setShowDateRangeFilter(false)}
+        onApply={handleDateRangeApply}
+        initialValue={dateRangeFilterValue || {
+          range_type: selectedDateRange === 'last_7_days' ? 'last_7_days' : 
+                      selectedDateRange === 'last_14_days' ? 'last_14_days' :
+                      selectedDateRange === 'last_30_days' ? 'last_30_days' :
+                      selectedDateRange === 'This week' ? 'this_week' :
+                      selectedDateRange === 'Last week' ? 'last_week' :
+                      selectedDateRange === 'This month' ? 'this_month' :
+                      selectedDateRange === 'Last month' ? 'last_month' :
+                      'last_7_days', // Default to last 7 days
+          start_date: dateFilters.startDate || null,
+          end_date: dateFilters.endDate || null,
+          timezone: 'Asia/Kolkata',
+          compare: { enabled: false }
+        }}
+      />
+
+      {/* Date Range Filter Modal for Leads Section */}
+      <DateRangeFilter
+        isOpen={showLeadsDateRangeFilter}
+        onClose={() => setShowLeadsDateRangeFilter(false)}
+        onApply={handleLeadsDateRangeApply}
+        initialValue={leadsDateRangeFilterValue || {
+          range_type: leadsTimeRange,
+          start_date: dateFilters.startDate || null,
+          end_date: dateFilters.endDate || null,
+          timezone: 'Asia/Kolkata',
+          compare: { enabled: false }
+        }}
+      />
+
+      {/* Date Range Filter Modal for Content Marketing Section */}
+      <DateRangeFilter
+        isOpen={showContentDateRangeFilter}
+        onClose={() => setShowContentDateRangeFilter(false)}
+        onApply={handleContentDateRangeApply}
+        initialValue={contentDateRangeFilterValue || {
+          range_type: contentDateRange,
+          start_date: contentFilters.startDate || null,
+          end_date: contentFilters.endDate || null,
+          timezone: 'Asia/Kolkata',
+          compare: { enabled: false }
+        }}
+      />
+
+      {/* Date Range Filter Modal for Chart "Account Reach by Followers Count" */}
+      <DateRangeFilter
+        isOpen={showChartTimeRangeFilter}
+        onClose={() => setShowChartTimeRangeFilter(false)}
+        onApply={handleChartTimeRangeApply}
+        initialValue={chartTimeRangeFilterValue || {
+          range_type: chartTimeRangeValue,
+          start_date: chartTimeRange.startDate || null,
+          end_date: chartTimeRange.endDate || null,
+          timezone: 'Asia/Kolkata',
+          compare: { enabled: false }
+        }}
+      />
+    </div>
+  );
+}

@@ -1,0 +1,174 @@
+/* ===========================
+   PLAN PAGE - ENHANCED & MOBILE
+   =========================== */
+
+:root {
+    --primary-blue: #1877f2;
+    --secondary-bg: #f3f4f6;
+    --text-dark: #1c1e21;
+    --card-bg: #ffffff;
+    --success: #31a24c;
+}
+
+.bg-light-gray {
+    background-color: var(--secondary-bg);
+}
+
+.text-dark-blue {
+    color: #050505;
+}
+
+/* --- TYPOGRAPHY --- */
+.fw-900 {
+    font-weight: 400 !important;
+}
+
+.ls-1 {
+    letter-spacing: 1px;
+}
+
+.display-6 {
+    font-size: 2rem;
+}
+
+@media (max-width: 768px) {
+    .display-6 {
+        font-size: 1.5rem;
+    }
+}
+
+/* --- EXPLICIT BUTTON OVERRIDES (Fixing Visibility Issues) --- */
+.plan-dropdown-btn {
+    background-color: #ffffff !important;
+    color: #1c1e21 !important;
+    border: 1px solid #e2e8f0 !important;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05) !important;
+}
+
+.plan-dropdown-btn:hover,
+.plan-dropdown-btn:focus {
+    background-color: #f8fafc !important;
+    border-color: #cbd5e1 !important;
+    color: #0f2d5e !important;
+}
+
+.plan-action-btn {
+    background-color: transparent !important;
+    /* Ensure it's not solid blue */
+    color: #1877f2 !important;
+    border: 1px solid #1877f2 !important;
+    font-weight: 700 !important;
+}
+
+.plan-action-btn:hover {
+    background-color: #1877f2 !important;
+    color: #ffffff !important;
+}
+
+/* --- ICONS & BADGES --- */
+.icon-box-lg {
+    width: 56px;
+    height: 56px;
+    background: #e7f3ff;
+    position: relative;
+    transition: all 0.3s ease;
+}
+
+.shadow-inner {
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.platform-badge {
+    position: absolute;
+    bottom: -2px;
+    right: -2px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 2px solid white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 10px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
+/* --- DRAG GOAL MARKER --- */
+.goal-marker {
+    cursor: grab;
+    transform: translateX(-50%);
+}
+
+.goal-marker:active {
+    cursor: grabbing;
+}
+
+.marker-line {
+    width: 2px;
+    height: 24px;
+    background: #1c1e21;
+}
+
+.marker-knob {
+    width: 32px;
+    height: 32px;
+    background: #1c1e21;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    border: 2px solid white;
+}
+
+.marker-label {
+    background: white;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: bold;
+    margin-top: 4px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    border: 1px solid #eee;
+}
+
+.custom-icon-size {
+    font-size: 14px;
+}
+
+/* --- TASK CARD --- */
+.task-card-interactive {
+    transition: background-color 0.2s;
+    background: var(--card-bg) !important;
+}
+
+.task-card-interactive:hover .icon-box-lg {
+    transform: scale(1.1) rotate(-5deg);
+    background: #1877f2;
+}
+
+.task-card-interactive:hover .icon-box-lg i {
+    color: white !important;
+}
+
+/* --- MOBILE RESPONSIVENESS --- */
+@media (max-width: 768px) {
+    .w-100-mobile {
+        width: 100% !important;
+    }
+
+    .card-body {
+        padding: 1rem !important;
+    }
+
+    .icon-box-lg {
+        width: 48px;
+        height: 48px;
+    }
+
+    .btn {
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+}
