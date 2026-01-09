@@ -1,62 +1,114 @@
 require('dotenv').config();
-const { sql, getPool } = require('./db');
+const { supabase } = require('./supabase');
 
-function randomInt(min, max){ return Math.floor(Math.random()*(max-min+1))+min; }
-function randomPhone(){ return '+1' + (1000000000 + randomInt(0, 899999999)).toString(); }
-
-async function run() {
-  const pool = await getPool();
-  await pool.request().query('DELETE FROM Ads; DELETE FROM Leads;');
-  const campaigns = ['Alpha','Beta','Gamma'];
-  const days = 90;
-  const now = new Date();
-
-  const insertAd = async (campaign, dateChar, leads, spend, actionsJson) => {
-    await pool.request()
-      .input('campaign', sql.NVarChar, campaign)
-      .input('dateChar', sql.Char(10), dateChar)
-      .input('leads', sql.Int, leads)
-      .input('spend', sql.Decimal(18,2), spend)
-      .input('actionsJson', sql.NVarChar, JSON.stringify(actionsJson))
-      .query('INSERT INTO Ads (Campaign, DateChar, Leads, Spend, ActionsJson) VALUES (@campaign, @dateChar, @leads, @spend, @actionsJson)');
-  };
-
-  const insertLead = async (name, phone, timeUtc, dateChar, campaign) => {
-    await pool.request()
-      .input('name', sql.NVarChar, name)
-      .input('phone', sql.NVarChar, phone)
-      .input('time', sql.DateTime2, timeUtc)
-      .input('dateChar', sql.Char(10), dateChar)
-      .input('campaign', sql.NVarChar, campaign)
-      .query('INSERT INTO Leads (Name, Phone, TimeUtc, DateChar, Campaign) VALUES (@name, @phone, @time, @dateChar, @campaign)');
-  };
-
-  for (let d = days - 1; d >= 0; d--) {
-    const date = new Date(now);
-    date.setDate(now.getDate() - d);
-    const dateStr = date.toISOString().slice(0,10);
-
-    for (const c of campaigns) {
-      const leads = Math.max(0, Math.round(3 + Math.random() * 25));
-      const spend = Number((Math.random() * 200).toFixed(2));
-      const actions = {
-        link_click: randomInt(50,450),
-        view_content: randomInt(20,320),
-        add_to_cart: randomInt(0,40),
-        purchase: randomInt(0,10)
-      };
-      await insertAd(c, dateStr, leads, spend, actions);
-      for (let i=0;i<leads;i++) {
-        const name = `Lead ${randomInt(100,9999)}`;
-        const phone = randomPhone();
-        const t = new Date(date.getTime() + randomInt(0, 1000*60*60*23));
-        await insertLead(name, phone, t.toISOString(), dateStr, c);
-      }
-    }
-  }
-
-  console.log('Seeding done');
-  process.exit(0);
+function randomInt(min, max) { 
+  return Math.floor(Math.random() * (max - min + 1)) + min; 
 }
 
-run().catch(err => { console.error(err); process.exit(1); });
+function randomPhone() { 
+  return '+1' + (1000000000 + randomInt(0, 899999999)).toString(); 
+}
+
+async function run() {
+  if (!supabase) {
+    console.error('❌ Supabase not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in server/.env');
+    process.exit(1);
+  }
+
+  console.log('🌱 Starting seed process...\n');
+
+  try {
+    // Clear existing data
+    // Note: Table names are 'Leads' and 'Ads' (capitalized) in Supabase
+    console.log('Clearing existing data...');
+    await supabase.from('Leads').delete().neq('Id', 0); // Delete all leads
+    await supabase.from('Ads').delete().neq('Id', 0); // Delete all ads
+    console.log('✅ Existing data cleared\n');
+
+    const campaigns = ['Alpha', 'Beta', 'Gamma'];
+    const days = 90;
+    const now = new Date();
+
+    const adsToInsert = [];
+    const leadsToInsert = [];
+
+    // Generate seed data
+    for (let d = days - 1; d >= 0; d--) {
+      const date = new Date(now);
+      date.setDate(now.getDate() - d);
+      const dateStr = date.toISOString().slice(0, 10);
+
+      for (const c of campaigns) {
+        const leads = Math.max(0, Math.round(3 + Math.random() * 25));
+        const spend = Number((Math.random() * 200).toFixed(2));
+        const actions = {
+          link_click: randomInt(50, 450),
+          view_content: randomInt(20, 320),
+          add_to_cart: randomInt(0, 40),
+          purchase: randomInt(0, 10)
+        };
+
+        // Add ad to batch
+        // Note: Column names are capitalized: Campaign, DateChar, Leads, Spend, ActionsJson
+        adsToInsert.push({
+          Campaign: c,
+          DateChar: dateStr,
+          Leads: leads,
+          Spend: spend,
+          ActionsJson: actions
+        });
+
+        // Generate leads for this ad
+        for (let i = 0; i < leads; i++) {
+          const name = `Lead ${randomInt(100, 9999)}`;
+          const phone = randomPhone();
+          const t = new Date(date.getTime() + randomInt(0, 1000 * 60 * 60 * 23));
+          
+          // Note: Column names are mixed: Name, Phone, TimeUtc, DateChar, Campaign (capitalized)
+          leadsToInsert.push({
+            Name: name,
+            Phone: phone,
+            TimeUtc: t.toISOString(),
+            DateChar: dateStr,
+            Campaign: c
+          });
+        }
+      }
+    }
+
+    // Insert ads in batches
+    console.log(`Inserting ${adsToInsert.length} ads...`);
+    const batchSize = 100;
+    for (let i = 0; i < adsToInsert.length; i += batchSize) {
+      const batch = adsToInsert.slice(i, i + batchSize);
+      const { error } = await supabase.from('Ads').insert(batch);
+      if (error) {
+        console.error(`Error inserting ads batch ${Math.floor(i / batchSize) + 1}:`, error);
+        throw error;
+      }
+    }
+    console.log('✅ Ads inserted\n');
+
+    // Insert leads in batches
+    console.log(`Inserting ${leadsToInsert.length} leads...`);
+    for (let i = 0; i < leadsToInsert.length; i += batchSize) {
+      const batch = leadsToInsert.slice(i, i + batchSize);
+      const { error } = await supabase.from('Leads').insert(batch);
+      if (error) {
+        console.error(`Error inserting leads batch ${Math.floor(i / batchSize) + 1}:`, error);
+        throw error;
+      }
+    }
+    console.log('✅ Leads inserted\n');
+
+    console.log('✅ Seeding completed successfully!');
+    console.log(`   - Ads: ${adsToInsert.length}`);
+    console.log(`   - Leads: ${leadsToInsert.length}`);
+    process.exit(0);
+  } catch (err) {
+    console.error('❌ Seeding failed:', err);
+    process.exit(1);
+  }
+}
+
+run();

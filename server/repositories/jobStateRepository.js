@@ -1,34 +1,60 @@
 // server/repositories/jobStateRepository.js
-const { sql, getPool } = require('../db');
+const { supabase } = require('../supabase');
 
 async function getJobState(jobKey) {
-  const pool = await getPool();
-  const r = await pool.request()
-    .input('k', sql.NVarChar(200), jobKey)
-    .query('SELECT JobValue FROM JobState WHERE JobKey = @k');
-  return r.recordset[0]?.JobValue ?? null;
+  if (!supabase) {
+    throw new Error('Supabase not configured');
+  }
+
+  try {
+    // Note: Table name is 'JobState' (capitalized) in Supabase
+    const { data, error } = await supabase
+      .from('JobState')
+      .select('JobValue')
+      .eq('JobKey', jobKey)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error('[JobStateRepository] Error fetching job state:', error);
+      throw error;
+    }
+
+    // Column name is capitalized in Supabase: JobValue
+    return data?.JobValue ?? null;
+  } catch (error) {
+    console.error('[JobStateRepository] Error getting job state:', error);
+    throw error;
+  }
 }
 
 async function setJobState(jobKey, jobValue) {
-  const pool = await getPool();
-  await pool.request()
-    .input('k', sql.NVarChar(200), jobKey)
-    .input('v', sql.NVarChar(sql.MAX), jobValue)
-    .query(`
-      MERGE JobState AS target
-      USING (SELECT @k AS JobKey, @v AS JobValue) AS source
-      ON target.JobKey = source.JobKey
-      WHEN MATCHED THEN
-        UPDATE SET JobValue = source.JobValue, UpdatedAt = SYSUTCDATETIME()
-      WHEN NOT MATCHED THEN
-        INSERT (JobKey, JobValue, UpdatedAt)
-        VALUES (source.JobKey, source.JobValue, SYSUTCDATETIME());
-    `);
+  if (!supabase) {
+    throw new Error('Supabase not configured');
+  }
+
+  try {
+    // Note: Table name is 'JobState' (capitalized) with columns: JobKey, JobValue, UpdatedAt
+    const { error } = await supabase
+      .from('JobState')
+      .upsert({
+        JobKey: jobKey,
+        JobValue: jobValue,
+        UpdatedAt: new Date().toISOString()
+      }, {
+        onConflict: 'JobKey'
+      });
+
+    if (error) {
+      console.error('[JobStateRepository] Error setting job state:', error);
+      throw error;
+    }
+  } catch (error) {
+    console.error('[JobStateRepository] Error setting job state:', error);
+    throw error;
+  }
 }
 
 module.exports = {
   getJobState,
   setJobState,
 };
-
-

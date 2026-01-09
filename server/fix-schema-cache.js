@@ -27,10 +27,10 @@ async function refreshSchemaCache() {
     // Note: This requires direct database access, so we'll use a workaround
     console.log('1. Checking if table is accessible...');
     
-    // Try a simple query to see if it works (using correct table and column names)
+    // Try a simple query to see if it works (using lowercase table and column names)
     const { data, error } = await supabase
-      .from('Users')
-      .select('Id')
+      .from('users')
+      .select('id')
       .limit(1);
 
     if (!error) {

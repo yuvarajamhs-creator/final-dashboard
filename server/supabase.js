@@ -28,17 +28,16 @@ const supabase = supabaseUrl && supabaseKey
   : null;
 
 // Helper function to verify table exists
-async function verifyTableExists(tableName = 'Users') {
+async function verifyTableExists(tableName = 'users') {
   if (!supabase) {
     return { exists: false, error: 'Supabase not configured' };
   }
 
   try {
-    // Use the correct column name based on table schema
-    const selectColumn = tableName === 'Users' ? 'Id' : 'id';
+    // All tables now use lowercase column names
     const { error } = await supabase
       .from(tableName)
-      .select(selectColumn)
+      .select('id')
       .limit(1);
 
     if (error) {

@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { sql, getPool } = require('./db');
 const { supabase, verifyTableExists } = require('./supabase');
 const { signToken, hashPassword, comparePassword, authMiddleware } = require('./auth');
 
@@ -45,26 +44,43 @@ app.post('/api/auth/signup', async (req, res) => {
     }
 
     // Verify table exists (but don't block on schema cache issues)
-    const tableCheck = await verifyTableExists('Users');
+    const tableCheck = await verifyTableExists('users');
     if (!tableCheck.exists && !tableCheck.error?.includes('schema cache')) {
       console.error('Table check failed:', tableCheck.error);
       return res.status(500).json({ 
         error: 'Database table not found. Please create the users table in Supabase.',
-        details: 'Run the SQL from server/supabase-schema.sql in your Supabase SQL Editor',
-        help: 'Go to Supabase Dashboard → SQL Editor → New Query → Paste SQL from supabase-schema.sql → Run'
+        details: 'Run the SQL from server/supabase-complete-schema.sql in your Supabase SQL Editor',
+        help: 'Go to Supabase Dashboard → SQL Editor → New Query → Paste SQL from supabase-complete-schema.sql → Run'
       });
     }
 
-    // Check if user already exists (using correct table name with quotes)
+    // Check if user already exists (using lowercase table and column names)
     const { data: existingUser, error: checkError } = await supabase
-      .from('Users')
-      .select('Id, Email')
-      .eq('Email', email)
+      .from('users')
+      .select('id, email')
+      .eq('email', email)
       .maybeSingle();
 
     // Handle check error (but allow "not found" errors to continue)
-    if (checkError && checkError.code !== 'PGRST116') {
+    if (checkError) {
       console.error('Error checking existing user:', checkError);
+      
+      // Provide specific guidance for schema cache errors
+      if (checkError.code === 'PGRST116' || checkError.message?.includes('schema cache') || checkError.message?.includes('Could not find the table')) {
+        return res.status(500).json({ 
+          error: 'Schema cache error: Could not find the table \'public.users\' in the schema cache',
+          details: 'The users table exists but PostgREST schema cache needs to be refreshed',
+          solution: {
+            step1: 'Go to Supabase Dashboard → Settings → API',
+            step2: 'Scroll to "Schema" section and click "Reload schema"',
+            step3: 'Wait 10-30 seconds, then try again',
+            alternative: 'OR run this SQL in SQL Editor: SELECT pg_notify(\'pgrst\', \'reload schema\');',
+            verify: 'Run: npm run check-users-table to verify table access'
+          },
+          help: 'See server/STEP_BY_STEP_FIX.md for detailed instructions'
+        });
+      }
+      
       return res.status(500).json({ error: 'Database error: ' + checkError.message });
     }
 
@@ -76,18 +92,18 @@ app.post('/api/auth/signup', async (req, res) => {
     // Hash password
     const hashed = await hashPassword(password);
 
-    // Insert user into Supabase (using correct table and column names)
+    // Insert user into Supabase (using lowercase table and column names)
     const { data: newUser, error: insertError } = await supabase
-      .from('Users')
+      .from('users')
       .insert([
         {
-          Email: email,
-          PasswordHash: hashed,
-          FullName: fullName || null,
-          Role: 'user'
+          email: email,
+          password_hash: hashed,
+          full_name: fullName || null,
+          role: 'user'
         }
       ])
-      .select('Id, Email, FullName')
+      .select('id, email, full_name')
       .single();
 
     if (insertError) {
@@ -114,13 +130,13 @@ app.post('/api/auth/signup', async (req, res) => {
       });
     }
 
-    const token = signToken({ id: newUser.Id, email: newUser.Email });
+    const token = signToken({ id: newUser.id, email: newUser.email });
     res.json({ 
       token, 
       user: { 
-        id: newUser.Id, 
-        email: newUser.Email, 
-        fullName: newUser.FullName 
+        id: newUser.id, 
+        email: newUser.email, 
+        fullName: newUser.full_name 
       } 
     });
   } catch (err) {
@@ -141,11 +157,11 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Get user from Supabase (using correct table and column names)
+    // Get user from Supabase (using lowercase table and column names)
     const { data: user, error: fetchError } = await supabase
-      .from('Users')
-      .select('Id, Email, PasswordHash, FullName')
-      .eq('Email', email)
+      .from('users')
+      .select('id, email, password_hash, full_name')
+      .eq('email', email)
       .maybeSingle();
 
     if (fetchError) {
@@ -153,7 +169,7 @@ app.post('/api/auth/login', async (req, res) => {
       if (fetchError.code === 'PGRST116') {
         return res.status(500).json({ 
           error: 'Table not found. Please create the users table in Supabase.',
-          details: 'Run the SQL from server/supabase-schema.sql in your Supabase SQL Editor'
+          details: 'Run the SQL from server/supabase-complete-schema.sql in your Supabase SQL Editor'
         });
       }
       return res.status(500).json({ error: 'Database error: ' + fetchError.message });
@@ -164,18 +180,18 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Compare password
-    const ok = await comparePassword(password, user.PasswordHash);
+    const ok = await comparePassword(password, user.password_hash);
     if (!ok) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = signToken({ id: user.Id, email: user.Email });
+    const token = signToken({ id: user.id, email: user.email });
     res.json({ 
       token, 
       user: { 
-        id: user.Id, 
-        email: user.Email, 
-        fullName: user.FullName 
+        id: user.id, 
+        email: user.email, 
+        fullName: user.full_name 
       } 
     });
   } catch (err) {
@@ -192,9 +208,9 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     }
 
     const { data: user, error } = await supabase
-      .from('Users')
-      .select('Id, Email, FullName')
-      .eq('Id', req.user.id)
+      .from('users')
+      .select('id, email, full_name')
+      .eq('id', req.user.id)
       .single();
 
     if (error || !user) {
@@ -202,9 +218,9 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     }
 
     res.json({ 
-      id: user.Id, 
-      email: user.Email, 
-      FullName: user.FullName 
+      id: user.id, 
+      email: user.email, 
+      FullName: user.full_name 
     });
   } catch (e) {
     console.error('Get user error:', e);
@@ -215,6 +231,10 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 // --- Ads endpoints (public read; require auth if you want)
 app.get('/api/ads', async (req, res) => {
   try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
     const days = Number(req.query.days) || 30;
     const includeLeads = req.query.includeLeads === '1' || req.query.includeLeads === 'true';
     const since = (() => {
@@ -223,95 +243,208 @@ app.get('/api/ads', async (req, res) => {
       return d.toISOString().slice(0,10);
     })();
 
-    const pool = await getPool();
-    const rows = await pool.request()
-      .input('since', sql.Char(10), since)
-      .query('SELECT Id, Campaign, DateChar AS [date], Leads, Spend, ActionsJson FROM Ads WHERE DateChar >= @since ORDER BY DateChar ASC');
+    // Query ads from Supabase
+    // Note: Table name is 'Ads' (capitalized) with capitalized column names
+    const { data: rows, error: adsError } = await supabase
+      .from('Ads')
+      .select('Id, Campaign, DateChar, Leads, Spend, ActionsJson')
+      .gte('DateChar', since)
+      .order('DateChar', { ascending: true });
 
-    const ads = rows.recordset.map(r => ({ ...r, actions: JSON.parse(r.ActionsJson || '{}'), ActionsJson: undefined }));
+    if (adsError) {
+      console.error('Error fetching ads:', adsError);
+      return res.status(500).json({ error: 'Database error: ' + adsError.message });
+    }
+
+    // Transform to match expected format (camelCase for compatibility)
+    // Note: Supabase returns capitalized column names
+    const ads = (rows || []).map(r => ({
+      Id: r.Id,
+      id: r.Id,
+      Campaign: r.Campaign,
+      campaign: r.Campaign,
+      date: r.DateChar,
+      DateChar: r.DateChar,
+      Leads: r.Leads,
+      leads: r.Leads,
+      Spend: r.Spend,
+      spend: r.Spend,
+      actions: typeof r.ActionsJson === 'string' ? JSON.parse(r.ActionsJson || '{}') : (r.ActionsJson || {}),
+      ActionsJson: undefined
+    }));
+
+    // Include lead details if requested
     if (includeLeads) {
       for (const a of ads) {
-        const q = await pool.request()
-          .input('date', sql.Char(10), a.date)
-          .input('campaign', sql.NVarChar, a.Campaign)
-          .query('SELECT Id, Name, Phone, TimeUtc AS Time, DateChar AS Date, Campaign FROM Leads WHERE DateChar = @date AND Campaign = @campaign ORDER BY TimeUtc DESC');
-        a.lead_details = q.recordset;
+        // Note: Table name is 'Leads' (capitalized) with mixed column names
+        const { data: leadRows, error: leadsError } = await supabase
+          .from('Leads')
+          .select('Id, Name, Phone, TimeUtc, DateChar, Campaign')
+          .eq('DateChar', a.date)
+          .eq('Campaign', a.campaign)
+          .order('TimeUtc', { ascending: false });
+
+        if (!leadsError && leadRows) {
+          // Transform leads to match expected format
+          // Note: Supabase returns capitalized column names
+          a.lead_details = leadRows.map(l => ({
+            Id: l.Id,
+            id: l.Id,
+            Name: l.Name,
+            name: l.Name,
+            Phone: l.Phone,
+            phone: l.Phone,
+            Time: l.TimeUtc,
+            TimeUtc: l.TimeUtc,
+            Date: l.DateChar,
+            DateChar: l.DateChar,
+            Campaign: l.Campaign,
+            campaign: l.Campaign
+          }));
+        }
       }
     }
+
     res.json(ads);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching ads:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
 });
 
 // /api/leads?page=1&perPage=10&campaign=Alpha (paginated)
 app.get('/api/leads', async (req, res) => {
   try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
     const page = Math.max(1, Number(req.query.page) || 1);
     const perPage = Math.max(1, Number(req.query.perPage) || 10);
     const campaign = req.query.campaign || null;
     const offset = (page - 1) * perPage;
 
-    const pool = await getPool();
-    let totalQuery;
-    let rowsQuery;
+    // Build query
+    // Note: Table name is 'Leads' (capitalized) with mixed column names
+    let countQuery = supabase.from('Leads').select('*', { count: 'exact', head: true });
+    let rowsQuery = supabase
+      .from('Leads')
+      .select('Id, Name, Phone, TimeUtc, DateChar, Campaign')
+      .order('TimeUtc', { ascending: false })
+      .range(offset, offset + perPage - 1);
 
+    // Apply campaign filter if provided
     if (campaign) {
-      totalQuery = await pool.request().input('campaign', sql.NVarChar, campaign).query('SELECT COUNT(*) AS c FROM Leads WHERE Campaign = @campaign');
-      rowsQuery = await pool.request()
-        .input('campaign', sql.NVarChar, campaign)
-        .input('limit', sql.Int, perPage)
-        .input('offset', sql.Int, offset)
-        .query(`SELECT Id, Name, Phone, TimeUtc AS Time, DateChar AS Date, Campaign
-                FROM Leads WHERE Campaign = @campaign ORDER BY TimeUtc DESC
-                OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`);
-    } else {
-      totalQuery = await pool.request().query('SELECT COUNT(*) AS c FROM Leads');
-      rowsQuery = await pool.request()
-        .input('limit', sql.Int, perPage)
-        .input('offset', sql.Int, offset)
-        .query(`SELECT Id, Name, Phone, TimeUtc AS Time, DateChar AS Date, Campaign
-                FROM Leads ORDER BY TimeUtc DESC
-                OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`);
+      countQuery = countQuery.eq('Campaign', campaign);
+      rowsQuery = rowsQuery.eq('Campaign', campaign);
     }
 
-    const total = totalQuery.recordset[0].c || 0;
-    res.json({ total, page, perPage, rows: rowsQuery.recordset });
+    // Execute queries
+    const [countResult, rowsResult] = await Promise.all([
+      countQuery,
+      rowsQuery
+    ]);
+
+    if (countResult.error) {
+      console.error('Error counting leads:', countResult.error);
+      return res.status(500).json({ error: 'Database error: ' + countResult.error.message });
+    }
+
+    if (rowsResult.error) {
+      console.error('Error fetching leads:', rowsResult.error);
+      return res.status(500).json({ error: 'Database error: ' + rowsResult.error.message });
+    }
+
+    const total = countResult.count || 0;
+
+    // Transform rows to match expected format (camelCase for compatibility)
+    // Note: Supabase returns capitalized column names
+    const rows = (rowsResult.data || []).map(r => ({
+      Id: r.Id,
+      id: r.Id,
+      Name: r.Name,
+      name: r.Name,
+      Phone: r.Phone,
+      phone: r.Phone,
+      Time: r.TimeUtc,
+      TimeUtc: r.TimeUtc,
+      Date: r.DateChar,
+      DateChar: r.DateChar,
+      Campaign: r.Campaign,
+      campaign: r.Campaign
+    }));
+
+    res.json({ total, page, perPage, rows });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching leads:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
 });
 
 // campaigns list
 app.get('/api/campaigns', async (req, res) => {
   try {
-    const pool = await getPool();
-    const r = await pool.request().query('SELECT DISTINCT Campaign FROM Ads ORDER BY Campaign');
-    res.json(r.recordset.map(x => x.Campaign));
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // Get distinct campaigns from ads table
+    // Note: Table name is 'Ads' (capitalized) in Supabase
+    const { data, error } = await supabase
+      .from('Ads')
+      .select('Campaign');
+
+    if (error) {
+      console.error('Error fetching campaigns:', error);
+      return res.status(500).json({ error: 'Database error: ' + error.message });
+    }
+
+    // Extract unique campaign names
+    // Note: Column name is 'Campaign' (capitalized)
+    const campaigns = [...new Set((data || []).map(x => x.Campaign).filter(Boolean))].sort();
+    res.json(campaigns);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching campaigns:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
 });
 
 // actions list
 app.get('/api/actions', async (req, res) => {
   try {
-    const pool = await getPool();
-    const r = await pool.request().query('SELECT ActionsJson FROM Ads');
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // Get all actions_json from ads table
+    // Note: Table name is 'Ads' (capitalized) in Supabase
+    const { data, error } = await supabase
+      .from('Ads')
+      .select('ActionsJson');
+
+    if (error) {
+      console.error('Error fetching actions:', error);
+      return res.status(500).json({ error: 'Database error: ' + error.message });
+    }
+
+    // Extract unique action keys from JSONB
+    // Note: Column name is 'ActionsJson' (capitalized)
     const set = new Set();
-    r.recordset.forEach(row => {
+    (data || []).forEach(row => {
       try {
-        const obj = JSON.parse(row.ActionsJson || '{}');
+        const obj = typeof row.ActionsJson === 'string' 
+          ? JSON.parse(row.ActionsJson || '{}') 
+          : (row.ActionsJson || {});
         Object.keys(obj).forEach(k => set.add(k));
-      } catch (e) {}
+      } catch (e) {
+        // Ignore parse errors
+      }
     });
+    
     res.json(Array.from(set));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching actions:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
 });
 
