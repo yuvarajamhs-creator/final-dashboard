@@ -1,19 +1,14 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { Link, NavLink, useNavigate, useLocation } from "react-router-dom";
 import { auth } from "../utils/auth";
-import { setTheme, getCurrentTheme } from "../utils/theme";
 import logo from "../assets/MHS_Log.png"; // Import the logo
+import ProfileDropdown from "./ProfileDropdown";
 
 export default function Layout({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [theme, setCurrentTheme] = useState(getCurrentTheme());
-
-  useEffect(() => {
-    setTheme(theme);
-  }, [theme]);
 
   const handleLogout = () => {
     auth.logout();
@@ -163,7 +158,7 @@ export default function Layout({ children }) {
       {/* MAIN AREA */}
       <div className="main-area d-flex flex-column">
         {/* TOPBAR */}
-        <header className="custom-header-style d-flex justify-content-between align-items-center px-4 py-3 border-bottom bg-white shadow-sm">
+        <header className="custom-header-style d-flex justify-content-between align-items-center px-4 py-3 border-bottom shadow-sm">
           <div className="d-flex align-items-center gap-3">
             <button
               className="btn btn-light btn-sm rounded-circle p-2"
@@ -171,49 +166,36 @@ export default function Layout({ children }) {
             >
               ☰
             </button>
-            <h5 className="mb-0 fw-bold text-dark d-none d-sm-block">
+            <h5 className="mb-0 fw-bold d-none d-sm-block" style={{ color: 'var(--text, #1a1d1f)' }}>
               {location.pathname === '/' ? 'Dashboard'
                 : location.pathname.substring(1).replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
             </h5>
           </div>
 
           <div className="d-flex align-items-center gap-3">
-            <select
-              className="form-select form-select-sm w-auto border-0 bg-light fw-medium"
-              value={theme}
-              onChange={(e) => setCurrentTheme(e.target.value)}
-            >
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-            <button
-              className="btn btn-danger btn-sm px-3 rounded-pill"
-              onClick={handleLogout}
-            >
-              Logout
-            </button>
+            <ProfileDropdown />
           </div>
         </header>
 
         {/* 👇 Only this scrolls */}
-        <main className="layout-content flex-grow-1 p-4 bg-light-subtle">{children}</main>
+        <main className="layout-content flex-grow-1 p-4">{children}</main>
       </div>
 
       {/* STYLES */}
       <style jsx="true">{`
         /* Core Reset */
         html, body, #root { height: 100%; }
-        body { margin: 0; overflow: hidden; background-color: #f3f4f6; font-family: 'Inter', sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: var(--bg, #f3f4f6); color: var(--text, #1a1d1f); font-family: 'Inter', sans-serif; transition: background-color 0.3s ease, color 0.3s ease; }
         
         /* Layout Structure */
-        .app-shell { height: 100vh; display: flex; background-color: #f3f4f6; }
-        .main-area { flex: 1; display: flex; flex-direction: column; min-height: 0; background-color: #f3f4f6; }
-        .layout-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2rem; }
+        .app-shell { height: 100vh; display: flex; background-color: var(--bg, #f3f4f6); transition: background-color 0.3s ease; }
+        .main-area { flex: 1; display: flex; flex-direction: column; min-height: 0; background-color: var(--bg, #f3f4f6); transition: background-color 0.3s ease; }
+        .layout-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2rem; background-color: var(--bg, #f5f7fa); color: var(--text, #1a1d1f); transition: background-color 0.3s ease, color 0.3s ease; }
 
         /* Sidebar Styling */
         .sidebar {
-            background: #0f2d5e; /* Dark Navy Blue from reference */
-            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s ease;
+            background: var(--nav, #0f2d5e) !important;
+            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s ease, background-color 0.3s ease;
             overflow-y: auto;
             overflow-x: hidden;
             z-index: 1000;

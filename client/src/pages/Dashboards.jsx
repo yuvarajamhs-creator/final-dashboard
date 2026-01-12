@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -688,6 +688,7 @@ const fetchForms = async (pageId) => {
   }
 }
 
+
 // Fetch forms for a specific ad from Meta API
 const fetchDashboardForms = async ({ adId, from, to, pageId }) => {
   console.log("fetchDashboardForms", adId, from, to, pageId);
@@ -1024,6 +1025,40 @@ export default function AdsDashboardBootstrap() {
   const [downloadingLeads, setDownloadingLeads] = useState(false);
   const perPage = 10;
 
+  // Independent filters for Total Leads Admin View
+  const [adminViewCampaigns, setAdminViewCampaigns] = useState([]);
+  const [adminViewAds, setAdminViewAds] = useState([]);
+  const [adminViewDateFilters, setAdminViewDateFilters] = useState(() => getDefaultDates());
+  const [adminViewDateRangeFilterValue, setAdminViewDateRangeFilterValue] = useState(null);
+  const [showAdminViewDateRangeFilter, setShowAdminViewDateRangeFilter] = useState(false);
+  const [adminViewAdsList, setAdminViewAdsList] = useState([]);
+  const [adminViewAdsLoading, setAdminViewAdsLoading] = useState(false);
+
+  // State for new filtered leads table (below Total Leads Admin View)
+  const [filteredLeadsPage, setFilteredLeadsPage] = useState(null);
+  const [filteredLeadsForm, setFilteredLeadsForm] = useState(null);
+  const [filteredLeadsForms, setFilteredLeadsForms] = useState([]);
+  const [filteredLeadsFormsLoading, setFilteredLeadsFormsLoading] = useState(false);
+  const [filteredLeadsTimeRange, setFilteredLeadsTimeRange] = useState(() => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6); // 7 days before yesterday
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  });
+  const [filteredLeadsData, setFilteredLeadsData] = useState([]);
+  const [filteredLeadsLoading, setFilteredLeadsLoading] = useState(false);
+  const [filteredLeadsError, setFilteredLeadsError] = useState(null);
+  const [filteredLeadsPageNum, setFilteredLeadsPageNum] = useState(1);
+  const [filteredLeadsPerPage] = useState(10);
+  const [filteredLeadsSelectedDateRange, setFilteredLeadsSelectedDateRange] = useState('last_7_days');
+  const [showFilteredLeadsDateRangeFilter, setShowFilteredLeadsDateRangeFilter] = useState(false);
+  const [downloadingFilteredLeads, setDownloadingFilteredLeads] = useState(false);
+
   // Pre-load state for leads optimization
   const [preloadedLeads, setPreloadedLeads] = useState([]);
   const [preloadedForms, setPreloadedForms] = useState([]);
@@ -1036,8 +1071,8 @@ export default function AdsDashboardBootstrap() {
   const [campaignSortDirection, setCampaignSortDirection] = useState('asc');
 
   // Sorting state for Ad Performance Breakdown table
-  const [adSortField, setAdSortField] = useState(null);
-  const [adSortDirection, setAdSortDirection] = useState('asc');
+  const [adSortField, setAdSortField] = useState('leads');
+  const [adSortDirection, setAdSortDirection] = useState('desc');
 
   // Content Marketing Dashboard State
   // Initialize with default last 7 days (matching Meta dashboard behavior)
@@ -1208,6 +1243,12 @@ export default function AdsDashboardBootstrap() {
       console.log("Fetched Rows Count:", rows.length);
       console.log("All Ads Rows Count (for breakdown table):", allAdsRows.length);
       console.log("All Campaigns Selected:", allCampaignsSelected);
+      console.log("[Multi-Select Debug] Selected Campaigns:", selectedCampaigns);
+      console.log("[Multi-Select Debug] Selected Ads:", selectedAds);
+      console.log("[Multi-Select Debug] All Ads Selected:", allAdsSelected);
+      console.log("[Multi-Select Debug] Rows data sample:", rows.slice(0, 3).map(r => ({ campaign_id: r.campaign_id, ad_id: r.ad_id, ad_name: r.ad_name, spend: r.spend, leads: r.leads })));
+      console.log("[Multi-Select Debug] Unique campaign_ids in rows:", [...new Set(rows.map(r => r.campaign_id))]);
+      console.log("[Multi-Select Debug] Unique ad_ids in rows:", [...new Set(rows.map(r => r.ad_id))]);
 
       // Only filter by active campaigns if specific campaigns are selected
       // If all campaigns are selected, show all data without filtering
@@ -1215,8 +1256,11 @@ export default function AdsDashboardBootstrap() {
       if (!allCampaignsSelected && selectedCampaigns.length > 0) {
         // Filter rows to only include those from selected campaigns (which should be active)
         filteredData = rows.filter(r => {
-          const isSelected = selectedCampaigns.includes(r.campaign_id);
-          return isSelected;
+          return selectedCampaigns.some(selectedId => {
+            const normalizedSelected = String(selectedId);
+            const normalizedCampaignId = String(r.campaign_id);
+            return normalizedSelected === normalizedCampaignId;
+          });
         });
       } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
         // If no campaigns selected but not "all", filter by active campaigns
@@ -1232,8 +1276,11 @@ export default function AdsDashboardBootstrap() {
       let filteredAllAdsData = allAdsRows;
       if (!allCampaignsSelected && selectedCampaigns.length > 0) {
         filteredAllAdsData = allAdsRows.filter(r => {
-          const isSelected = selectedCampaigns.includes(r.campaign_id);
-          return isSelected;
+          return selectedCampaigns.some(selectedId => {
+            const normalizedSelected = String(selectedId);
+            const normalizedCampaignId = String(r.campaign_id);
+            return normalizedSelected === normalizedCampaignId;
+          });
         });
       } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
         filteredAllAdsData = allAdsRows.filter(r => {
@@ -1429,9 +1476,133 @@ export default function AdsDashboardBootstrap() {
     }
   }, [preloadedLeads.length, selectedPage, dateFilters.startDate, dateFilters.endDate, preloadedPageId, preloadedDateRange]);
 
+  // Fetch forms for filtered leads table when page is selected
+  const fetchFilteredLeadsForms = async (pageId) => {
+    if (!pageId) {
+      setFilteredLeadsForms([]);
+      return;
+    }
+    
+    setFilteredLeadsFormsLoading(true);
+    try {
+      const formsData = await fetchForms(pageId);
+      setFilteredLeadsForms(formsData);
+      // Clear form selection when page changes
+      setFilteredLeadsForm(null);
+      setFilteredLeadsData([]);
+    } catch (e) {
+      console.error("Error fetching forms for filtered leads:", e);
+      setFilteredLeadsForms([]);
+    } finally {
+      setFilteredLeadsFormsLoading(false);
+    }
+  };
+
+  // Load filtered leads for the new table based on form and date range
+  const loadFilteredLeads = async () => {
+    if (!filteredLeadsForm || !filteredLeadsTimeRange?.startDate || !filteredLeadsTimeRange?.endDate) {
+      setFilteredLeadsData([]);
+      return;
+    }
+
+    setFilteredLeadsLoading(true);
+    setFilteredLeadsError(null);
+    try {
+      // Use database endpoint (same as Total Leads Admin View)
+      const from = filteredLeadsTimeRange.startDate || null;
+      const to = filteredLeadsTimeRange.endDate || null;
+      
+      console.log("Loading filtered leads from database with filters:", {
+        formId: filteredLeadsForm,
+        pageId: filteredLeadsPage,
+        from,
+        to
+      });
+      
+      // Build query parameters
+      const params = new URLSearchParams();
+      if (filteredLeadsForm) params.append('formId', filteredLeadsForm);
+      if (filteredLeadsPage) params.append('pageId', filteredLeadsPage);
+      if (from) params.append('startDate', from);
+      if (to) params.append('endDate', to);
+      
+      // Fetch from database endpoint
+      const token = getAuthToken();
+      const headers = { "Content-Type": "application/json" };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+      
+      const url = `${API_BASE}/api/meta/leads/db?${params.toString()}`;
+      const response = await fetch(url, { headers });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.details || errorData.error || `HTTP ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const leadsData = data.data || [];
+      
+      console.log("Fetched filtered leads from database:", {
+        leadsCount: leadsData.length,
+        filters: { formId: filteredLeadsForm, pageId: filteredLeadsPage, from, to }
+      });
+      
+      // Format leads for display (ensure all required fields are present)
+      // Database endpoint already returns formatted data, just ensure consistency
+      const formattedLeads = leadsData.map(lead => ({
+        ...lead,
+        Name: lead.Name || lead.name || 'N/A',
+        Phone: lead.Phone || lead.phone || 'N/A',
+        Date: lead.Date || lead.DateChar || (lead.created_time ? lead.created_time.split('T')[0] : ''),
+        Time: lead.Time || lead.TimeUtc || lead.created_time || '',
+        TimeUtc: lead.TimeUtc || lead.created_time || '',
+        DateChar: lead.DateChar || (lead.created_time ? lead.created_time.split('T')[0] : ''),
+        Street: lead.Street || lead.street || lead.address || 'N/A',
+        City: lead.City || lead.city || 'N/A',
+        page_name: lead.page_name || 'N/A',
+        campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
+        ad_name: lead.ad_name || 'N/A',
+        form_name: lead.form_name || 'N/A'
+      }));
+
+      setFilteredLeadsData(formattedLeads);
+      setFilteredLeadsPageNum(1); // Reset to first page
+    } catch (e) {
+      console.error("Error loading filtered leads:", e);
+      setFilteredLeadsError(e.message || "Failed to load leads");
+      setFilteredLeadsData([]);
+    } finally {
+      setFilteredLeadsLoading(false);
+    }
+  };
+
+  // useEffect: When filtered leads page changes, fetch forms
+  useEffect(() => {
+    if (filteredLeadsPage) {
+      fetchFilteredLeadsForms(filteredLeadsPage);
+    } else {
+      setFilteredLeadsForms([]);
+      setFilteredLeadsForm(null);
+      setFilteredLeadsData([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredLeadsPage]);
+
+  // useEffect: When filtered leads form or time range changes, fetch leads
+  useEffect(() => {
+    if (filteredLeadsForm && filteredLeadsTimeRange?.startDate && filteredLeadsTimeRange?.endDate) {
+      loadFilteredLeads();
+    } else {
+      setFilteredLeadsData([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredLeadsForm, filteredLeadsTimeRange?.startDate, filteredLeadsTimeRange?.endDate]);
+
 
   // Load leads from database (filtered by campaign and ad)
-  const loadLeads = async () => {
+  const loadLeads = useCallback(async () => {
     setLeadsLoading(true);
     setLeadsError(null); // Clear previous errors
     try {
@@ -1439,11 +1610,11 @@ export default function AdsDashboardBootstrap() {
       const from = dateFilters.startDate || null;
       const to = dateFilters.endDate || null;
       
-    // Extract filter IDs - support multiple selections
+    // Extract filter IDs - support multiple selections (use main dashboard filters)
     const campaignIds = selectedCampaigns.length > 0 ? selectedCampaigns.map(String) : [];
     const adIds = selectedAds.length > 0 ? selectedAds.map(String) : [];
       
-      console.log("Loading leads from database with filters:", {
+      console.log("Loading leads from database with filters (using dashboard top filters):", {
         campaignIds,
         adIds,
         from,
@@ -1516,42 +1687,25 @@ export default function AdsDashboardBootstrap() {
     } finally {
       setLeadsLoading(false);
     }
-  };
+  }, [selectedCampaigns, selectedAds, dateFilters.startDate, dateFilters.endDate]);
 
 
-  // Auto-load leads when pre-loaded data is available OR when ad is selected
+  // Auto-load leads when main dashboard filters change
   useEffect(() => {
-    const hasPreloadedData = 
-      preloadedLeads.length > 0 &&
-      selectedPage &&
-      preloadedPageId === selectedPage &&
-      preloadedDateRange.start === dateFilters.startDate &&
-      preloadedDateRange.end === dateFilters.endDate;
-    
-    // Check if we have valid date range
+    // Check if we have valid date range from main dashboard filters
     const hasValidDateRange = dateFilters.startDate && dateFilters.endDate;
     
-    // Trigger loadLeads if:
-    // 1. Pre-loaded data is available (requires selectedPage), OR
-    // 2. An ad is selected (for Total Leads API call - doesn't require selectedPage)
-    const shouldLoadLeads = 
-      hasValidDateRange && (
-        (hasPreloadedData && selectedPage) ||
-        (selectedAds.length > 0 && selectedAds.length <= 1) // Single ad selected - Total Leads API
-      );
+    // Trigger loadLeads if date range is set
+    const shouldLoadLeads = hasValidDateRange;
     
     if (shouldLoadLeads) {
-      if (hasPreloadedData) {
-        console.log('[Auto-load] Pre-loaded data available, triggering loadLeads');
-      } else if (selectedAds.length > 0) {
-        console.log('[Auto-load] Ad selected, triggering loadLeads for Total Leads API');
-      }
+      console.log('[Auto-load Total Leads Admin View] Dashboard filter changed, triggering loadLeads');
       loadLeads();
-    } else if (!hasPreloadedData && !(selectedAds.length > 0 && selectedAds.length <= 1)) {
-      // Clear leads only if no ad selected AND no pre-loaded data
+    } else if (!hasValidDateRange) {
+      // Clear leads if no valid date range
       setLeads([]);
     }
-  }, [selectedPage, dateFilters.startDate, dateFilters.endDate, selectedAds, selectedCampaigns, preloadedLeads, preloadedPageId, preloadedDateRange]);
+  }, [dateFilters.startDate, dateFilters.endDate, selectedCampaigns, selectedAds, loadLeads]);
 
   // Load ads when campaigns change
   useEffect(() => {
@@ -1641,6 +1795,7 @@ export default function AdsDashboardBootstrap() {
     };
     loadAds();
   }, [selectedCampaigns, campaigns]);
+
 
   useEffect(() => {
     load();
@@ -1927,12 +2082,22 @@ export default function AdsDashboardBootstrap() {
       // Campaign filter: if all selected or none selected, show all
       const matchesCampaign = allCampaignsSelected 
         ? true 
-        : selectedCampaigns.includes(r.campaign_id);
+        : selectedCampaigns.some(selectedId => {
+            // Normalize both values to strings for comparison
+            const normalizedSelected = String(selectedId);
+            const normalizedCampaignId = String(r.campaign_id);
+            return normalizedSelected === normalizedCampaignId;
+          });
       
       // Ad filter: if all selected or none selected, show all
       const matchesAd = allAdsSelected 
         ? true 
-        : selectedAds.includes(r.ad_id);
+        : selectedAds.some(selectedId => {
+            // Normalize both values to strings for comparison
+            const normalizedSelected = String(selectedId);
+            const normalizedAdId = String(r.ad_id);
+            return normalizedSelected === normalizedAdId;
+          });
       const matchesProject = selectedProjects.length > 0 
         ? selectedProjects.includes(r.project_id || r.project?.id) 
         : true;
@@ -1969,6 +2134,18 @@ export default function AdsDashboardBootstrap() {
       return matchesCampaign && matchesAd && matchesProject && matchesPlatform && matchesL1Revenue && matchesL2Revenue;
     });
   }, [data, selectedCampaigns, selectedAds, selectedProjects, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, campaigns.length, ads.length]);
+
+  // Debug logging for multi-select ad filter
+  useEffect(() => {
+    if (selectedAds.length > 1) {
+      console.log('[FilteredRows] Multi-select Ad Filter:', {
+        selectedAds: selectedAds,
+        selectedAdsTypes: selectedAds.map(id => typeof id),
+        filteredRowsCount: filteredRows.length,
+        sampleAdIds: filteredRows.slice(0, 3).map(r => ({ ad_id: r.ad_id, type: typeof r.ad_id, ad_name: r.ad_name }))
+      });
+    }
+  }, [selectedAds, filteredRows]);
 
   const timeseries = useMemo(() => aggregateByDate(filteredRows), [filteredRows]);
 
@@ -2115,57 +2292,67 @@ export default function AdsDashboardBootstrap() {
   // Show all ads from filtered data (Time Range, Ad Account, Campaign filters)
   // This table always shows all ads, not filtered by "Ad Name" selection
   const adBreakdown = useMemo(() => {
-    // Use allAdsData which contains all rows matching the applied filters
-    // (Time Range, Ad Account, Campaign) - this respects those filters
-    // but shows ALL ads, not filtered by selectedAds
-    let sourceData = allAdsData.length > 0 ? allAdsData : data;
+    // Aggregate leads from Total Leads data by ad_id
+    const leadsByAdId = new Map();
+    leads.forEach(lead => {
+      const adId = lead.ad_id;
+      if (adId) {
+        const existing = leadsByAdId.get(adId) || {
+          ad_id: adId,
+          ad_name: lead.ad_name || 'N/A',
+          campaign_id: lead.campaign_id,
+          campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
+          leads: 0
+        };
+        existing.leads += 1;
+        leadsByAdId.set(adId, existing);
+      }
+    });
     
-    // If specific campaigns are selected, filter to show only ads from those campaigns
-    // This ensures the table shows ads from the selected campaign(s)
+    // Merge with insights data (spend, impressions, clicks, etc.)
+    const insightsByAdId = new Map();
+    const sourceData = allAdsData.length > 0 ? allAdsData : data;
+    sourceData.forEach(row => {
+      if (row.ad_id) {
+        insightsByAdId.set(row.ad_id, row);
+      }
+    });
+    
+    // Combine leads data with insights data
+    const combinedAds = Array.from(leadsByAdId.values()).map(leadAd => {
+      const insights = insightsByAdId.get(leadAd.ad_id) || {};
+      return {
+        ...leadAd,
+        spend: insights.spend || 0,
+        impressions: insights.impressions || 0,
+        clicks: insights.clicks || 0,
+        conversions: insights.conversions || 0,
+        videoViews: insights.videoViews || 0,
+        video3sViews: insights.video3sViews || 0,
+        videoThruPlays: insights.videoThruPlays || 0,
+        ad_status: insights.ad_status || 'ACTIVE',
+        campaign_status: insights.campaign_status || 'ACTIVE',
+        hookRate: insights.hookRate,
+        holdRate: insights.holdRate
+      };
+    });
+    
+    // Filter by selected campaigns if any are selected
+    let filteredAds = combinedAds;
     const allCampaignsSelected = selectedCampaigns.length === 0 || 
       (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
     
     if (!allCampaignsSelected && selectedCampaigns.length > 0) {
-      // Filter to show ads only from selected campaigns
-      sourceData = sourceData.filter(r => selectedCampaigns.includes(r.campaign_id));
+      filteredAds = combinedAds.filter(ad => {
+        // Handle both string and number comparison
+        const adCampaignId = String(ad.campaign_id);
+        return selectedCampaigns.some(selectedId => String(selectedId) === adCampaignId);
+      });
     }
-    // If all campaigns selected or none selected, show all ads from the filtered data
-    // (sourceData already respects Time Range and Ad Account filters)
-    
-    const map = new Map();
-    sourceData.forEach((r) => {
-      if (!r.ad_id || !r.ad_name) return;
-      const key = r.ad_id;
-      const cur = map.get(key) || {
-        ad_id: r.ad_id,
-        ad_name: r.ad_name,
-        campaign: r.campaign,
-        campaign_id: r.campaign_id,
-        spend: 0,
-        impressions: 0,
-        clicks: 0,
-        leads: 0,
-        conversions: 0,
-        videoViews: 0,
-        video3sViews: 0,
-        videoThruPlays: 0,
-        ad_status: r.ad_status || 'ACTIVE',
-        campaign_status: r.campaign_status || 'ACTIVE'
-      };
-      cur.spend += r.spend || 0;
-      cur.impressions += r.impressions || 0;
-      cur.clicks += r.clicks || 0;
-      cur.leads += r.leads || 0;
-      cur.conversions += r.conversions || 0;
-      cur.videoViews += r.videoViews || 0;
-      cur.video3sViews += r.video3sViews || 0;
-      cur.videoThruPlays += r.videoThruPlays || 0;
-      map.set(key, cur);
-    });
     
     // Calculate metrics for each ad
     // For hookRate and holdRate, we need to aggregate from sourceData for each ad
-    const result = Array.from(map.values()).map(ad => {
+    const result = filteredAds.map(ad => {
       // Find all rows for this ad to aggregate hookRate and holdRate properly
       const adRows = sourceData.filter(r => r.ad_id === ad.ad_id);
       
@@ -2188,33 +2375,43 @@ export default function AdsDashboardBootstrap() {
         }
       });
       
-      const hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
-                      (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
+      const hookRate = ad.hookRate !== undefined ? ad.hookRate :
+                      (totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
+                      (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0));
       
-      const holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                      (ad.videoViews > 0 ? (ad.videoThruPlays / ad.videoViews) * 100 : 0);
+      const holdRate = ad.holdRate !== undefined ? ad.holdRate :
+                      (totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
+                      (ad.videoViews > 0 ? (ad.videoThruPlays / ad.videoViews) * 100 : 0));
+      
+      const ctr = ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0;
+      const cpl = ad.leads > 0 ? ad.spend / ad.leads : 0;
+      const conversionRate = ad.clicks > 0 ? (ad.conversions / ad.clicks) * 100 : 0;
       
       return {
         ...ad,
-        ctr: ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0,
-        cpl: ad.leads > 0 ? ad.spend / ad.leads : 0,
-        hookRate: hookRate,
-        holdRate: holdRate,
-        conversionRate: ad.clicks > 0 ? (ad.conversions / ad.clicks) * 100 : 0
+        campaign: ad.campaign_name || ad.campaign || 'N/A',
+        ctr,
+        cpl,
+        hookRate,
+        holdRate,
+        conversionRate
       };
     });
     
-    console.log('[Ad Performance Breakdown] Showing all ads:', {
+    // Sort by leads count (descending) as default ranking
+    result.sort((a, b) => b.leads - a.leads);
+    
+    console.log('[Ad Performance Breakdown] Showing ads from Total Leads:', {
       totalAds: result.length,
-      sourceDataRows: sourceData.length,
-      allAdsDataRows: allAdsData.length,
-      dataRows: data.length,
+      totalLeads: leads.length,
+      leadsByAdIdCount: leadsByAdId.size,
+      insightsDataRows: sourceData.length,
       selectedCampaigns: selectedCampaigns.length,
       allCampaignsSelected: allCampaignsSelected
     });
     
     return result;
-  }, [data, allAdsData, selectedCampaigns, campaigns.length]);
+  }, [leads, data, allAdsData, selectedCampaigns, campaigns.length]);
     
   // Sort helper function
   const sortData = (data, field, direction) => {
@@ -2262,7 +2459,7 @@ export default function AdsDashboardBootstrap() {
   const leadDetails = useMemo(() => {
     console.log("Total leads:", leads.length);
 
-    // Filter by date range if provided
+    // Filter by date range if provided (use main dashboard date filters)
     let filtered = leads;
     if (dateFilters.startDate && dateFilters.endDate) {
       const startDate = new Date(dateFilters.startDate);
@@ -2718,6 +2915,150 @@ export default function AdsDashboardBootstrap() {
     }
   };
 
+  // Handle CSV download for filtered leads table
+  const handleDownloadFilteredLeadsCSV = async () => {
+    if (filteredLeadsData.length === 0) {
+      setToast({
+        type: 'warning',
+        title: 'Warning',
+        message: 'No leads available to download.'
+      });
+      return;
+    }
+    
+    setDownloadingFilteredLeads(true);
+    try {
+      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Campaign', 'Ad Name', 'Form Name'];
+      
+      // Escape commas and quotes in CSV
+      const escapeCSV = (val) => {
+        if (val === null || val === undefined) return '';
+        const str = String(val);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+      
+      const rows = filteredLeadsData.map(lead => {
+        const leadName = lead.Name || 'N/A';
+        const phone = lead.Phone || 'N/A';
+        const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
+        const street = lead.Street || 'N/A';
+        const city = lead.City || 'N/A';
+        
+        return [
+          escapeCSV(leadName),
+          escapeCSV(phone),
+          escapeCSV(dateTime),
+          escapeCSV(street),
+          escapeCSV(city),
+          escapeCSV(lead.campaign_name || 'N/A'),
+          escapeCSV(lead.ad_name || 'N/A'),
+          escapeCSV(lead.form_name || 'N/A')
+        ];
+      });
+      
+      // Generate filename with date
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const filename = `filtered_leads_${dateStr}.csv`;
+      
+      // Use existing CSV export utility
+      downloadCSV(filename, [headers, ...rows]);
+      
+      setToast({
+        type: 'success',
+        title: 'Success',
+        message: `Successfully downloaded ${filteredLeadsData.length} leads as CSV.`
+      });
+    } catch (e) {
+      console.error("Error downloading CSV:", e);
+      setToast({
+        type: 'error',
+        title: 'Error',
+        message: 'Failed to download leads. Please try again.'
+      });
+    } finally {
+      setDownloadingFilteredLeads(false);
+    }
+  };
+
+  // Handle Excel download for filtered leads table
+  const handleDownloadFilteredLeadsExcel = async () => {
+    if (filteredLeadsData.length === 0) {
+      setToast({
+        type: 'warning',
+        title: 'Warning',
+        message: 'No leads available to download.'
+      });
+      return;
+    }
+    
+    setDownloadingFilteredLeads(true);
+    try {
+      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Campaign', 'Ad Name', 'Form Name'];
+      
+      const rows = filteredLeadsData.map(lead => {
+        const leadName = lead.Name || 'N/A';
+        const phone = lead.Phone || 'N/A';
+        const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
+        const street = lead.Street || 'N/A';
+        const city = lead.City || 'N/A';
+        
+        return [
+          leadName, 
+          phone, 
+          dateTime, 
+          street, 
+          city, 
+          lead.campaign_name || 'N/A',
+          lead.ad_name || 'N/A',
+          lead.form_name || 'N/A'
+        ];
+      });
+      
+      // Create workbook and worksheet
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Lead Name
+        { wch: 15 }, // Phone Number
+        { wch: 20 }, // Date & Time
+        { wch: 30 }, // Street
+        { wch: 20 }, // City
+        { wch: 30 }, // Campaign
+        { wch: 30 }, // Ad Name
+        { wch: 30 }  // Form Name
+      ];
+      
+      XLSX.utils.book_append_sheet(wb, ws, 'Filtered Leads');
+      
+      // Generate filename with date
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const filename = `filtered_leads_${dateStr}.xlsx`;
+      
+      // Download file
+      XLSX.writeFile(wb, filename);
+      
+      setToast({
+        type: 'success',
+        title: 'Success',
+        message: `Successfully downloaded ${filteredLeadsData.length} leads as Excel.`
+      });
+    } catch (e) {
+      console.error("Error downloading Excel:", e);
+      setToast({
+        type: 'error',
+        title: 'Error',
+        message: 'Failed to download leads. Please try again.'
+      });
+    } finally {
+      setDownloadingFilteredLeads(false);
+    }
+  };
+
   // Handle time range filter apply for leads section
   const handleLeadsDateRangeApply = (payload) => {
     console.log('[LeadsDateRangeFilter] handleLeadsDateRangeApply called with payload:', payload);
@@ -2794,6 +3135,150 @@ export default function AdsDashboardBootstrap() {
       'last_month': 'Last month'
     };
     return presetLabels[leadsTimeRange] || 'Last 7 days';
+  };
+
+  // Handle time range filter apply for admin view
+  const handleAdminViewDateRangeApply = (payload) => {
+    console.log('[AdminViewDateRangeFilter] handleAdminViewDateRangeApply called with payload:', payload);
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[AdminViewDateRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[AdminViewDateRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setAdminViewDateRangeFilterValue(payload);
+    
+    // Update admin view date filters - useEffect will automatically reload leads
+    setAdminViewDateFilters({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[AdminViewDateRangeFilter] Date filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date,
+      rangeType: payload.range_type
+    });
+    
+    // Close the modal
+    setShowAdminViewDateRangeFilter(false);
+  };
+
+  // Helper to get display text for admin view time range
+  const getAdminViewTimeRangeDisplay = () => {
+    if (adminViewDateRangeFilterValue) {
+      if (adminViewDateRangeFilterValue.range_type === 'custom') {
+        const start = new Date(adminViewDateRangeFilterValue.start_date);
+        const end = new Date(adminViewDateRangeFilterValue.end_date);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[adminViewDateRangeFilterValue.range_type] || 'Last 7 days';
+    }
+    // Default display from current date filters
+    if (adminViewDateFilters.startDate && adminViewDateFilters.endDate) {
+      const start = new Date(adminViewDateFilters.startDate);
+      const end = new Date(adminViewDateFilters.endDate);
+      const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `${startDisplay} - ${endDisplay}`;
+    }
+    return 'Last 7 days';
+  };
+
+  // Handle time range filter apply for filtered leads table
+  const handleFilteredLeadsDateRangeApply = (payload) => {
+    console.log('[FilteredLeadsDateRangeFilter] handleFilteredLeadsDateRangeApply called with payload:', payload);
+    
+    // Validate dates before setting
+    if (!payload.start_date || !payload.end_date) {
+      console.error('[FilteredLeadsDateRangeFilter] Invalid dates received:', payload);
+      alert('Invalid date range selected. Please try again.');
+      return;
+    }
+    
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+      console.error('[FilteredLeadsDateRangeFilter] Invalid date format:', {
+        start_date: payload.start_date,
+        end_date: payload.end_date
+      });
+      alert('Invalid date format. Please try again.');
+      return;
+    }
+    
+    setFilteredLeadsSelectedDateRange(payload.range_type || 'custom');
+    setFilteredLeadsTimeRange({
+      startDate: payload.start_date,
+      endDate: payload.end_date
+    });
+    
+    console.log('[FilteredLeadsDateRangeFilter] Date filters updated:', {
+      startDate: payload.start_date,
+      endDate: payload.end_date,
+      rangeType: payload.range_type
+    });
+    
+    // Close the modal
+    setShowFilteredLeadsDateRangeFilter(false);
+  };
+
+  // Helper to get display text for filtered leads time range
+  const getFilteredLeadsTimeRangeDisplay = () => {
+    if (filteredLeadsTimeRange?.startDate && filteredLeadsTimeRange?.endDate) {
+      if (filteredLeadsSelectedDateRange === 'custom') {
+        const start = new Date(filteredLeadsTimeRange.startDate);
+        const end = new Date(filteredLeadsTimeRange.endDate);
+        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return `${startDisplay} - ${endDisplay}`;
+      }
+      const presetLabels = {
+        'today': 'Today',
+        'yesterday': 'Yesterday',
+        'today_yesterday': 'Today & Yesterday',
+        'last_7_days': 'Last 7 days',
+        'last_14_days': 'Last 14 days',
+        'last_28_days': 'Last 28 days',
+        'last_30_days': 'Last 30 days',
+        'this_week': 'This week',
+        'last_week': 'Last week',
+        'this_month': 'This month',
+        'last_month': 'Last month',
+        'maximum': 'Maximum'
+      };
+      return presetLabels[filteredLeadsSelectedDateRange] || 'Last 7 days';
+    }
+    return 'Last 7 days';
   };
 
   // Content Marketing Date Range filter handler
@@ -3367,8 +3852,8 @@ export default function AdsDashboardBootstrap() {
                   fontSize: '0.875rem', 
                   height: '36px',
                   borderRadius: '5px',
-                  border: '1px solid #cbd5e1',
-                  background: 'white'
+                  border: '1px solid rgba(0, 0, 0, 0.1)',
+                  background: 'var(--card, #ffffff)'
                 }}
               >
                 <option value="">All Platforms</option>
@@ -3385,17 +3870,17 @@ export default function AdsDashboardBootstrap() {
               </label>
               <button
                 type="button"
-                className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                className="d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
                 onClick={() => setShowDateRangeFilter(true)}
                   style={{
                     borderRadius: '5px',
-                    color: '#64748b',
-                    borderColor: '#cbd5e1',
+                    color: 'var(--text, #64748b)',
+                    borderColor: 'rgba(0, 0, 0, 0.1)',
                     transition: 'all 0.2s ease',
                     height: '36px',
                   minWidth: '180px',
-                  border: '1px solid #cbd5e1',
-                  background: 'white',
+                  border: '1px solid rgba(0, 0, 0, 0.1)',
+                  background: 'var(--card, #ffffff)',
                   width: '100%'
                   }}
                 >
@@ -3420,8 +3905,8 @@ export default function AdsDashboardBootstrap() {
                   fontSize: '0.875rem', 
                   height: '36px',
                   borderRadius: '5px',
-                  border: '1px solid #cbd5e1',
-                  background: 'white'
+                  border: '1px solid rgba(0, 0, 0, 0.1)',
+                  background: 'var(--card, #ffffff)'
                 }}
               >
                 <option value="">All Pages</option>
@@ -3471,8 +3956,8 @@ export default function AdsDashboardBootstrap() {
                   fontSize: '0.875rem', 
                   height: '36px',
                   borderRadius: '5px',
-                  border: '1px solid #cbd5e1',
-                  background: 'white'
+                  border: '1px solid rgba(0, 0, 0, 0.1)',
+                  background: 'var(--card, #ffffff)'
                 }}
               >
                 <option value="">All Ad Accounts</option>
@@ -3850,7 +4335,7 @@ export default function AdsDashboardBootstrap() {
                           border: 'none', 
                           boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
                           padding: '8px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value, name) => {
                           if (name === 'CPL (INR)') {
@@ -3939,11 +4424,12 @@ export default function AdsDashboardBootstrap() {
         <div className="col-12">
           <div className="chart-card">
             <div className="chart-card-body">
-              <div className="d-flex justify-content-between align-items-center mb-3">
+              {/* Header Section with Title and Action Buttons */}
+              <div className="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center mb-3 gap-2">
                 <strong className="chart-title">
-                  <span className="chart-emoji">👥</span> Total Leads
+                  <span className="chart-emoji">👥</span> Total Leads Admin View
                 </strong>
-                <div className="d-flex gap-2">
+                <div className="d-flex gap-2 flex-wrap">
                   <div className="dropdown">
                     <button
                       className="btn btn-sm btn-outline-success dropdown-toggle"
@@ -3958,12 +4444,13 @@ export default function AdsDashboardBootstrap() {
                       {downloadingLeads ? (
                         <>
                           <span className="spinner-border spinner-border-sm me-1" role="status"></span>
-                          Downloading...
+                          <span className="d-none d-sm-inline">Downloading...</span>
                         </>
                       ) : (
                         <>
                           <i className="fas fa-download me-1"></i>
-                          Download Leads
+                          <span className="d-none d-sm-inline">Download Leads</span>
+                          <span className="d-sm-none">Download</span>
                         </>
                       )}
                     </button>
@@ -3990,35 +4477,37 @@ export default function AdsDashboardBootstrap() {
                       </li>
                     </ul>
                   </div>
-                <button
-                  className="btn btn-sm btn-outline-primary"
-                  onClick={loadLeads}
-                  disabled={leadsLoading || !dateFilters.startDate || !dateFilters.endDate}
-                  style={{ fontSize: '0.75rem' }}
-                  title="Manually refresh leads (requires date range to be selected)"
-                >
-                  {leadsLoading ? (
-                    <>
-                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
-                      Loading...
-                    </>
-                  ) : (
-                    <>
-                      <i className="fas fa-sync-alt me-1"></i>
-                      Refresh
-                    </>
-                  )}
-                </button>
-              </div>
+                  <button
+                    className="btn btn-sm btn-outline-primary"
+                    onClick={loadLeads}
+                    disabled={leadsLoading || !dateFilters.startDate || !dateFilters.endDate}
+                    style={{ fontSize: '0.75rem' }}
+                    title="Manually refresh leads (requires date range to be selected)"
+                  >
+                    {leadsLoading ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                        <span className="d-none d-sm-inline">Loading...</span>
+                      </>
+                    ) : (
+                      <>
+                        <i className="fas fa-sync-alt me-1"></i>
+                        Refresh
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
               
-              {/* Note: Filters are now in the main dashboard filters section at the top */}
+              {/* Alert Message Section */}
               {leadDetails.length === 0 && !leadsLoading && (
                 <div className="alert alert-info mb-3" style={{ fontSize: '0.875rem', padding: '12px' }}>
                   <i className="fas fa-info-circle me-2"></i>
                   Leads will appear automatically after pre-loading.
                 </div>
               )}
+              
+              {/* Table Section */}
               <div className="mt-3">
                 {leadsLoading ? (
                   <div className="text-center py-5">
@@ -4028,19 +4517,19 @@ export default function AdsDashboardBootstrap() {
                     <p className="mt-3 text-muted">Loading leads from Meta API...</p>
                   </div>
                 ) : (
-                  <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto' }}>
-                    <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem' }}>
+                  <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                    <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem', width: '100%', tableLayout: 'auto' }}>
                         <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
                           <tr>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Lead Name</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Phone Number</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Date & Time</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Street</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>City</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Page</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Campaign</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Ad Name</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Form</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', whiteSpace: 'nowrap' }}>Lead Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '110px', whiteSpace: 'nowrap' }}>Phone Number</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '140px', whiteSpace: 'nowrap' }}>Date & Time</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px', maxWidth: '150px' }}>Street</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '80px', maxWidth: '120px' }}>City</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px', maxWidth: '150px' }}>Page</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Campaign</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Ad Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '180px' }}>Form</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -4048,15 +4537,43 @@ export default function AdsDashboardBootstrap() {
                           <>
                             {visibleLeads.map((lead, idx) => (
                               <tr key={lead.lead_id || lead.Id || lead.id || idx} style={{ cursor: 'pointer' }}>
-                                <td className="fw-medium" style={{ color: '#1e293b' }}>{lead.Name || lead.name || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.Phone || lead.phone || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
-                                <td style={{ color: '#64748b' }}>{lead.Street || lead.street || lead.address || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.City || lead.city || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.page_name || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.campaign_name || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.ad_name || 'N/A'}</td>
-                                <td style={{ color: '#64748b' }}>{lead.form_name || 'N/A'}</td>
+                                <td className="fw-medium" style={{ color: '#1e293b', maxWidth: '150px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Name || lead.name || 'N/A'}>
+                                    {lead.Name || lead.name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{lead.Phone || lead.phone || 'N/A'}</td>
+                                <td style={{ color: '#64748b', whiteSpace: 'nowrap', fontSize: '0.75rem' }}>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
+                                <td style={{ color: '#64748b', maxWidth: '150px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Street || lead.street || lead.address || 'N/A'}>
+                                    {lead.Street || lead.street || lead.address || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '120px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.City || lead.city || 'N/A'}>
+                                    {lead.City || lead.city || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '150px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.page_name || 'N/A'}>
+                                    {lead.page_name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '200px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.campaign_name || 'N/A'}>
+                                    {lead.campaign_name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '200px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.ad_name || 'N/A'}>
+                                    {lead.ad_name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '180px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.form_name || 'N/A'}>
+                                    {lead.form_name || 'N/A'}
+                                  </div>
+                                </td>
                               </tr>
                             ))}
                             <tr className="table-active">
@@ -4125,7 +4642,7 @@ export default function AdsDashboardBootstrap() {
                 )}
                 {/* Pagination */}
                 {leadDetails.length > 0 && totalPages > 1 && (
-                  <div className="d-flex justify-content-between align-items-center mt-3">
+                  <div className="d-flex flex-column flex-sm-row justify-content-between align-items-start align-items-sm-center mt-3 gap-2">
                     <div>
                       <small className="text-muted">
                         Showing {((page - 1) * perPage) + 1} to {Math.min(page * perPage, leadDetails.length)} of {leadDetails.length} leads
@@ -4154,6 +4671,280 @@ export default function AdsDashboardBootstrap() {
           </div>
         </div>
       </div>
+
+      {/* New Filtered Leads Table Section */}
+      <div className="row g-4 mb-4">
+        <div className="col-12">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              {/* Header with Title and Actions */}
+              <div className="d-flex justify-content-between align-items-center mb-3">
+                <strong className="chart-title">
+                  <span className="chart-emoji">👥</span> Total Leads
+                </strong>
+              </div>
+
+              {/* Filter Section */}
+              <div className="row g-3 align-items-center flex-wrap mb-3" style={{ marginBottom: '1rem' }}>
+                {/* Page Filter */}
+                <div className="col-12 col-md-auto">
+                  <label className="form-label small fw-bold text-uppercase text-muted mb-1" style={{ fontSize: '0.7rem', letterSpacing: '0.5px' }}>
+                    <i className="fas fa-file-alt me-1"></i> PAGE
+                  </label>
+                  <select
+                    className="form-select form-select-sm"
+                    value={filteredLeadsPage || ''}
+                    onChange={(e) => {
+                      const pageId = e.target.value || null;
+                      setFilteredLeadsPage(pageId);
+                    }}
+                    style={{
+                      fontSize: '0.8rem',
+                      minWidth: '200px',
+                      backgroundColor: 'var(--card, #ffffff)',
+                      color: 'var(--text, #1e293b)',
+                      borderColor: 'var(--border-color, #cbd5e1)'
+                    }}
+                  >
+                    <option value="">Select a Page</option>
+                    {pages.map((page) => (
+                      <option key={page.id} value={page.id}>
+                        {page.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Form Filter */}
+                <div className="col-12 col-md-auto">
+                  <label className="form-label small fw-bold text-uppercase text-muted mb-1" style={{ fontSize: '0.7rem', letterSpacing: '0.5px' }}>
+                    <i className="fas fa-edit me-1"></i> FORM
+                  </label>
+                  <select
+                    className="form-select form-select-sm"
+                    value={filteredLeadsForm || ''}
+                    onChange={(e) => {
+                      const formId = e.target.value || null;
+                      setFilteredLeadsForm(formId);
+                    }}
+                    disabled={!filteredLeadsPage || filteredLeadsFormsLoading}
+                    style={{
+                      fontSize: '0.8rem',
+                      minWidth: '200px',
+                      backgroundColor: 'var(--card, #ffffff)',
+                      color: 'var(--text, #1e293b)',
+                      borderColor: 'var(--border-color, #cbd5e1)'
+                    }}
+                  >
+                    <option value="">
+                      {filteredLeadsFormsLoading ? 'Loading forms...' : filteredLeadsPage ? 'Select a Form' : 'Select a Page first'}
+                    </option>
+                    {filteredLeadsForms.map((form) => (
+                      <option key={form.id} value={form.id}>
+                        {form.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Time Range Filter */}
+                <div className="col-12 col-md-auto">
+                  <label className="form-label small fw-bold text-uppercase text-muted mb-1" style={{ fontSize: '0.7rem', letterSpacing: '0.5px' }}>
+                    <i className="fas fa-calendar-alt me-1"></i> TIME RANGE
+                  </label>
+                  <button
+                    className="btn btn-sm btn-outline-secondary d-flex align-items-center"
+                    onClick={() => setShowFilteredLeadsDateRangeFilter(true)}
+                    style={{
+                      fontSize: '0.8rem',
+                      minWidth: '180px',
+                      justifyContent: 'space-between',
+                      backgroundColor: 'var(--card, #ffffff)',
+                      color: 'var(--text, #1e293b)',
+                      borderColor: 'var(--border-color, #cbd5e1)'
+                    }}
+                  >
+                    <span>{getFilteredLeadsTimeRangeDisplay()}</span>
+                    <i className="fas fa-chevron-down ms-2"></i>
+                  </button>
+                </div>
+              </div>
+
+              {/* Table Actions */}
+              <div className="d-flex justify-content-end align-items-center gap-2 mb-3">
+                <div className="dropdown">
+                  <button
+                    className="btn btn-sm btn-outline-primary dropdown-toggle"
+                    type="button"
+                    id="filteredLeadsDownloadDropdown"
+                    data-bs-toggle="dropdown"
+                    aria-expanded="false"
+                    disabled={downloadingFilteredLeads || filteredLeadsData.length === 0}
+                  >
+                    <i className="fas fa-download me-2"></i>
+                    Download Leads
+                  </button>
+                  <ul className="dropdown-menu" aria-labelledby="filteredLeadsDownloadDropdown">
+                    <li>
+                      <button
+                        className="dropdown-item"
+                        onClick={handleDownloadFilteredLeadsCSV}
+                        disabled={downloadingFilteredLeads || filteredLeadsData.length === 0}
+                      >
+                        <i className="fas fa-file-csv me-2"></i>
+                        Download as CSV
+                      </button>
+                    </li>
+                    <li>
+                      <button
+                        className="dropdown-item"
+                        onClick={handleDownloadFilteredLeadsExcel}
+                        disabled={downloadingFilteredLeads || filteredLeadsData.length === 0}
+                      >
+                        <i className="fas fa-file-excel me-2"></i>
+                        Download as Excel
+                      </button>
+                    </li>
+                  </ul>
+                </div>
+                <button
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={loadFilteredLeads}
+                  disabled={filteredLeadsLoading || !filteredLeadsTimeRange?.startDate || !filteredLeadsTimeRange?.endDate || !filteredLeadsForm}
+                  style={{ fontSize: '0.75rem' }}
+                >
+                  {filteredLeadsLoading ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                      Loading...
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-sync-alt me-1"></i>
+                      Refresh
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Error Message */}
+              {filteredLeadsError && (
+                <div className="alert alert-danger mb-3" style={{ fontSize: '0.875rem' }}>
+                  <i className="fas fa-exclamation-circle me-2"></i>
+                  {filteredLeadsError}
+                </div>
+              )}
+
+              {/* Table */}
+              <div className="mt-3">
+                {filteredLeadsLoading ? (
+                  <div className="text-center py-5">
+                    <div className="spinner-border text-primary" role="status">
+                      <span className="visually-hidden">Loading leads...</span>
+                    </div>
+                    <p className="mt-3 text-muted">Loading leads...</p>
+                  </div>
+                ) : (
+                  <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', minWidth: '800px' }}>
+                    <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem' }}>
+                      <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+                        <tr>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Lead Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Phone Number</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Date & Time</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Street</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>City</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            Campaign
+                            <i className="fas fa-info-circle ms-1" style={{ fontSize: '0.6rem', opacity: 0.6 }} title="Campaign name associated with the lead"></i>
+                          </th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            Ad Name
+                            <i className="fas fa-info-circle ms-1" style={{ fontSize: '0.6rem', opacity: 0.6 }} title="Ad name associated with the lead"></i>
+                          </th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Form Name</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredLeadsData.length > 0 ? (
+                          <>
+                            {filteredLeadsData
+                              .slice((filteredLeadsPageNum - 1) * filteredLeadsPerPage, filteredLeadsPageNum * filteredLeadsPerPage)
+                              .map((lead, idx) => (
+                                <tr key={lead.id || lead.lead_id || idx}>
+                                  <td>{lead.Name || 'N/A'}</td>
+                                  <td>{lead.Phone || 'N/A'}</td>
+                                  <td>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
+                                  <td>{lead.Street || 'N/A'}</td>
+                                  <td>{lead.City || 'N/A'}</td>
+                                  <td>{lead.campaign_name || 'N/A'}</td>
+                                  <td>{lead.ad_name || 'N/A'}</td>
+                                  <td>{lead.form_name || 'N/A'}</td>
+                                </tr>
+                              ))}
+                          </>
+                        ) : (
+                          <tr>
+                            <td colSpan="8" className="text-center py-5 text-muted">
+                              <div>
+                                <p className="mb-2">No leads data available.</p>
+                                <small>Please check your Meta API connection or filters.</small>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Pagination */}
+              {filteredLeadsData.length > 0 && Math.ceil(filteredLeadsData.length / filteredLeadsPerPage) > 1 && (
+                <div className="d-flex justify-content-between align-items-center mt-3">
+                  <div>
+                    <small className="text-muted">
+                      Showing {((filteredLeadsPageNum - 1) * filteredLeadsPerPage) + 1} to {Math.min(filteredLeadsPageNum * filteredLeadsPerPage, filteredLeadsData.length)} of {filteredLeadsData.length} leads
+                    </small>
+                  </div>
+                  <div className="d-flex gap-2">
+                    <button
+                      className="btn btn-sm btn-outline-secondary"
+                      onClick={() => setFilteredLeadsPageNum(p => Math.max(1, p - 1))}
+                      disabled={filteredLeadsPageNum === 1}
+                    >
+                      Previous
+                    </button>
+                    <button
+                      className="btn btn-sm btn-outline-secondary"
+                      onClick={() => setFilteredLeadsPageNum(p => Math.min(Math.ceil(filteredLeadsData.length / filteredLeadsPerPage), p + 1))}
+                      disabled={filteredLeadsPageNum >= Math.ceil(filteredLeadsData.length / filteredLeadsPerPage)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Date Range Filter Modal for Filtered Leads */}
+      {showFilteredLeadsDateRangeFilter && (
+        <DateRangeFilter
+          isOpen={showFilteredLeadsDateRangeFilter}
+          onClose={() => setShowFilteredLeadsDateRangeFilter(false)}
+          onApply={handleFilteredLeadsDateRangeApply}
+          initialValue={filteredLeadsSelectedDateRange === 'custom' && filteredLeadsTimeRange?.startDate && filteredLeadsTimeRange?.endDate
+            ? {
+                range_type: 'custom',
+                start_date: filteredLeadsTimeRange.startDate,
+                end_date: filteredLeadsTimeRange.endDate
+              }
+            : { range_type: filteredLeadsSelectedDateRange || 'last_7_days' }}
+        />
+      )}
 
       {/* Ad Performance Table - Detailed Breakdown */}
         <div className="row mb-4">
@@ -4426,7 +5217,7 @@ export default function AdsDashboardBootstrap() {
                   </table>
                 ) : (
                   <div className="text-center py-5" style={{ color: '#64748b' }}>
-                    <p className="mb-0">No ad data available. Please select filters or check your Meta API connection.</p>
+                    <p className="mb-0">No ad data available. Please select a Campaign filter and ensure leads are loaded, or check your Meta API connection.</p>
                 </div>
                 )}
               </div>
@@ -4463,17 +5254,17 @@ export default function AdsDashboardBootstrap() {
                 </label>
                 <button
                   type="button"
-                  className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                  className="d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
                   onClick={() => setShowContentDateRangeFilter(true)}
                   style={{
                     borderRadius: '5px',
-                    color: '#64748b',
-                    borderColor: '#cbd5e1',
+                    color: 'var(--text, #64748b)',
+                    borderColor: 'rgba(0, 0, 0, 0.1)',
                     transition: 'all 0.2s ease',
                     height: '36px',
                     minWidth: '180px',
-                    border: '1px solid #cbd5e1',
-                    background: 'white',
+                    border: '1px solid rgba(0, 0, 0, 0.1)',
+                    background: 'var(--card, #ffffff)',
                     width: '100%'
                   }}
                 >
@@ -4856,10 +5647,10 @@ export default function AdsDashboardBootstrap() {
                         cursor={{ fill: 'rgba(79, 70, 229, 0.1)' }}
                         contentStyle={{ 
                           borderRadius: '8px', 
-                          border: '1px solid #e2e8f0', 
+                          border: '1px solid rgba(0, 0, 0, 0.1)', 
                           boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
                           padding: '10px 12px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value) => [formatNum(value), 'Followers']}
                         animationDuration={200}
@@ -4921,10 +5712,10 @@ export default function AdsDashboardBootstrap() {
                         cursor={{ fill: 'rgba(16, 185, 129, 0.1)' }}
                         contentStyle={{ 
                           borderRadius: '8px', 
-                          border: '1px solid #e2e8f0', 
+                          border: '1px solid rgba(0, 0, 0, 0.1)', 
                           boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
                           padding: '10px 12px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value) => [formatNum(value), 'Leads']}
                         animationDuration={200}
@@ -4994,10 +5785,10 @@ export default function AdsDashboardBootstrap() {
                         cursor={{ stroke: '#F59E0B', strokeWidth: 2, strokeDasharray: '5 5' }}
                         contentStyle={{ 
                           borderRadius: '8px', 
-                          border: '1px solid #e2e8f0', 
+                          border: '1px solid rgba(0, 0, 0, 0.1)', 
                           boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
                           padding: '10px 12px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value) => [`₹${value.toLocaleString()}`, 'Organic Revenue']}
                         animationDuration={200}
@@ -5057,10 +5848,10 @@ export default function AdsDashboardBootstrap() {
                         cursor={{ stroke: '#10B981', strokeWidth: 2, strokeDasharray: '5 5' }}
                         contentStyle={{ 
                           borderRadius: '8px', 
-                          border: '1px solid #e2e8f0', 
+                          border: '1px solid rgba(0, 0, 0, 0.1)', 
                           boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
                           padding: '10px 12px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value) => [formatNum(value), 'Leads']}
                         animationDuration={200}
@@ -5100,7 +5891,7 @@ export default function AdsDashboardBootstrap() {
                     {/* Time Range Filter Button */}
                     <button
                       type="button"
-                      className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm cursor-pointer"
+                      className="d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
                       onClick={() => setShowChartTimeRangeFilter(true)}
                       style={{
                         borderRadius: '5px',
@@ -5109,8 +5900,8 @@ export default function AdsDashboardBootstrap() {
                         transition: 'all 0.2s ease',
                         height: '36px',
                         minWidth: '160px',
-                        border: '1px solid #cbd5e1',
-                        background: 'white',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        background: 'var(--card, #ffffff)',
                         fontSize: '0.8rem'
                       }}
                     >
@@ -5176,10 +5967,10 @@ export default function AdsDashboardBootstrap() {
                         cursor={{ fill: 'rgba(79, 70, 229, 0.05)' }}
                         contentStyle={{ 
                           borderRadius: '8px', 
-                          border: '1px solid #e2e8f0', 
+                          border: '1px solid rgba(0, 0, 0, 0.1)', 
                           boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
                           padding: '10px 12px',
-                          backgroundColor: 'white'
+                          backgroundColor: 'var(--card, #ffffff)'
                         }}
                         formatter={(value, name) => {
                           if (name === 'followers') {

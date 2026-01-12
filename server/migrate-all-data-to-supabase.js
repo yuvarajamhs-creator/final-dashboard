@@ -169,12 +169,14 @@ async function migrateLeads() {
   }
 
   // Transform and insert into Supabase
+  // Table uses mixed case: Name, Phone, TimeUtc, DateChar, Campaign (capitalized)
+  // and lowercase with underscores: ad_id, campaign_id, lead_id, etc.
   const transformedLeads = sqlServerLeads.map(lead => ({
-    name: lead.Name || 'N/A',
-    phone: lead.Phone || 'N/A',
-    time_utc: lead.TimeUtc ? new Date(lead.TimeUtc).toISOString() : null,
-    date_char: lead.DateChar || null,
-    campaign: lead.Campaign || null,
+    Name: lead.Name || 'N/A',
+    Phone: lead.Phone || 'N/A',
+    TimeUtc: lead.TimeUtc ? new Date(lead.TimeUtc).toISOString() : null,
+    DateChar: lead.DateChar || null,
+    Campaign: lead.Campaign || null,
     ad_id: lead.ad_id || null,
     campaign_id: lead.campaign_id || null,
     lead_id: lead.lead_id || null,

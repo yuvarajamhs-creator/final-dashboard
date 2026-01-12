@@ -24,8 +24,7 @@ async function saveLeads(leads) {
       const batch = leads.slice(i, i + batchSize);
       
       // Transform batch to match Supabase schema
-      // Note: Leads table uses mixed column names: Id, Name, Phone, TimeUtc, DateChar, Campaign (capitalized)
-      // and ad_id, campaign_id, lead_id, form_id, page_id, created_time, ad_name (lowercase with underscores)
+      // Schema uses lowercase table name 'leads' with lowercase column names (PostgreSQL convention)
       const transformedBatch = batch.map(lead => {
         const leadId = lead.lead_id || lead.Id || lead.id || null;
         const formId = lead.form_id || null;
@@ -52,6 +51,7 @@ async function saveLeads(leads) {
           }
         }
         
+        // Map to mixed case column names matching actual table schema (public.Leads)
         return {
           Name: name,
           Phone: phone,
@@ -70,7 +70,8 @@ async function saveLeads(leads) {
 
       // Use upsert to insert or update based on lead_id conflict
       // Supabase will update existing rows and insert new ones
-      // Note: Table name is 'Leads' (capitalized) in Supabase
+      // Table name: 'Leads' (capitalized) - matches public.Leads in database
+      // Requires unique constraint on lead_id - run fix-leads-unique-constraint.sql if missing
       const { data, error } = await supabase
         .from('Leads')
         .upsert(transformedBatch, {
@@ -129,19 +130,21 @@ function normalizeIds(ids) {
   return [String(ids)];
 }
 
-async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo) {
+async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo, formIds = null, pageIds = null) {
   if (!supabase) {
     throw new Error('Supabase not configured');
   }
 
   try {
-    // Note: Table name is 'Leads' (capitalized) with mixed column names
+    // Table name: 'Leads' (capitalized) - matches public.Leads in database
     let query = supabase
       .from('Leads')
       .select('Id, Name, Phone, TimeUtc, DateChar, Campaign, ad_id, campaign_id, lead_id, form_id, page_id, created_time, ad_name');
 
     const campaignIdList = normalizeIds(campaignIds);
     const adIdList = normalizeIds(adIds);
+    const formIdList = normalizeIds(formIds);
+    const pageIdList = normalizeIds(pageIds);
 
     // Add filters
     if (campaignIdList.length > 0) {
@@ -150,6 +153,14 @@ async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo) {
 
     if (adIdList.length > 0) {
       query = query.in('ad_id', adIdList);
+    }
+
+    if (formIdList.length > 0) {
+      query = query.in('form_id', formIdList);
+    }
+
+    if (pageIdList.length > 0) {
+      query = query.in('page_id', pageIdList);
     }
 
     if (dateFrom) {
@@ -173,7 +184,7 @@ async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo) {
     }
 
     // Transform to match expected format (with both camelCase and snake_case for compatibility)
-    // Note: Supabase returns capitalized column names: Id, Name, Phone, TimeUtc, DateChar, Campaign
+    // Supabase returns mixed case column names: Id, Name, Phone, TimeUtc, DateChar, Campaign
     return (data || []).map(row => ({
       Id: row.Id,
       id: row.Id,

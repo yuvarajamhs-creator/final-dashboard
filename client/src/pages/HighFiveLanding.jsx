@@ -243,10 +243,35 @@ export default function HighFiveLanding() {
             </section>
 
             {/* Footer */}
-            <footer className="py-4 bg-light text-center border-top">
+            <footer className="py-2 py-md-4 bg-light text-center border-top">
                 <div className="container">
-                    <p className="small text-muted mb-0">© 2025 High-Five Look. All rights reserved. <span className="mx-2">|</span> Made with <span className="text-danger">♥</span></p>
+                    <p className="small text-muted mb-0" style={{ fontSize: '0.75rem' }}>
+                        <span className="d-block d-sm-inline">© 2025 High-Five Look. All rights reserved.</span>
+                        <span className="d-none d-sm-inline mx-2">|</span>
+                        <span className="d-block d-sm-inline mt-1 mt-sm-0">Made with <span className="text-danger">♥</span></span>
+                    </p>
                 </div>
+                <style>{`
+                    @media (max-width: 576px) {
+                        footer {
+                            padding-top: 0.5rem !important;
+                            padding-bottom: 0.5rem !important;
+                        }
+                        footer p {
+                            font-size: 0.7rem !important;
+                            line-height: 1.4;
+                        }
+                    }
+                    @media (min-width: 577px) and (max-width: 768px) {
+                        footer {
+                            padding-top: 0.75rem !important;
+                            padding-bottom: 0.75rem !important;
+                        }
+                        footer p {
+                            font-size: 0.725rem !important;
+                        }
+                    }
+                `}</style>
             </footer>
         </div>
     );

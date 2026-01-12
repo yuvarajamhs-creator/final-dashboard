@@ -19,7 +19,7 @@ async function run() {
 
   try {
     // Clear existing data
-    // Note: Table names are 'Leads' and 'Ads' (capitalized) in Supabase
+    // Table names: 'Leads' and 'Ads' (capitalized) - matches public.Leads and public.Ads
     console.log('Clearing existing data...');
     await supabase.from('Leads').delete().neq('Id', 0); // Delete all leads
     await supabase.from('Ads').delete().neq('Id', 0); // Delete all ads
@@ -64,7 +64,7 @@ async function run() {
           const phone = randomPhone();
           const t = new Date(date.getTime() + randomInt(0, 1000 * 60 * 60 * 23));
           
-          // Note: Column names are mixed: Name, Phone, TimeUtc, DateChar, Campaign (capitalized)
+          // Column names: mixed case (Name, Phone, TimeUtc, DateChar, Campaign)
           leadsToInsert.push({
             Name: name,
             Phone: phone,

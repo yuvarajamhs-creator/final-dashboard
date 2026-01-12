@@ -276,7 +276,7 @@ app.get('/api/ads', async (req, res) => {
     // Include lead details if requested
     if (includeLeads) {
       for (const a of ads) {
-        // Note: Table name is 'Leads' (capitalized) with mixed column names
+        // Table name: 'Leads' (capitalized) - matches public.Leads
         const { data: leadRows, error: leadsError } = await supabase
           .from('Leads')
           .select('Id, Name, Phone, TimeUtc, DateChar, Campaign')
@@ -286,7 +286,7 @@ app.get('/api/ads', async (req, res) => {
 
         if (!leadsError && leadRows) {
           // Transform leads to match expected format
-          // Note: Supabase returns capitalized column names
+          // Supabase returns mixed case column names
           a.lead_details = leadRows.map(l => ({
             Id: l.Id,
             id: l.Id,
@@ -325,7 +325,7 @@ app.get('/api/leads', async (req, res) => {
     const offset = (page - 1) * perPage;
 
     // Build query
-    // Note: Table name is 'Leads' (capitalized) with mixed column names
+    // Table name: 'Leads' (capitalized) - matches public.Leads
     let countQuery = supabase.from('Leads').select('*', { count: 'exact', head: true });
     let rowsQuery = supabase
       .from('Leads')
@@ -358,7 +358,7 @@ app.get('/api/leads', async (req, res) => {
     const total = countResult.count || 0;
 
     // Transform rows to match expected format (camelCase for compatibility)
-    // Note: Supabase returns capitalized column names
+    // Supabase returns mixed case column names
     const rows = (rowsResult.data || []).map(r => ({
       Id: r.Id,
       id: r.Id,

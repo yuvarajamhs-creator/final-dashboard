@@ -438,23 +438,26 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     // Build filtering array
     const filtering = [];
     
-    // If ad_id is provided, ONLY filter by ad.id (this inherently filters to the campaign)
-    // If only campaign_id is provided (no ad_id), filter by campaign.id
-    // When filtering by ad, we don't need campaign filter - Meta API will automatically scope to the ad's campaign
+    // Support filtering by both campaigns and ads simultaneously
+    // Parse ad IDs if provided
+    let adIdArray = [];
     if (ad_id && ad_id.trim() !== "") {
-      // When filtering by ad, we don't need campaign filter
-      // Meta API will automatically scope to the ad's campaign
+      adIdArray = ad_id.split(',').map(id => id.trim()).filter(id => id !== '');
       filtering.push({
         field: "ad.id",
         operator: "IN",
-        value: [ad_id],
+        value: adIdArray,
       });
-    } else if (campaign_id && campaign_id.trim() !== "") {
-      // Only filter by campaign when no ad_id is specified
+    }
+    
+    // Add campaign filter if provided (can be combined with ad filter)
+    let campaignIdArray = [];
+    if (campaign_id && campaign_id.trim() !== "") {
+      campaignIdArray = campaign_id.split(',').map(id => id.trim()).filter(id => id !== '');
       filtering.push({
         field: "campaign.id",
         operator: "IN",
-        value: [campaign_id],
+        value: campaignIdArray,
       });
     }
 
@@ -462,6 +465,9 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     // If filtering array is empty, API will return all campaigns/ads
     if (filtering.length > 0) {
       params.filtering = JSON.stringify(filtering);
+      console.log("[Backend] Filtering by campaigns:", campaignIdArray.length > 0 ? campaignIdArray : 'none');
+      console.log("[Backend] Filtering by ads:", adIdArray.length > 0 ? adIdArray : 'none');
+      console.log("[Backend] Total filters:", filtering.length);
     }
 
     // Support for time_increment (charts)
@@ -1800,11 +1806,13 @@ router.get("/leads/preload", optionalAuthMiddleware, async (req, res) => {
 
 // ---------------------------------------------------------------------
 // 5.2.5) LEADS DATABASE API - Fetch leads from database filtered by campaign and ad
-//    GET /api/meta/leads/db?campaignId=xxx&adId=xxx&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+//    GET /api/meta/leads/db?campaignId=xxx&adId=xxx&formId=xxx&pageId=xxx&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 //    
 //    Returns leads from database filtered by:
 //    - campaignId (optional) - Filter by campaign ID
 //    - adId (optional) - Filter by ad ID
+//    - formId (optional) - Filter by form ID
+//    - pageId (optional) - Filter by page ID
 //    - startDate (optional) - Start date filter (YYYY-MM-DD)
 //    - endDate (optional) - End date filter (YYYY-MM-DD)
 //    
@@ -1812,7 +1820,7 @@ router.get("/leads/preload", optionalAuthMiddleware, async (req, res) => {
 // ---------------------------------------------------------------------
 router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
   try {
-    const { campaignId, adId, startDate, endDate } = req.query;
+    const { campaignId, adId, formId, pageId, startDate, endDate } = req.query;
 
     // Support multiple campaign/ad IDs (comma-separated or repeated params)
     const parseIds = (val) => {
@@ -1831,19 +1839,21 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
     console.log('[Leads DB] Fetching leads from database with filters:', {
       campaignIds,
       adIds,
+      formId,
+      pageId,
       startDate,
       endDate
     });
     
     // Fetch leads from database
-    const leads = await getLeadsByCampaignAndAd(campaignIds, adIds, startDate, endDate);
+    const leads = await getLeadsByCampaignAndAd(campaignIds, adIds, startDate, endDate, formId, pageId);
     
     console.log(`[Leads DB] Found ${leads.length} leads in database`);
     
     // Enrich ad names from Meta API only for leads missing ad_name (legacy data)
     const adNameCache = {};
-    const leadsNeedingEnrichment = leads.filter(lead => lead.ad_id && !lead.ad_name);
-    const uniqueAdIds = [...new Set(leadsNeedingEnrichment.map(lead => lead.ad_id).filter(Boolean))];
+    const leadsNeedingAdEnrichment = leads.filter(lead => lead.ad_id && !lead.ad_name);
+    const uniqueAdIds = [...new Set(leadsNeedingAdEnrichment.map(lead => lead.ad_id).filter(Boolean))];
     
     if (uniqueAdIds.length > 0) {
       console.log(`[Leads DB] Enriching ${uniqueAdIds.length} ad names from Meta API (for leads missing ad_name in DB)`);
@@ -1878,6 +1888,44 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
       console.log(`[Leads DB] All leads have ad_name in database, no API enrichment needed`);
     }
     
+    // Enrich form names from Meta API for all leads (form_name is not stored in DB)
+    const formNameCache = {};
+    const leadsNeedingFormEnrichment = leads.filter(lead => lead.form_id);
+    const uniqueFormIds = [...new Set(leadsNeedingFormEnrichment.map(lead => lead.form_id).filter(Boolean))];
+    
+    if (uniqueFormIds.length > 0) {
+      console.log(`[Leads DB] Enriching ${uniqueFormIds.length} form names from Meta API`);
+      const accessToken = getSystemToken();
+      
+      // Fetch form names in parallel (with rate limiting - batch of 10 at a time)
+      const batchSize = 10;
+      for (let i = 0; i < uniqueFormIds.length; i += batchSize) {
+        const batch = uniqueFormIds.slice(i, i + batchSize);
+        await Promise.all(batch.map(async (formIdValue) => {
+          try {
+            const formResponse = await axios.get(
+              `https://graph.facebook.com/${META_API_VERSION}/${formIdValue}`,
+              { 
+                params: { access_token: accessToken, fields: "name" },
+                timeout: 5000
+              }
+            );
+            formNameCache[formIdValue] = formResponse.data.name || 'N/A';
+          } catch (err) {
+            console.warn(`[Leads DB] Could not fetch form name for ${formIdValue}:`, err.response?.data?.error?.message || err.message);
+            formNameCache[formIdValue] = 'N/A';
+          }
+        }));
+        
+        // Small delay between batches to avoid rate limiting
+        if (i + batchSize < uniqueFormIds.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+    } else {
+      console.log(`[Leads DB] No form IDs found in leads, skipping form name enrichment`);
+    }
+    
     // Format response to match frontend expectations
     // Use stored ad_name from database, fallback to API enrichment if missing
     const formattedLeads = leads.map(lead => {
@@ -1886,6 +1934,12 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
       // If ad_name is missing in DB but we have ad_id, try to get from API cache (for legacy data)
       if (!adName && lead.ad_id && adNameCache[lead.ad_id]) {
         adName = adNameCache[lead.ad_id];
+      }
+      
+      // Get form name from API cache (form_name is not stored in DB)
+      let formName = 'N/A';
+      if (lead.form_id && formNameCache[lead.form_id]) {
+        formName = formNameCache[lead.form_id];
       }
       
       return {
@@ -1915,7 +1969,7 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
         page_name: 'N/A', // Can be enriched from Meta API if needed
         campaign_name: lead.Campaign || 'N/A',
         ad_name: adName || 'N/A', // Use stored ad_name from DB, fallback to API if missing
-        form_name: 'N/A' // Can be enriched from Meta API if needed
+        form_name: formName // Enriched from Meta API
       };
     });
     
@@ -1923,17 +1977,23 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
       console.log(`[Leads DB] Enriched ${Object.keys(adNameCache).length} ad names from API (legacy data)`);
     }
     
+    if (Object.keys(formNameCache).length > 0) {
+      console.log(`[Leads DB] Enriched ${Object.keys(formNameCache).length} form names from API`);
+    }
+    
     res.json({
       data: formattedLeads,
-      meta: {
-        total: formattedLeads.length,
-        filters: {
-          campaignId: campaignId || null,
-          adId: adId || null,
-          startDate: startDate || null,
-          endDate: endDate || null
+        meta: {
+          total: formattedLeads.length,
+          filters: {
+            campaignId: campaignId || null,
+            adId: adId || null,
+            formId: formId || null,
+            pageId: pageId || null,
+            startDate: startDate || null,
+            endDate: endDate || null
+          }
         }
-      }
     });
   } catch (err) {
     console.error("[Leads DB] Error:", err.message);
