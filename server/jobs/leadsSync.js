@@ -65,6 +65,22 @@ function sleep(ms) {
 }
 
 /**
+ * Check if timestamp contains timezone offset (e.g., +05:30)
+ * Meta API returns timestamps with timezone offset, and we should preserve them as-is
+ * @param {string} timestamp - Timestamp string to check
+ * @returns {boolean} - True if timestamp contains timezone offset
+ */
+function hasTimezoneOffset(timestamp) {
+  if (!timestamp || typeof timestamp !== 'string') return false;
+  return timestamp.includes('+05:30') || 
+         timestamp.includes('+0530') || 
+         timestamp.includes('+05:30:00') ||
+         timestamp.includes('-05:30') ||
+         timestamp.match(/[+-]\d{2}:?\d{2}/); // Generic timezone pattern
+}
+
+/**
+ * @deprecated This function is no longer used. We now store raw UTC timestamps from Meta API without conversion.
  * Convert UTC time to Indian Standard Time (IST = UTC+5:30)
  * Returns time in IST as ISO string format for database storage
  * @param {string|Date} utcTime - UTC time string or Date object
@@ -93,6 +109,7 @@ function convertUTCToIST(utcTime) {
 }
 
 /**
+ * @deprecated This function is no longer used. We now store raw UTC timestamps from Meta API without conversion.
  * Get date string in IST timezone (YYYY-MM-DD format)
  * @param {string|Date} utcTime - UTC time string or Date object
  * @returns {string} - Date string in IST timezone
@@ -542,9 +559,20 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
           const campaignName = lead.campaign_name || null;
           const adName = lead.ad_name || null;
 
-          // Convert UTC time to IST for all time fields
-          const istCreatedTime = convertUTCToIST(lead.created_time);
-          const istDateChar = getISTDateString(lead.created_time);
+          // Store raw timestamp from Meta API exactly as received (preserves timezone offset like +05:30)
+          const rawCreatedTime = lead.created_time || null;
+          
+          // Validate: Skip conversion if timestamp already has timezone offset (+05:30)
+          const hasOffset = hasTimezoneOffset(rawCreatedTime);
+          
+          // Extract date without timezone conversion
+          // If timestamp has timezone offset, extract date directly from string
+          // Otherwise, use standard date parsing
+          const dateChar = rawCreatedTime 
+            ? (hasOffset 
+                ? rawCreatedTime.split('T')[0]  // Direct extraction preserves timezone
+                : new Date(rawCreatedTime).toISOString().split('T')[0])  // Fallback for UTC-only
+            : null;
 
           const mappedLead = {
             lead_id: lead.id,
@@ -552,7 +580,7 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
             page_id: form.page_id || pageId,
             campaign_id: campaignId,
             ad_id: adId,
-            created_time: istCreatedTime, // IST time
+            created_time: rawCreatedTime, // Raw timestamp from Meta API (with timezone if present)
             name: leadName,
             phone: phone,
             email: fieldData.email || null,
@@ -561,15 +589,15 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
             street: street,
             Campaign: campaignName,
             ad_name: adName,
-            // Legacy fields for compatibility - all converted to IST
+            // Legacy fields for compatibility - all stored as raw from Meta (preserves timezone)
             Id: lead.id,
             Name: leadName,
             Phone: phone,
             Email: fieldData.email || 'N/A',
-            Date: istDateChar, // IST date
-            Time: istCreatedTime || '', // IST time
-            TimeUtc: istCreatedTime || '', // IST time (keeping name for compatibility)
-            DateChar: istDateChar, // IST date
+            Date: dateChar, // Date extracted without timezone conversion
+            Time: rawCreatedTime || '', // Raw timestamp from Meta API (with timezone if present)
+            TimeUtc: rawCreatedTime || '', // Raw timestamp from Meta API (with timezone if present)
+            DateChar: dateChar, // Date extracted without timezone conversion
             Street: street,
             City: city,
           };

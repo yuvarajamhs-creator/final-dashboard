@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { auth } from "../../utils/auth";
+import "./AuthPages.css";
 
 const API_BASE = process.env.REACT_APP_API_BASE || "";
 const STORAGE_KEY = process.env.REACT_APP_STORAGE_KEY || "app_auth";
@@ -18,7 +19,7 @@ export default function Login() {
     }
     return "/api/auth/login";
   };
-   const handleClick = () => {
+  const handleClick = () => {
     window.location.href = 'https://www.google.com'; 
   };
 
@@ -81,96 +82,107 @@ export default function Login() {
   }
 
   return (
-    <div className="container-fluid vh-100 d-flex p-0">
-      <div
-        className="d-none d-md-flex col-md-6 bg-dark text-white align-items-center justify-content-center p-5"
-        style={{
-          backgroundImage: "url('/health-background-medical-banner-with-cardiogram-line-vector.jpg')",
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-        }}
-      >
-        <div className="login-bg  bg-opacity-50 p-4 rounded">
-          <h1 className="display-5 fw-bold mb-3">Welcome back</h1>
-          <p>Sign in to continue to your dashboard and manage your projects.</p>
-          <ul className="mt-3">
-            <li>Fast, secure access</li>
-            <li>Saved sessions & preferences</li>
-            <li>Two-factor ready</li>
-          </ul>
-        </div>
-      </div>
+    <div className="authPage">
+      <div className="authCardWrap">
+        <div className="authCard" role="region" aria-label="Login form">
+          <h1 className="authTitle">Welcome Back!</h1>
+          <p className="authSubtitle">Sign in to your account</p>
 
-      <div className="col-12 col-md-6 d-flex align-items-center justify-content-center bg-light p-4">
-        <div className="w-100" style={{ maxWidth: "400px" }}>
-          <div className="card shadow-sm p-4">
-            <div className="text-center mb-4">
-              <h2 className="fw-semibold">Sign in to your account</h2>
-              <p className="text-muted small mt-1">Enter your email and password to continue</p>
+          {error && (
+            <div className="authAlert" role="alert">
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit}>
+            <div className="authField">
+              <div className="authInputRow">
+                <div className="authIconBox" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M4 6.5C4 5.67157 4.67157 5 5.5 5H18.5C19.3284 5 20 5.67157 20 6.5V17.5C20 18.3284 19.3284 19 18.5 19H5.5C4.67157 19 4 18.3284 4 17.5V6.5Z"
+                      stroke="white"
+                      strokeOpacity="0.9"
+                      strokeWidth="1.6"
+                    />
+                    <path
+                      d="M5.5 7L12 11.5L18.5 7"
+                      stroke="white"
+                      strokeOpacity="0.9"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </div>
+                <div className="authLabelCol">
+                  <label className="authLabel" htmlFor="loginEmail">Email</label>
+                  <input
+                    id="loginEmail"
+                    type="email"
+                    className="authInput"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                    disabled={loading}
+                    placeholder="Enter your email"
+                    autoComplete="email"
+                  />
+                </div>
+              </div>
             </div>
 
-            {error && (
-              <div className="alert alert-danger small" role="alert">{error}</div>
-            )}
-
-            <form onSubmit={handleSubmit}>
-              <div className="mb-3">
-                <label className="form-label">Email</label>
-                <input
-                  type="email"
-                  className="form-control"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                  disabled={loading}
-                  placeholder="you@example.com"
-                />
+            <div className="authField">
+              <div className="authInputRow">
+                <div className="authIconBox" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M7.5 10V8.5C7.5 6.01472 9.51472 4 12 4C14.4853 4 16.5 6.01472 16.5 8.5V10"
+                      stroke="white"
+                      strokeOpacity="0.9"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M7.5 10H16.5C17.3284 10 18 10.6716 18 11.5V18.5C18 19.3284 17.3284 20 16.5 20H7.5C6.67157 20 6 19.3284 6 18.5V11.5C6 10.6716 6.67157 10 7.5 10Z"
+                      stroke="white"
+                      strokeOpacity="0.9"
+                      strokeWidth="1.6"
+                    />
+                  </svg>
+                </div>
+                <div className="authLabelCol">
+                  <label className="authLabel" htmlFor="loginPassword">Password</label>
+                  <input
+                    id="loginPassword"
+                    type="password"
+                    className="authInput"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    disabled={loading}
+                    placeholder="Enter your password"
+                    autoComplete="current-password"
+                  />
+                </div>
               </div>
+            </div>
 
-              <div className="mb-3">
-                <label className="form-label">Password</label>
-                <input
-                  type="password"
-                  className="form-control"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  disabled={loading}
-                  placeholder="••••••••"
-                />
-              </div>
+            <button className="authPrimaryBtn" disabled={loading} type="submit">
+              {loading ? "Signing in…" : "Login"}
+            </button>
 
-              <div className="d-flex justify-content-between align-items-center mb-3">
-                <button className="btn btn-primary" disabled={loading}>
-                  {loading ? "Signing in…" : "Login"}
-                </button>
-                <Link to="/signup" className="small">
-                  Create account
-                </Link>
-              </div>
+            {/* Keep existing handler around (not shown in UI now) */}
+            <div style={{ display: "none" }}>
+              <button type="button" onClick={handleClick}>Hidden</button>
+            </div>
 
-              <div className="text-center position-relative my-3">
-                <hr />
-                <span className="position-absolute top-50 start-50 translate-middle px-2 bg-white small text-muted">
-                  Or continue with
-                </span>
-              </div>
+            <div className="authDivider">OR</div>
 
-              <div className="d-flex gap-2">
-                <i onClick={handleClick} className="fa-brands fa-google fs-5" ></i>
-                <i class="fa-brands fa-facebook fs-5"></i>
-                <i class="fa-brands fa-square-instagram fs-5"></i>
-              </div>
-            </form>
-
-            <p className="text-center small text-muted mt-4">
-              By signing in you agree to our <Link to="/terms">Terms</Link>.
-            </p>
-          </div>
-
-          <div className="text-center small text-muted mt-3">
-            Need help? <Link to="/support">Contact support</Link>
-          </div>
+            <div className="authFooterLink">
+              Don&apos;t have an account? <Link to="/signup">Sign Up</Link>
+            </div>
+          </form>
         </div>
       </div>
     </div>

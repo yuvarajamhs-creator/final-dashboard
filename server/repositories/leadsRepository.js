@@ -2,6 +2,21 @@
 const { supabase } = require('../supabase');
 
 /**
+ * Check if timestamp contains timezone offset (e.g., +05:30)
+ * Meta API returns timestamps with timezone offset, and we should preserve them as-is
+ * @param {string} timestamp - Timestamp string to check
+ * @returns {boolean} - True if timestamp contains timezone offset
+ */
+function hasTimezoneOffset(timestamp) {
+  if (!timestamp || typeof timestamp !== 'string') return false;
+  return timestamp.includes('+05:30') || 
+         timestamp.includes('+0530') || 
+         timestamp.includes('+05:30:00') ||
+         timestamp.includes('-05:30') ||
+         timestamp.match(/[+-]\d{2}:?\d{2}/); // Generic timezone pattern
+}
+
+/**
  * Save or update leads in bulk
  * Uses Supabase upsert to handle duplicates based on lead_id
  */
@@ -34,17 +49,37 @@ async function saveLeads(leads) {
         const name = lead.Name || lead.name || 'N/A';
         const phone = lead.Phone || lead.phone || 'N/A';
         const createdTime = lead.created_time || lead.TimeUtc || lead.Time || null;
-        const dateChar = lead.DateChar || lead.Date || (createdTime ? new Date(createdTime).toISOString().split('T')[0] : null);
         const campaign = lead.Campaign || lead.campaign_name || null;
         const adName = lead.ad_name || null;
         
-        // Convert created_time to ISO string
+        // Validate: Skip conversion if timestamp already has timezone offset (+05:30)
+        const hasOffset = hasTimezoneOffset(createdTime);
+        
+        // Extract DateChar without timezone conversion if timezone offset is present
+        let dateChar = lead.DateChar || lead.Date || null;
+        if (!dateChar && createdTime) {
+          if (hasOffset) {
+            // Extract date directly from string (preserves timezone)
+            dateChar = createdTime.split('T')[0];
+          } else {
+            // Fallback for timestamps without timezone
+            dateChar = new Date(createdTime).toISOString().split('T')[0];
+          }
+        }
+        
+        // Store timestamp exactly as received if it has timezone offset, otherwise convert to ISO
         let createdTimeValue = null;
         if (createdTime) {
           try {
-            const date = new Date(createdTime);
-            if (!isNaN(date.getTime())) {
-              createdTimeValue = date.toISOString();
+            if (hasOffset) {
+              // Store exactly as received (with timezone offset)
+              createdTimeValue = createdTime;
+            } else {
+              // Convert to ISO for timestamps without timezone
+              const date = new Date(createdTime);
+              if (!isNaN(date.getTime())) {
+                createdTimeValue = date.toISOString();
+              }
             }
           } catch (e) {
             console.warn(`[LeadsRepository] Invalid date format for lead ${leadId}:`, createdTime);

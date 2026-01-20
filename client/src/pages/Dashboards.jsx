@@ -114,12 +114,6 @@ const fetchContentMarketingRevenue = async (dateRange, source) => {
     const queryString = params.toString();
     const url = `${API_BASE}/api/google-sheets/content-marketing-revenue${queryString ? `?${queryString}` : ''}`;
     
-    console.log('[fetchContentMarketingRevenue] Fetching with filters:', {
-      dateRange,
-      source,
-      url
-    });
-
     const res = await fetch(url, { headers });
     
     if (!res.ok) {
@@ -162,12 +156,6 @@ const fetchPerformanceInsights = async ({ pageId, from, to }) => {
     const queryString = params.toString();
     const url = `${API_BASE}/api/meta/pages/${pageId}/insights${queryString ? `?${queryString}` : ''}`;
     
-    console.log('[fetchPerformanceInsights] Fetching page insights:', {
-      pageId,
-      from,
-      to,
-      url
-    });
 
     const res = await fetch(url, { headers });
     
@@ -216,11 +204,9 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
     // Add from and to dates only if explicitly provided
     if (from && to) {
       url += `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-      console.log('[fetchDashboardData] Using date range:', { from, to });
     } else {
       // Don't add days parameter - let API use its default or no filter
       // Only add days if explicitly provided (not defaulting)
-      console.log('[fetchDashboardData] No date range provided - API will use default or no filter');
     }
     
     // Add ad account ID if provided
@@ -228,9 +214,9 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       url += `&ad_account_id=${encodeURIComponent(adAccountId)}`;
     }
     
-    // Only add campaign filter if not all campaigns are selected
-    // allCampaigns flag indicates all campaigns are selected (or none selected = show all)
-    if (!allCampaigns && campaignIds.length > 0) {
+    // Always add campaign filter when specific campaign IDs are provided
+    // This ensures only selected campaigns are returned, regardless of allCampaigns flag
+    if (campaignIds.length > 0) {
       // Support multiple campaign IDs - send comma-separated
       const campaignIdStr = campaignIds.join(',');
       url += `&campaign_id=${encodeURIComponent(campaignIdStr)}`;
@@ -244,6 +230,14 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       url += `&ad_id=${encodeURIComponent(adIdStr)}`;
     }
 
+    // Log insights API call with campaign IDs
+    console.log('[Insights API Call]', {
+      url: url,
+      allCampaigns: allCampaigns,
+      campaignIds: campaignIds.length > 0 ? campaignIds : (allCampaigns ? 'ALL_ACTIVE' : []),
+      campaignIdFilter: campaignIds.length > 0 ? campaignIds.join(',') : 'NONE'
+    });
+    
     const res = await fetch(url, {
       headers,
     });
@@ -268,33 +262,18 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       return [];
     }
 
-    // Log filtering parameters and data level for debugging
-    const hasAdId = adIds.length > 0;
-    const hasCampaignId = campaignIds.length > 0;
+    // Log insights API response
     const sampleRecord = data[0];
     const dataLevel = sampleRecord?.ad_id ? "ad-level" : "campaign-level";
-    
-    console.log('[fetchDashboardData] Filtering parameters:', {
-      adAccountId,
-      campaignIds,
-      adIds,
-      hasAdId,
-      hasCampaignId,
-      dateRange: { from, to }
+    const uniqueCampaignIds = [...new Set(data.map(r => r.campaign_id || r.campaign?.id).filter(Boolean))];
+    console.log('[Insights API Response]', {
+      rowCount: data.length,
+      dataLevel: dataLevel,
+      uniqueCampaignIds: uniqueCampaignIds,
+      sampleCampaignIds: uniqueCampaignIds.slice(0, 5),
+      hasCampaignIdFilter: campaignIds.length > 0
     });
     
-    console.log('[fetchDashboardData] API response:', {
-      recordCount: data.length,
-      dataLevel,
-      sampleRecord: sampleRecord ? {
-        hasAdId: !!sampleRecord.ad_id,
-        hasAdName: !!sampleRecord.ad_name,
-        campaignId: sampleRecord.campaign_id,
-        impressions: sampleRecord.impressions,
-        clicks: sampleRecord.clicks
-      } : null
-    });
-
     // Normalize data
     return data.map((d) => {
       const aggs = transformActions(d.actions || []);
@@ -362,8 +341,8 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         videoThruPlays: videoThruPlays,
         actions: aggs,
         action_values: values,
-        campaign_status: d.campaign_status || d.status || 'ACTIVE',
-        ad_status: d.ad_status || d.effective_status || 'ACTIVE',
+        campaign_status: d.campaign_status || d.status || null,
+        ad_status: d.ad_status || d.effective_status || null,
         lead_details: []
       };
     });
@@ -376,31 +355,17 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
 // Fetch ad accounts from Meta API
 const fetchAdAccounts = async () => {
   try {
-    console.log('[fetchAdAccounts] ===== Starting Ad Accounts Fetch =====');
     const token = getAuthToken();
-    console.log('[fetchAdAccounts] Token present:', !!token);
-    console.log('[fetchAdAccounts] Token length:', token ? token.length : 0);
-    
     const headers = { "Content-Type": "application/json" };
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
-      console.log('[fetchAdAccounts] Authorization header added');
     } else {
       console.warn('[fetchAdAccounts] ⚠️ No token available - request may fail');
     }
 
     const url = `${API_BASE}/api/meta/ad-accounts`;
-    console.log(`[fetchAdAccounts] Fetching from URL: ${url}`);
-    console.log(`[fetchAdAccounts] Headers:`, { ...headers, Authorization: headers.Authorization ? 'Bearer ***' : 'none' });
     
     const res = await fetch(url, { headers });
-    
-    console.log('[fetchAdAccounts] Response received:', {
-      status: res.status,
-      statusText: res.statusText,
-      ok: res.ok,
-      headers: Object.fromEntries(res.headers.entries())
-    });
     
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}));
@@ -418,29 +383,13 @@ const fetchAdAccounts = async () => {
     }
 
     const data = await res.json();
-    console.log(`[fetchAdAccounts] ===== Response Data =====`);
-    console.log(`[fetchAdAccounts] Raw data:`, data);
-    console.log(`[fetchAdAccounts] Data type:`, typeof data);
-    console.log(`[fetchAdAccounts] Is array:`, Array.isArray(data));
-    console.log(`[fetchAdAccounts] Has data property:`, !!data.data);
-    console.log(`[fetchAdAccounts] Data.data is array:`, Array.isArray(data.data));
     
     if (Array.isArray(data)) {
-      console.log(`[fetchAdAccounts] ✅ Returning ${data.length} ad accounts (direct array)`);
-      if (data.length > 0) {
-        console.log(`[fetchAdAccounts] First account:`, data[0]);
-        console.log(`[fetchAdAccounts] Account keys:`, Object.keys(data[0] || {}));
-      }
       return data;
     }
     
     // If response is wrapped in { data: [...] }, extract it
     if (data && Array.isArray(data.data)) {
-      console.log(`[fetchAdAccounts] ✅ Found array in data.data, returning ${data.data.length} ad accounts`);
-      if (data.data.length > 0) {
-        console.log(`[fetchAdAccounts] First account:`, data.data[0]);
-        console.log(`[fetchAdAccounts] Account keys:`, Object.keys(data.data[0] || {}));
-      }
       return data.data;
     }
     
@@ -459,8 +408,6 @@ const fetchAdAccounts = async () => {
       fullError: e
     });
     return [];
-  } finally {
-    console.log('[fetchAdAccounts] ===== Finished Ad Accounts Fetch =====');
   }
 }
 
@@ -473,7 +420,6 @@ const fetchBusinessAccounts = async () => {
       headers["Authorization"] = `Bearer ${token}`;
     }
 
-    console.log(`[Frontend] Fetching business accounts from ${API_BASE}/api/meta/businesses`);
     const res = await fetch(`${API_BASE}/api/meta/businesses`, { headers });
     
     if (!res.ok) {
@@ -494,16 +440,8 @@ const fetchBusinessAccounts = async () => {
     }
 
     const data = await res.json();
-    console.log(`[Frontend] Received business accounts response:`, {
-      hasBusinesses: !!data.businesses,
-      isArray: Array.isArray(data.businesses),
-      length: Array.isArray(data.businesses) ? data.businesses.length : 'N/A',
-      sample: Array.isArray(data.businesses) && data.businesses.length > 0 ? data.businesses[0] : null
-    });
-    
     // API returns { businesses: [...] }
     if (data && Array.isArray(data.businesses)) {
-      console.log(`[Frontend] Returning ${data.businesses.length} business accounts`);
       return data.businesses;
     }
     
@@ -528,10 +466,6 @@ const fetchCampaigns = async (adAccountId = null) => {
       url += `?ad_account_id=${encodeURIComponent(adAccountId)}`;
     }
     
-    console.log('[fetchCampaigns] Fetching campaigns:', {
-      adAccountId: adAccountId || 'All Ad Accounts (using default)',
-      url
-    });
 
     const res = await fetch(url, { headers });
     
@@ -545,11 +479,6 @@ const fetchCampaigns = async (adAccountId = null) => {
     }
     
     const data = await res.json();
-    console.log('[fetchCampaigns] Response:', {
-      isArray: Array.isArray(data),
-      hasData: !!data.data,
-      count: Array.isArray(data) ? data.length : (data.data ? data.data.length : 0)
-    });
     
     // Return full objects or empty array
     if (Array.isArray(data)) {
@@ -622,7 +551,6 @@ const fetchAds = async (campaignId) => {
 
     const res = await fetch(`${API_BASE}/api/meta/ads?campaign_id=${campaignId}`, { headers });
     const data = await res.json();
-    console.log("fetchAds_Tamil", data);
     // Return full objects or empty array
     if (Array.isArray(data)) {
       return data;
@@ -691,7 +619,6 @@ const fetchForms = async (pageId) => {
 
 // Fetch forms for a specific ad from Meta API
 const fetchDashboardForms = async ({ adId, from, to, pageId }) => {
-  console.log("fetchDashboardForms", adId, from, to, pageId);
   try {
     if (!adId) {
       return [];
@@ -807,15 +734,7 @@ const fetchPageInsights = async ({ pageId, from, to }) => {
     }
 
     const data = await res.json();
-    console.log('[fetchPageInsights] API response:', data);
     const insightsData = data.data || { followers: [], reach: [], current_followers: 0, current_reach: 0 };
-    console.log('[fetchPageInsights] Processed insights data:', {
-      total_follows: insightsData.total_follows,
-      total_unfollows: insightsData.total_unfollows,
-      total_reached: insightsData.total_reached,
-      current_followers: insightsData.current_followers,
-      current_reach: insightsData.current_reach
-    });
     return insightsData;
   } catch (e) {
     console.error("Error fetching page insights:", e);
@@ -870,7 +789,6 @@ const fetchLeads = async ({ formId, from, to, adAccountId, campaignId, adId, pag
     }
 
     const res = await fetch(url, { headers });
-    console.log(`[Leads API] Response:`, res);
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}));
       console.error("API error fetching leads:", {
@@ -878,7 +796,6 @@ const fetchLeads = async ({ formId, from, to, adAccountId, campaignId, adId, pag
         statusText: res.statusText,
         errorData
       });
-      console.log("errorData", errorData);
       // Check for permission errors (403 status or explicit permission error flag)
       if (res.status === 403 || errorData.isPermissionError) {
         const errorMessage = errorData.details || errorData.error || errorData.message || "Permission denied: leads_retrieval permission required";
@@ -904,20 +821,12 @@ const fetchLeads = async ({ formId, from, to, adAccountId, campaignId, adId, pag
     }
 
     const data = await res.json();
-    console.log(`[Leads API] Received leads response:`, data);
     
     // Enhanced endpoint returns { data: [...], meta: {...} }
     const result = {
       data: data.data || [],
       meta: data.meta || null
     };
-    
-    console.log(`[fetchLeads] Final leads details:`, {
-      totalLeads: result.data.length,
-      leads: result.data,
-      meta: result.meta,
-      sampleLead: result.data.length > 0 ? result.data[0] : null
-    });
     
     return result;
   } catch (e) {
@@ -1017,6 +926,7 @@ export default function AdsDashboardBootstrap() {
   const [selectedPage, setSelectedPage] = useState(null);
   const [selectedForm, setSelectedForm] = useState(null);
   const [selectedPlatformForLeads, setSelectedPlatformForLeads] = useState(null); // Platform filter for Total Leads section
+  const [activeCampaignIds, setActiveCampaignIds] = useState(new Set()); // Store active campaign IDs for filtering leads
   
   const [leadsContext, setLeadsContext] = useState(null);
   const [leadsTimeRange, setLeadsTimeRange] = useState(null); // Time range filter for leads section (null = no filter)
@@ -1164,7 +1074,6 @@ export default function AdsDashboardBootstrap() {
     setError(null);
 
     try {
-      console.log('[Dashboard] Loading data with adAccount:', selectedAdAccount || 'All Ad Accounts');
       
       // First, fetch campaigns to determine if all are selected
       const [campData, projectsData] = await Promise.all([
@@ -1174,7 +1083,11 @@ export default function AdsDashboardBootstrap() {
 
       // The active-campaigns API only returns active campaigns, so we can use the list directly
       const activeCampaignsList = campData || [];
-      const activeCampaignIds = new Set(activeCampaignsList.map(c => c.id));
+      // Normalize campaign IDs to strings for consistent comparison
+      const activeCampaignIds = new Set(activeCampaignsList.map(c => String(c.id)));
+      
+      // Store active campaign IDs in state for filtering leads in adBreakdown
+      setActiveCampaignIds(activeCampaignIds);
 
       // Update campaigns state
       if (activeCampaignsList.length > 0) {
@@ -1190,7 +1103,6 @@ export default function AdsDashboardBootstrap() {
           activeCampaignsList.some(c => c.id === cid)
         );
         if (validCampaigns.length !== selectedCampaigns.length) {
-          console.log('[Dashboard] Some selected campaigns are not valid for this ad account, resetting');
           setSelectedCampaigns(validCampaigns.length > 0 ? validCampaigns : []);
         }
       } else if (selectedCampaigns.length > 0 && activeCampaignsList.length === 0) {
@@ -1204,14 +1116,6 @@ export default function AdsDashboardBootstrap() {
       const allAdsSelected = selectedAds.length === 0 || 
         (ads.length > 0 && selectedAds.length === ads.length);
       
-      console.log('[Dashboard] Loading with filters:', {
-        adAccount: selectedAdAccount || 'All',
-        selectedCampaigns: selectedCampaigns.length,
-        selectedAds: selectedAds.length,
-        allCampaigns: allCampaignsSelected,
-        allAds: allAdsSelected,
-        totalCampaigns: activeCampaignsList.length
-      });
 
       // Fetch dashboard data with proper flags and date range
       // This includes ad filter for main data display
@@ -1239,16 +1143,29 @@ export default function AdsDashboardBootstrap() {
         adAccountId: selectedAdAccount || null
       });
 
-      console.log("Active Campaign IDs:", Array.from(activeCampaignIds));
-      console.log("Fetched Rows Count:", rows.length);
-      console.log("All Ads Rows Count (for breakdown table):", allAdsRows.length);
-      console.log("All Campaigns Selected:", allCampaignsSelected);
-      console.log("[Multi-Select Debug] Selected Campaigns:", selectedCampaigns);
-      console.log("[Multi-Select Debug] Selected Ads:", selectedAds);
-      console.log("[Multi-Select Debug] All Ads Selected:", allAdsSelected);
-      console.log("[Multi-Select Debug] Rows data sample:", rows.slice(0, 3).map(r => ({ campaign_id: r.campaign_id, ad_id: r.ad_id, ad_name: r.ad_name, spend: r.spend, leads: r.leads })));
-      console.log("[Multi-Select Debug] Unique campaign_ids in rows:", [...new Set(rows.map(r => r.campaign_id))]);
-      console.log("[Multi-Select Debug] Unique ad_ids in rows:", [...new Set(rows.map(r => r.ad_id))]);
+
+      // Filter to only include active campaigns and active ads
+      // API filters by effective_status at API level, so we trust returned data is active
+      // This is a safety check for explicit non-active status only
+      const filterByActiveStatus = (rowsToFilter) => {
+        return rowsToFilter.filter(r => {
+          // Get status values (may be null if API doesn't return them)
+          const campaignStatus = r.campaign_status || r.status;
+          const adStatus = r.ad_status || r.effective_status;
+          
+          // Since API filters by effective_status, if status is missing, assume active
+          // Only exclude if status is explicitly non-active
+          if (campaignStatus && campaignStatus !== 'ACTIVE') {
+            return false; // Explicitly not active
+          }
+          if (adStatus && adStatus !== 'ACTIVE') {
+            return false; // Explicitly not active
+          }
+          
+          // Include if: status is null (API filtered, assume active) OR status is ACTIVE
+          return true;
+        });
+      };
 
       // Only filter by active campaigns if specific campaigns are selected
       // If all campaigns are selected, show all data without filtering
@@ -1265,11 +1182,14 @@ export default function AdsDashboardBootstrap() {
       } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
         // If no campaigns selected but not "all", filter by active campaigns
         filteredData = rows.filter(r => {
-          const isActive = activeCampaignIds.has(r.campaign_id);
+          const isActive = activeCampaignIds.has(String(r.campaign_id));
           return isActive;
         });
       }
       // If allCampaignsSelected is true, filteredData = rows (show all)
+      
+      // Always filter by active status (campaign and ad must be active)
+      filteredData = filterByActiveStatus(filteredData);
 
       // Apply the same campaign filtering to allAdsRows for consistency
       // This ensures the breakdown table shows all ads from the selected campaigns
@@ -1284,14 +1204,15 @@ export default function AdsDashboardBootstrap() {
         });
       } else if (!allCampaignsSelected && selectedCampaigns.length === 0) {
         filteredAllAdsData = allAdsRows.filter(r => {
-          const isActive = activeCampaignIds.has(r.campaign_id);
+          const isActive = activeCampaignIds.has(String(r.campaign_id));
           return isActive;
         });
       }
       // If allCampaignsSelected is true, filteredAllAdsData = allAdsRows (show all)
+      
+      // Always filter by active status (campaign and ad must be active)
+      filteredAllAdsData = filterByActiveStatus(filteredAllAdsData);
 
-      console.log("Filtered Data Count:", filteredData.length);
-      console.log("Filtered All Ads Data Count:", filteredAllAdsData.length);
 
       setData(filteredData);
       // Store all ads data (without ad filter) for ad breakdown table
@@ -1339,46 +1260,17 @@ export default function AdsDashboardBootstrap() {
   // Load ad accounts on mount
   useEffect(() => {
     const loadAdAccounts = async () => {
-      console.log('[Dashboard] ===== Loading Ad Accounts =====');
-      console.log('[Dashboard] API_BASE:', API_BASE);
-      console.log('[Dashboard] Starting fetchAdAccounts...');
       
       try {
         setAdAccountsLoading(true);
         const accountsData = await fetchAdAccounts();
         
-        console.log('[Dashboard] ===== Ad Accounts Response =====');
-        console.log('[Dashboard] Raw response:', accountsData);
-        console.log('[Dashboard] Response type:', typeof accountsData);
-        console.log('[Dashboard] Is array:', Array.isArray(accountsData));
-        console.log('[Dashboard] Length:', Array.isArray(accountsData) ? accountsData.length : 'N/A');
-        
-        if (Array.isArray(accountsData) && accountsData.length > 0) {
-          console.log('[Dashboard] Sample account:', accountsData[0]);
-          console.log('[Dashboard] Account structure:', {
-            keys: Object.keys(accountsData[0] || {}),
-            account_id: accountsData[0]?.account_id,
-            account_name: accountsData[0]?.account_name
-          });
-        }
-        
         setAdAccounts(accountsData || []);
-        
-        if (accountsData && accountsData.length > 0) {
-          console.log(`[Dashboard] ✅ Successfully loaded ${accountsData.length} ad accounts`);
-        } else {
-          console.warn('[Dashboard] ⚠️ No ad accounts loaded - check API response');
-          console.warn('[Dashboard] This could mean:');
-          console.warn('[Dashboard] 1. API returned empty array');
-          console.warn('[Dashboard] 2. API endpoint does not exist');
-          console.warn('[Dashboard] 3. Access token missing or invalid');
-        }
       } catch (error) {
         console.error('[Dashboard] ❌ Error in loadAdAccounts:', error);
         setAdAccounts([]);
       } finally {
         setAdAccountsLoading(false);
-        console.log('[Dashboard] ===== Finished Loading Ad Accounts =====');
       }
     };
     loadAdAccounts();
@@ -1412,7 +1304,6 @@ export default function AdsDashboardBootstrap() {
           preloadedDateRange.start === dateFilters.startDate &&
           preloadedDateRange.end === dateFilters.endDate &&
           preloadedLeads.length > 0) {
-        console.log('[Pre-load] Already loaded for this page + date range');
         return;
       }
       
@@ -1436,7 +1327,6 @@ export default function AdsDashboardBootstrap() {
             start: dateFilters.startDate,
             end: dateFilters.endDate
           });
-          console.log(`[Pre-load] Loaded ${data.leads?.length || 0} leads, ${data.forms?.length || 0} forms`);
         } else {
           console.warn('[Pre-load] Failed to pre-load leads:', response.statusText);
         }
@@ -1456,7 +1346,6 @@ export default function AdsDashboardBootstrap() {
         (preloadedPageId !== selectedPage || 
          preloadedDateRange.start !== dateFilters.startDate ||
          preloadedDateRange.end !== dateFilters.endDate)) {
-      console.log('[Pre-load] Clearing pre-loaded data - page or date range changed');
       setPreloadedLeads([]);
       setPreloadedForms([]);
       setPreloadedPageId(null);
@@ -1471,7 +1360,6 @@ export default function AdsDashboardBootstrap() {
         preloadedPageId === selectedPage &&
         preloadedDateRange.start === dateFilters.startDate &&
         preloadedDateRange.end === dateFilters.endDate) {
-      console.log('[Auto-trigger] Pre-loaded leads available, automatically loading leads table');
       loadLeads();
     }
   }, [preloadedLeads.length, selectedPage, dateFilters.startDate, dateFilters.endDate, preloadedPageId, preloadedDateRange]);
@@ -1508,49 +1396,54 @@ export default function AdsDashboardBootstrap() {
     setFilteredLeadsLoading(true);
     setFilteredLeadsError(null);
     try {
-      // Use database endpoint (same as Total Leads Admin View)
+      // Use live Meta API endpoint (not database)
       const from = filteredLeadsTimeRange.startDate || null;
       const to = filteredLeadsTimeRange.endDate || null;
       
-      console.log("Loading filtered leads from database with filters:", {
-        formId: filteredLeadsForm,
-        pageId: filteredLeadsPage,
-        from,
-        to
-      });
-      
-      // Build query parameters
+      // Build query parameters - use 'start' and 'end' to match backend API
       const params = new URLSearchParams();
       if (filteredLeadsForm) params.append('formId', filteredLeadsForm);
       if (filteredLeadsPage) params.append('pageId', filteredLeadsPage);
-      if (from) params.append('startDate', from);
-      if (to) params.append('endDate', to);
+      if (from) params.append('start', from);
+      if (to) params.append('end', to);
       
-      // Fetch from database endpoint
+      // Fetch from live Meta API endpoint
       const token = getAuthToken();
       const headers = { "Content-Type": "application/json" };
       if (token) {
         headers["Authorization"] = `Bearer ${token}`;
       }
       
-      const url = `${API_BASE}/api/meta/leads/db?${params.toString()}`;
+      const url = `${API_BASE}/api/meta/leads?${params.toString()}`;
       const response = await fetch(url, { headers });
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        
+        // Handle permission/auth errors with better messaging
+        if (errorData.isPermissionError || response.status === 403) {
+          const permissionError = new Error(errorData.details || errorData.error || "Permission denied");
+          permissionError.type = 'permission';
+          permissionError.details = errorData.instruction || errorData.details;
+          throw permissionError;
+        }
+        
+        if (errorData.isAuthError || response.status === 401) {
+          const authError = new Error(errorData.details || errorData.error || "Authentication failed");
+          authError.type = 'auth';
+          authError.details = errorData.instruction || errorData.details;
+          throw authError;
+        }
+        
         throw new Error(errorData.details || errorData.error || `HTTP ${response.status}`);
       }
       
       const data = await response.json();
       const leadsData = data.data || [];
       
-      console.log("Fetched filtered leads from database:", {
-        leadsCount: leadsData.length,
-        filters: { formId: filteredLeadsForm, pageId: filteredLeadsPage, from, to }
-      });
       
       // Format leads for display (ensure all required fields are present)
-      // Database endpoint already returns formatted data, just ensure consistency
+      // Live API endpoint returns formatted data, just ensure consistency
       const formattedLeads = leadsData.map(lead => ({
         ...lead,
         Name: lead.Name || lead.name || 'N/A',
@@ -1571,7 +1464,11 @@ export default function AdsDashboardBootstrap() {
       setFilteredLeadsPageNum(1); // Reset to first page
     } catch (e) {
       console.error("Error loading filtered leads:", e);
-      setFilteredLeadsError(e.message || "Failed to load leads");
+      setFilteredLeadsError({
+        message: e.message || "Failed to load leads",
+        type: e.type || 'error',
+        details: e.details
+      });
       setFilteredLeadsData([]);
     } finally {
       setFilteredLeadsLoading(false);
@@ -1614,14 +1511,7 @@ export default function AdsDashboardBootstrap() {
     const campaignIds = selectedCampaigns.length > 0 ? selectedCampaigns.map(String) : [];
     const adIds = selectedAds.length > 0 ? selectedAds.map(String) : [];
       
-      console.log("Loading leads from database with filters (using dashboard top filters):", {
-        campaignIds,
-        adIds,
-        from,
-        to
-      });
-      
-      // Build query parameters
+    // Build query parameters
       const params = new URLSearchParams();
     if (campaignIds.length > 0) params.append('campaignId', campaignIds.join(','));
     if (adIds.length > 0) params.append('adId', adIds.join(','));
@@ -1636,6 +1526,17 @@ export default function AdsDashboardBootstrap() {
       }
       
       const url = `${API_BASE}/api/meta/leads/db?${params.toString()}`;
+      
+      // Log Total Leads Admin View API call with parameters
+      console.log('[Total Leads Admin View API Call]', {
+        url: url,
+        campaignIds: campaignIds.length > 0 ? campaignIds : 'NONE',
+        adIds: adIds.length > 0 ? adIds : 'NONE',
+        startDate: from || 'NONE',
+        endDate: to || 'NONE',
+        params: Object.fromEntries(params)
+      });
+      
       const response = await fetch(url, { headers });
       
       if (!response.ok) {
@@ -1646,10 +1547,18 @@ export default function AdsDashboardBootstrap() {
       const data = await response.json();
       const leadsData = data.data || [];
       
-      console.log("Fetched leads from database:", {
-        leadsCount: leadsData.length,
-        filters: { campaignIds, adIds, from, to }
+      // Log Total Leads Admin View API response
+      console.log('[Total Leads Admin View API Response]', {
+        totalLeads: leadsData.length,
+        rowCount: leadsData.length,
+        hasData: leadsData.length > 0,
+        sampleLead: leadsData.length > 0 ? {
+          name: leadsData[0].Name || leadsData[0].name,
+          campaign: leadsData[0].campaign_name || leadsData[0].Campaign,
+          ad: leadsData[0].ad_name
+        } : null
       });
+      
       
       // Format leads for display (ensure all required fields are present)
       const formattedLeads = leadsData.map(lead => ({
@@ -1699,7 +1608,6 @@ export default function AdsDashboardBootstrap() {
     const shouldLoadLeads = hasValidDateRange;
     
     if (shouldLoadLeads) {
-      console.log('[Auto-load Total Leads Admin View] Dashboard filter changed, triggering loadLeads');
       loadLeads();
     } else if (!hasValidDateRange) {
       // Clear leads if no valid date range
@@ -1720,73 +1628,79 @@ export default function AdsDashboardBootstrap() {
       const allCampaignsSelected = selectedCampaigns.length === 0 || 
         (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
       
-      console.log("Loading ads - allCampaignsSelected:", allCampaignsSelected, "selectedCampaigns:", selectedCampaigns.length, "totalCampaigns:", campaigns.length);
       
       if (allCampaignsSelected) {
-        // If all campaigns selected, fetch all ads from ad account
-        try {
-          const token = getAuthToken();
-          const headers = { "Content-Type": "application/json" };
-          if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-          }
-          
-          console.log("Fetching all ads from ad account...");
-          const res = await fetch(`${API_BASE}/api/meta/ads?all=true`, { headers });
-          if (res.ok) {
-            const data = await res.json();
-            const allAdsData = data.data || [];
-            console.log("Fetched all ads:", allAdsData.length);
-            setAds(allAdsData);
-          } else {
-            console.warn("Failed to fetch all ads, trying fallback...");
-            // Fallback to fetching ads for each campaign
-            if (campaigns.length > 0) {
-              const allAds = [];
-              for (const campaign of campaigns) {
-                const adsData = await fetchAds(campaign.id);
-                allAds.push(...adsData);
-              }
-              // Remove duplicates based on ad id
-              const uniqueAds = Array.from(
-                new Map(allAds.map(ad => [ad.id, ad])).values()
-              );
-              // Sort by name
-              uniqueAds.sort((a, b) => {
-                const nameA = (a.name || '').toLowerCase();
-                const nameB = (b.name || '').toLowerCase();
-                return nameA.localeCompare(nameB);
-              });
-              console.log("Fallback: Fetched ads from campaigns:", uniqueAds.length);
-              setAds(uniqueAds);
-            } else {
-              setAds([]);
+        // If all campaigns selected, fetch ads for each active campaign
+        // Use the same approach as individual campaign selection to ensure consistency
+        if (campaigns.length > 0) {
+          try {
+            const allAds = [];
+            for (const campaign of campaigns) {
+              const adsData = await fetchAds(campaign.id);
+              // Add campaign_id to each ad since API doesn't return it
+              const adsWithCampaignId = adsData.map(ad => ({
+                ...ad,
+                campaign_id: campaign.id
+              }));
+              allAds.push(...adsWithCampaignId);
             }
+            // Remove duplicates based on ad id
+            const uniqueAds = Array.from(
+              new Map(allAds.map(ad => [ad.id, ad])).values()
+            );
+            // Filter to only show active ads (campaigns are already active)
+            const activeAds = uniqueAds.filter(ad => {
+              // Check if ad is active (effective_status or status)
+              const adStatus = ad.effective_status || ad.status;
+              // If status is missing, assume active (since we're fetching from active campaigns)
+              // Only exclude if explicitly not active
+              return !adStatus || adStatus === 'ACTIVE';
+            });
+            // Sort by name
+            activeAds.sort((a, b) => {
+              const nameA = (a.name || '').toLowerCase();
+              const nameB = (b.name || '').toLowerCase();
+              return nameA.localeCompare(nameB);
+            });
+            setAds(activeAds);
+          } catch (e) {
+            console.error("Error fetching ads for all campaigns:", e);
+            setAds([]);
           }
-        } catch (e) {
-          console.error("Error fetching all ads:", e);
+        } else {
           setAds([]);
         }
       } else if (selectedCampaigns.length > 0) {
         // Fetch ads for selected campaigns only
-        console.log("Fetching ads for selected campaigns:", selectedCampaigns);
         const allAds = [];
         for (const campaignId of selectedCampaigns) {
           const adsData = await fetchAds(campaignId);
-          allAds.push(...adsData);
+          // Add campaign_id to each ad since API doesn't return it
+          const adsWithCampaignId = adsData.map(ad => ({
+            ...ad,
+            campaign_id: campaignId
+          }));
+          allAds.push(...adsWithCampaignId);
         }
         // Remove duplicates based on ad id
         const uniqueAds = Array.from(
           new Map(allAds.map(ad => [ad.id, ad])).values()
         );
+        // Filter to only show active ads (campaigns are already active since we only show active campaigns)
+        const activeAds = uniqueAds.filter(ad => {
+          // Check if ad is active (effective_status or status)
+          const adStatus = ad.effective_status || ad.status;
+          // If status is missing, assume active (since we're fetching from active campaigns)
+          // Only exclude if explicitly not active
+          return !adStatus || adStatus === 'ACTIVE';
+        });
         // Sort by name
-        uniqueAds.sort((a, b) => {
+        activeAds.sort((a, b) => {
           const nameA = (a.name || '').toLowerCase();
           const nameB = (b.name || '').toLowerCase();
           return nameA.localeCompare(nameB);
         });
-        console.log("Fetched ads for selected campaigns:", uniqueAds.length);
-        setAds(uniqueAds);
+        setAds(activeAds);
       } else {
         // No campaigns selected - clear ads
         setAds([]);
@@ -1794,7 +1708,7 @@ export default function AdsDashboardBootstrap() {
       }
     };
     loadAds();
-  }, [selectedCampaigns, campaigns]);
+  }, [selectedCampaigns, campaigns, activeCampaignIds]);
 
 
   useEffect(() => {
@@ -1854,7 +1768,6 @@ export default function AdsDashboardBootstrap() {
   // Auto-select first page if no page is selected and pages are loaded
   useEffect(() => {
     if (!selectedPage && pages.length > 0) {
-      console.log('[Content Marketing] Auto-selecting first page:', pages[0].id);
       setSelectedPage(pages[0].id);
     }
   }, [pages, selectedPage]);
@@ -1864,12 +1777,6 @@ export default function AdsDashboardBootstrap() {
     const pageIdToUse = selectedPage || (pages.length > 0 ? pages[0]?.id : null);
     
     if (pageIdToUse && contentFilters.startDate && contentFilters.endDate) {
-      console.log('[Content Marketing] Fetching page insights:', {
-        pageId: pageIdToUse,
-        from: contentFilters.startDate,
-        to: contentFilters.endDate
-      });
-      
       setContentPageInsightsLoading(true);
       setContentPageInsightsError(null);
       fetchPageInsights({
@@ -1878,14 +1785,8 @@ export default function AdsDashboardBootstrap() {
         to: contentFilters.endDate
       })
         .then((data) => {
-          console.log('[Content Marketing] Page insights data received:', data);
           if (data) {
             setContentPageInsightsData(data);
-            console.log('[Content Marketing] Set page insights data:', {
-              total_follows: data.total_follows,
-              total_unfollows: data.total_unfollows,
-              total_reached: data.total_reached
-            });
           }
         })
         .catch((error) => {
@@ -1996,11 +1897,6 @@ export default function AdsDashboardBootstrap() {
         // Map source filter IDs to Google Sheets source names
         // The API will handle the mapping, but we pass the filter IDs
         const sourceFilter = selectedSource && selectedSource.length > 0 ? selectedSource : null;
-        
-        console.log('[Content Marketing Revenue] Fetching with filters:', {
-          dateRange,
-          source: sourceFilter
-        });
         
         const revenue = await fetchContentMarketingRevenue(dateRange, sourceFilter);
         setContentMarketingRevenue({
@@ -2137,14 +2033,7 @@ export default function AdsDashboardBootstrap() {
 
   // Debug logging for multi-select ad filter
   useEffect(() => {
-    if (selectedAds.length > 1) {
-      console.log('[FilteredRows] Multi-select Ad Filter:', {
-        selectedAds: selectedAds,
-        selectedAdsTypes: selectedAds.map(id => typeof id),
-        filteredRowsCount: filteredRows.length,
-        sampleAdIds: filteredRows.slice(0, 3).map(r => ({ ad_id: r.ad_id, type: typeof r.ad_id, ad_name: r.ad_name }))
-      });
-    }
+    // Removed console.log
   }, [selectedAds, filteredRows]);
 
   const timeseries = useMemo(() => aggregateByDate(filteredRows), [filteredRows]);
@@ -2152,6 +2041,14 @@ export default function AdsDashboardBootstrap() {
   const byCampaign = useMemo(() => {
     const map = new Map();
     data.forEach((r) => {
+      // API filters by effective_status, so if status is missing, assume active
+      // Only exclude if explicitly not active
+      const campaignStatus = r.campaign_status || r.status;
+      const adStatus = r.ad_status || r.effective_status;
+      if (campaignStatus && campaignStatus !== 'ACTIVE') return;
+      if (adStatus && adStatus !== 'ACTIVE') return;
+      
+      // Include if status is null (API filtered) or ACTIVE
       const key = r.campaign;
       const cur = map.get(key) || { campaign: key, leads: 0, spend: 0 };
       cur.leads += r.leads || 0;
@@ -2276,9 +2173,20 @@ export default function AdsDashboardBootstrap() {
 
   // Get all individual ad sets for Campaign Performance table (not aggregated)
   // Always show ALL campaigns and ad names regardless of filter selections
+  // Filter to only show active campaigns and active ads
   const campaignPerformanceRows = useMemo(() => {
     return data
-      .filter(r => r.ad_id && r.ad_name && r.campaign_id)
+      .filter(r => {
+        // Must have required fields
+        if (!r.ad_id || !r.ad_name || !r.campaign_id) return false;
+        // API filters by effective_status, so if status is missing, assume active
+        // Only exclude if explicitly not active
+        const campaignStatus = r.campaign_status || r.status;
+        const adStatus = r.ad_status || r.effective_status;
+        if (campaignStatus && campaignStatus !== 'ACTIVE') return false;
+        if (adStatus && adStatus !== 'ACTIVE') return false;
+        return true; // Include if status is null (API filtered) or ACTIVE
+      })
       .map(r => ({
         ...r,
         cpm: r.impressions > 0 ? (r.spend / (r.impressions / 1000)) : 0,
@@ -2293,14 +2201,19 @@ export default function AdsDashboardBootstrap() {
   // This table always shows all ads, not filtered by "Ad Name" selection
   const adBreakdown = useMemo(() => {
     // Aggregate leads from Total Leads data by ad_id
+    // Only count leads from active campaigns
     const leadsByAdId = new Map();
     leads.forEach(lead => {
       const adId = lead.ad_id;
-      if (adId) {
+      const campaignId = lead.campaign_id;
+      
+      // Only count leads from active campaigns
+      // Normalize campaign ID to string for comparison (consistent with other filters)
+      if (adId && campaignId && activeCampaignIds.has(String(campaignId))) {
         const existing = leadsByAdId.get(adId) || {
           ad_id: adId,
           ad_name: lead.ad_name || 'N/A',
-          campaign_id: lead.campaign_id,
+          campaign_id: campaignId,
           campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
           leads: 0
         };
@@ -2310,10 +2223,17 @@ export default function AdsDashboardBootstrap() {
     });
     
     // Merge with insights data (spend, impressions, clicks, etc.)
+    // API filters by effective_status, so if status is missing, assume active
     const insightsByAdId = new Map();
     const sourceData = allAdsData.length > 0 ? allAdsData : data;
     sourceData.forEach(row => {
       if (row.ad_id) {
+        // Only exclude if explicitly not active
+        const campaignStatus = row.campaign_status || row.status;
+        const adStatus = row.ad_status || row.effective_status;
+        if (campaignStatus && campaignStatus !== 'ACTIVE') return;
+        if (adStatus && adStatus !== 'ACTIVE') return;
+        // Include if status is null (API filtered) or ACTIVE
         insightsByAdId.set(row.ad_id, row);
       }
     });
@@ -2400,18 +2320,8 @@ export default function AdsDashboardBootstrap() {
     
     // Sort by leads count (descending) as default ranking
     result.sort((a, b) => b.leads - a.leads);
-    
-    console.log('[Ad Performance Breakdown] Showing ads from Total Leads:', {
-      totalAds: result.length,
-      totalLeads: leads.length,
-      leadsByAdIdCount: leadsByAdId.size,
-      insightsDataRows: sourceData.length,
-      selectedCampaigns: selectedCampaigns.length,
-      allCampaignsSelected: allCampaignsSelected
-    });
-    
     return result;
-  }, [leads, data, allAdsData, selectedCampaigns, campaigns.length]);
+  }, [leads, data, allAdsData, selectedCampaigns, campaigns.length, activeCampaignIds]);
     
   // Sort helper function
   const sortData = (data, field, direction) => {
@@ -2457,7 +2367,6 @@ export default function AdsDashboardBootstrap() {
   // IMPORTANT: Meta Graph API does NOT provide ad_id/campaign_id per lead
   // Campaign column shows filter context, not lead attribution
   const leadDetails = useMemo(() => {
-    console.log("Total leads:", leads.length);
 
     // Filter by date range if provided (use main dashboard date filters)
     let filtered = leads;
@@ -2618,21 +2527,26 @@ export default function AdsDashboardBootstrap() {
     return `${months[date.getMonth()]} ${date.getDate()}`;
   };
   const formatDateTime = (dateStr, timeStr) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formattedDate = `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
-    if (timeStr) {
-      try {
-        const time = new Date(timeStr);
-        const hours = time.getHours().toString().padStart(2, '0');
-        const minutes = time.getMinutes().toString().padStart(2, '0');
-        return `${formattedDate} ${hours}:${minutes}`;
-      } catch (e) {
-        return formattedDate;
-      }
+    // Use timeStr if available, otherwise use dateStr
+    const timestamp = timeStr || dateStr;
+    if (!timestamp) return '';
+    
+    try {
+      // Use browser's local timezone for display (automatic timezone conversion)
+      // new Date() correctly interprets timestamps with timezone offsets (e.g., +05:30)
+      const date = new Date(timestamp);
+      if (isNaN(date.getTime())) return '';
+      
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const formattedDate = `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+      
+      // Use browser's local time (automatic timezone conversion)
+      const hours = date.getHours().toString().padStart(2, '0');
+      const minutes = date.getMinutes().toString().padStart(2, '0');
+      return `${formattedDate} ${hours}:${minutes}`;
+    } catch (e) {
+      return '';
     }
-    return formattedDate;
   };
 
   // Helper function to calculate date range from time range preset (for leads section)
@@ -3061,7 +2975,6 @@ export default function AdsDashboardBootstrap() {
 
   // Handle time range filter apply for leads section
   const handleLeadsDateRangeApply = (payload) => {
-    console.log('[LeadsDateRangeFilter] handleLeadsDateRangeApply called with payload:', payload);
     
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
@@ -3088,12 +3001,6 @@ export default function AdsDashboardBootstrap() {
     setDateFilters({
       startDate: payload.start_date,
       endDate: payload.end_date
-    });
-    
-    console.log('[LeadsDateRangeFilter] Date filters updated:', {
-      startDate: payload.start_date,
-      endDate: payload.end_date,
-      rangeType: payload.range_type
     });
     
     // Close the modal
@@ -3139,7 +3046,6 @@ export default function AdsDashboardBootstrap() {
 
   // Handle time range filter apply for admin view
   const handleAdminViewDateRangeApply = (payload) => {
-    console.log('[AdminViewDateRangeFilter] handleAdminViewDateRangeApply called with payload:', payload);
     
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
@@ -3165,12 +3071,6 @@ export default function AdsDashboardBootstrap() {
     setAdminViewDateFilters({
       startDate: payload.start_date,
       endDate: payload.end_date
-    });
-    
-    console.log('[AdminViewDateRangeFilter] Date filters updated:', {
-      startDate: payload.start_date,
-      endDate: payload.end_date,
-      rangeType: payload.range_type
     });
     
     // Close the modal
@@ -3216,7 +3116,6 @@ export default function AdsDashboardBootstrap() {
 
   // Handle time range filter apply for filtered leads table
   const handleFilteredLeadsDateRangeApply = (payload) => {
-    console.log('[FilteredLeadsDateRangeFilter] handleFilteredLeadsDateRangeApply called with payload:', payload);
     
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
@@ -3240,12 +3139,6 @@ export default function AdsDashboardBootstrap() {
     setFilteredLeadsTimeRange({
       startDate: payload.start_date,
       endDate: payload.end_date
-    });
-    
-    console.log('[FilteredLeadsDateRangeFilter] Date filters updated:', {
-      startDate: payload.start_date,
-      endDate: payload.end_date,
-      rangeType: payload.range_type
     });
     
     // Close the modal
@@ -3283,7 +3176,6 @@ export default function AdsDashboardBootstrap() {
 
   // Content Marketing Date Range filter handler
   const handleContentDateRangeApply = (payload) => {
-    console.log('[ContentDateRangeFilter] handleContentDateRangeApply called with payload:', payload);
     
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
@@ -3310,12 +3202,6 @@ export default function AdsDashboardBootstrap() {
     setContentFilters({
       startDate: payload.start_date,
       endDate: payload.end_date
-    });
-    
-    console.log('[ContentDateRangeFilter] Content filters updated:', {
-      startDate: payload.start_date,
-      endDate: payload.end_date,
-      rangeType: payload.range_type
     });
     
     // Close the modal
@@ -3362,7 +3248,6 @@ export default function AdsDashboardBootstrap() {
 
   // Chart Time Range filter handler for "Account Reach by Followers Count"
   const handleChartTimeRangeApply = (payload) => {
-    console.log('[ChartTimeRangeFilter] handleChartTimeRangeApply called with payload:', payload);
     
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
@@ -3389,12 +3274,6 @@ export default function AdsDashboardBootstrap() {
     setChartTimeRange({
       startDate: payload.start_date,
       endDate: payload.end_date
-    });
-    
-    console.log('[ChartTimeRangeFilter] Chart time range filters updated:', {
-      startDate: payload.start_date,
-      endDate: payload.end_date,
-      rangeType: payload.range_type
     });
     
     // Close the modal
@@ -3441,13 +3320,6 @@ export default function AdsDashboardBootstrap() {
 
   // Date range filter handler
   const handleDateRangeApply = (payload) => {
-    console.log('[DateRangeFilter] handleDateRangeApply called with payload:', payload);
-    console.log('[DateRangeFilter] Dates received:', {
-      start_date: payload.start_date,
-      end_date: payload.end_date,
-      range_type: payload.range_type
-    });
-    
     // Validate dates before setting
     if (!payload.start_date || !payload.end_date) {
       console.error('[DateRangeFilter] Invalid dates received:', payload);
@@ -3468,11 +3340,6 @@ export default function AdsDashboardBootstrap() {
     
     setDateRangeFilterValue(payload);
     setDateFilters({
-      startDate: payload.start_date,
-      endDate: payload.end_date
-    });
-    
-    console.log('[DateRangeFilter] Date filters updated:', {
       startDate: payload.start_date,
       endDate: payload.end_date
     });
@@ -3893,36 +3760,6 @@ export default function AdsDashboardBootstrap() {
                 </div>
             <div className="col-12 col-md-auto">
               <label className="filter-label">
-                <span className="filter-emoji">📄</span> Page
-              </label>
-              <select
-                className="form-select form-select-sm"
-                value={selectedPage || ''}
-                onChange={(e) => {
-                  setSelectedPage(e.target.value || null);
-                }}
-                style={{ 
-                  fontSize: '0.875rem', 
-                  height: '36px',
-                  borderRadius: '5px',
-                  border: '1px solid rgba(0, 0, 0, 0.1)',
-                  background: 'var(--card, #ffffff)'
-                }}
-              >
-                <option value="">All Pages</option>
-                {pages && pages.length > 0 ? (
-                  pages.map(page => (
-                    <option key={page.id} value={page.id}>
-                      {page.name}
-                    </option>
-                  ))
-                ) : (
-                  <option value="" disabled>Loading pages...</option>
-                )}
-              </select>
-            </div>
-            <div className="col-12 col-md-auto">
-              <label className="filter-label">
                 <span className="filter-emoji">🏢</span> Ad Account
               </label>
               <select
@@ -3930,16 +3767,6 @@ export default function AdsDashboardBootstrap() {
                 value={selectedAdAccount || ''}
                 onChange={(e) => {
                   const accountId = e.target.value || null;
-                  console.log('[Dashboard] ===== Ad Account Changed =====');
-                  console.log('[Dashboard] Previous selectedAdAccount:', selectedAdAccount);
-                  console.log('[Dashboard] New accountId from select:', accountId);
-                  console.log('[Dashboard] Available adAccounts:', adAccounts);
-                  console.log('[Dashboard] adAccounts length:', adAccounts.length);
-                  console.log('[Dashboard] Selected account details:', accountId 
-                    ? adAccounts.find(acc => acc.account_id === accountId)
-                    : 'All Ad Accounts (null)'
-                  );
-                  
                   setSelectedAdAccount(accountId);
                   // Clear campaign and ad selections and state when ad account changes
                   setSelectedCampaigns([]);
@@ -3947,9 +3774,6 @@ export default function AdsDashboardBootstrap() {
                   setCampaigns([]); // Clear campaigns state to trigger reload
                   setAds([]); // Clear ads state
                   setPage(1);
-                  
-                  console.log('[Dashboard] State updated - load() will be triggered by useEffect');
-                  console.log('[Dashboard] ===== End Ad Account Change =====');
                 }}
                 
                 style={{ 
@@ -3962,17 +3786,6 @@ export default function AdsDashboardBootstrap() {
               >
                 <option value="">All Ad Accounts</option>
                 {(() => {
-                  // Debug log for rendering
-                  if (process.env.NODE_ENV === 'development') {
-                    console.log('[Dashboard] Rendering Ad Account select:', {
-                      adAccountsLoading,
-                      adAccountsLength: adAccounts?.length || 0,
-                      adAccounts: adAccounts,
-                      selectedAdAccount,
-                      hasAccounts: adAccounts && adAccounts.length > 0
-                    });
-                  }
-                  
                   if (adAccountsLoading) {
                     return <option value="" disabled>Loading ad accounts...</option>;
                   }
@@ -3984,7 +3797,6 @@ export default function AdsDashboardBootstrap() {
                   return adAccounts.map(account => {
                     const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
                     const value = account.account_id || account.id;
-                    console.log('[Dashboard] Rendering account option:', { value, displayName, account });
                     return (
                       <option key={value} value={value}>
                         {displayName}
@@ -4829,9 +4641,33 @@ export default function AdsDashboardBootstrap() {
 
               {/* Error Message */}
               {filteredLeadsError && (
-                <div className="alert alert-danger mb-3" style={{ fontSize: '0.875rem' }}>
-                  <i className="fas fa-exclamation-circle me-2"></i>
-                  {filteredLeadsError}
+                <div className={`alert ${filteredLeadsError.type === 'permission' || filteredLeadsError.type === 'auth' ? 'alert-warning' : 'alert-danger'} mb-3`} style={{ fontSize: '0.875rem' }}>
+                  <h6 className="alert-heading mb-2">
+                    <i className={`fas ${filteredLeadsError.type === 'permission' ? 'fa-exclamation-triangle' : filteredLeadsError.type === 'auth' ? 'fa-key' : 'fa-exclamation-circle'} me-2`}></i>
+                    {filteredLeadsError.type === 'permission' ? 'Permission Error' : filteredLeadsError.type === 'auth' ? 'Authentication Error' : 'Error'}
+                  </h6>
+                  <p className="mb-2">{filteredLeadsError.message || 'Failed to load leads'}</p>
+                  {filteredLeadsError.details && (
+                    <small className="text-muted d-block mb-2">{filteredLeadsError.details}</small>
+                  )}
+                  {filteredLeadsError.type === 'permission' && (
+                    <div className="mt-3">
+                      <a href="/meta-settings" className="btn btn-sm btn-primary me-2">
+                        <i className="fas fa-cog me-1"></i>
+                        Go to Meta Settings
+                      </a>
+                      <button 
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() => {
+                          setFilteredLeadsError(null);
+                          loadFilteredLeads();
+                        }}
+                      >
+                        <i className="fas fa-redo me-1"></i>
+                        Retry
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 

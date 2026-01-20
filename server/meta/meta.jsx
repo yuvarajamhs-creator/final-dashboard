@@ -92,6 +92,90 @@ function getSystemToken() {
 }
 
 // ---------------------------------------------------------------------
+// PAGE ACCESS TOKEN HELPER FUNCTIONS
+// ---------------------------------------------------------------------
+
+// In-memory cache for Page Access Tokens
+// Meta's leadgen_forms and /leads APIs require a Page Access Token, not a System User Token
+// We fetch Page Access Tokens using the System User Token and cache them to avoid repeated API calls
+const pageTokenCache = {
+  tokens: {}, // pageId -> { token: string, expiresAt: number }
+  ttl: 60 * 60 * 1000 // 1 hour TTL
+};
+
+/**
+ * Get Page Access Token for a specific page
+ * 
+ * Meta's leadgen_forms and /leads APIs require a Page Access Token, not a System User Token.
+ * This function fetches the Page Access Token from Meta API using the System User Token
+ * and caches it in memory to avoid repeated API calls.
+ * 
+ * @param {string} pageId - The Meta page ID
+ * @returns {Promise<string>} - The page access token
+ */
+async function getPageAccessToken(pageId) {
+  if (!pageId) {
+    throw new Error("Page ID is required to fetch Page Access Token");
+  }
+
+  // Check cache first
+  const cached = pageTokenCache.tokens[pageId];
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return cached.token;
+  }
+
+  // Fetch from Meta API using System User Token
+  try {
+    const systemToken = getSystemToken();
+    const response = await axios.get(
+      `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
+      {
+        params: {
+          fields: 'access_token',
+          access_token: systemToken
+        },
+        timeout: 30000
+      }
+    );
+
+    if (!response.data || !response.data.access_token) {
+      throw new Error(`Page access token not found in API response for page ${pageId}`);
+    }
+
+    const pageToken = response.data.access_token;
+
+    // Cache the token
+    pageTokenCache.tokens[pageId] = {
+      token: pageToken,
+      expiresAt: now + pageTokenCache.ttl
+    };
+
+    return pageToken;
+  } catch (error) {
+    const errorData = error.response?.data?.error;
+    const errorCode = errorData?.code;
+    const errorMsg = errorData?.message || error.message;
+
+    // Clear cache on error
+    delete pageTokenCache.tokens[pageId];
+
+    // Handle specific error codes
+    if (errorCode === 190) {
+      throw new Error(`Page Access Token expired/invalid for page ${pageId}: ${errorMsg}. Please check your System User Token.`);
+    }
+    if (errorCode === 200) {
+      throw new Error(`Permission error fetching Page Access Token for page ${pageId}: ${errorMsg}. Ensure your System User Token has 'pages_show_list' permission.`);
+    }
+    if (errorCode === 10) {
+      throw new Error(`Permission denied for page ${pageId}: ${errorMsg}. Check that your System User Token has access to this page.`);
+    }
+
+    throw new Error(`Failed to get page access token for page ${pageId}: ${errorMsg}`);
+  }
+}
+
+// ---------------------------------------------------------------------
 // HELPER FUNCTIONS FOR FORM DISCOVERY
 // ---------------------------------------------------------------------
 
@@ -422,8 +506,15 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     console.log("timeRange", timeRange, "days", days, "time_increment", time_increment, "adAccountId", adAccountId);
     const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
 
-    // Determine level: if ad_id is provided, use ad level, otherwise campaign level
-    const level = ad_id && ad_id.trim() !== "" ? "ad" : "campaign";
+    // Determine level: 
+    // - If ad_id is provided, use ad level
+    // - If no campaign_id filter (all campaigns selected), use ad level to filter by ad status
+    // - Otherwise, use campaign level
+    // Use ad-level when we need to filter by ad status (when all campaigns selected or ad_id provided)
+    // Safely check if campaign_id is empty (undefined, null, or empty string)
+    const campaignIdIsEmpty = !campaign_id || (typeof campaign_id === 'string' && campaign_id.trim() === "");
+    const needsAdLevelFiltering = (ad_id && ad_id.trim() !== "") || campaignIdIsEmpty;
+    const level = needsAdLevelFiltering ? "ad" : "campaign";
     const fields = level === "ad" 
       ? "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop"
       : "campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,account_name";
@@ -461,12 +552,34 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
       });
     }
 
-    // Only add filtering if we have specific filters
-    // If filtering array is empty, API will return all campaigns/ads
+    // Always filter by active status using effective_status
+    // This ensures only active campaigns/ads are returned
+    if (level === "campaign") {
+      filtering.push({
+        field: "campaign.effective_status",
+        operator: "IN",
+        value: ["ACTIVE"]
+      });
+    } else if (level === "ad") {
+      // For ad-level insights, filter by both campaign and ad status
+      filtering.push({
+        field: "campaign.effective_status",
+        operator: "IN",
+        value: ["ACTIVE"]
+      });
+      filtering.push({
+        field: "ad.effective_status",
+        operator: "IN",
+        value: ["ACTIVE"]
+      });
+    }
+
+    // Always add filtering (now includes status filters)
     if (filtering.length > 0) {
       params.filtering = JSON.stringify(filtering);
       console.log("[Backend] Filtering by campaigns:", campaignIdArray.length > 0 ? campaignIdArray : 'none');
       console.log("[Backend] Filtering by ads:", adIdArray.length > 0 ? adIdArray : 'none');
+      console.log("[Backend] Status filters: campaign.effective_status=ACTIVE" + (level === "ad" ? ", ad.effective_status=ACTIVE" : ""));
       console.log("[Backend] Total filters:", filtering.length);
     }
 
@@ -733,6 +846,7 @@ router.get("/ads", optionalAuthMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Meta API Ads Error:", err.response?.data || err.message);
 
+    // Handle authentication errors
     if (err.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
@@ -742,11 +856,33 @@ router.get("/ads", optionalAuthMiddleware, async (req, res) => {
       });
     }
 
-    // If error is 100 (invalid parameter), return empty array (campaign might not have ads)
+    // Handle invalid parameter errors (campaign might not exist or have no ads)
     if (err.response?.data?.error?.code === 100) {
+      console.warn("Invalid parameter or campaign has no ads, returning empty array");
       return res.json({ data: [] });
     }
 
+    // Handle invalid campaign ID errors (campaign might not exist or be inaccessible)
+    if (err.response?.data?.error?.code === 1487295 || 
+        err.response?.data?.error?.error_subcode === 1487295 ||
+        (err.response?.data?.error?.message && 
+         (err.response.data.error.message.includes('Invalid campaign') || 
+          err.response.data.error.message.includes('does not exist')))) {
+      console.warn("Campaign not found or invalid, returning empty array");
+      return res.json({ data: [] });
+    }
+
+    // Handle permission errors
+    if (err.response?.data?.error?.code === 200 || 
+        err.response?.data?.error?.code === 10) {
+      return res.status(403).json({
+        error: "Insufficient permissions",
+        details: err.response.data.error.message || "Permission denied",
+        isPermissionError: true
+      });
+    }
+
+    // For other errors, log and return 500 with details
     res.status(500).json({
       error: "Failed to fetch ads",
       details: err.response?.data || err.message,
@@ -999,7 +1135,7 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
     }
 
     const response = await axios.get(
-      `https://graph.facebook.com/${META_API_VERSION}/me`,
+      `https://graph.facebook.com/${META_API_VERSION}/me/accounts`,
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -1116,18 +1252,20 @@ router.get("/page-name", optionalAuthMiddleware, async (req, res) => {
 // ---------------------------------------------------------------------
 // 5.2) FORMS API - Fetch leadgen forms for a page
 //    GET /api/meta/pages/:pageId/forms
-//    Uses META_SYSTEM_ACCESS_TOKEN
+//    Uses Page Access Token (required by Meta's leadgen_forms API)
 // ---------------------------------------------------------------------
 router.get("/pages/:pageId/forms", optionalAuthMiddleware, async (req, res) => {
   try {
     const { pageId } = req.params;
-    const accessToken = getSystemToken();
+    
+    // Meta's leadgen_forms API requires a Page Access Token, not a System User Token
+    const pageAccessToken = await getPageAccessToken(pageId);
     const formsUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`;
     
     const params = {
-      access_token: accessToken,
+      access_token: pageAccessToken,
       fields: "id,name,locale,status",
-      limit: 100,
+      limit: 1000,
     };
 
     console.log(`Fetching forms for page ${pageId} from:`, formsUrl);
@@ -1140,20 +1278,46 @@ router.get("/pages/:pageId/forms", optionalAuthMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Error fetching forms:", err.response?.data || err.message);
     
-    if (err.response?.data?.error?.code === 190) {
+    const errorData = err.response?.data?.error;
+    const errorCode = errorData?.code;
+    const errorMsg = errorData?.message || err.message;
+
+    // Handle token expiration (190)
+    if (errorCode === 190) {
+      // Clear cache for this page
+      if (pageTokenCache.tokens[req.params.pageId]) {
+        delete pageTokenCache.tokens[req.params.pageId];
+      }
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
-        details: err.response.data.error.message,
+        details: errorMsg,
         isAuthError: true,
         instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+      });
+    }
+
+    // Handle permission errors (200, 10)
+    if (errorCode === 200) {
+      return res.status(403).json({
+        error: "Permission error",
+        details: errorMsg,
+        instruction: "Ensure your System User Token has 'leads_retrieval' and 'pages_read_engagement' permissions"
+      });
+    }
+
+    if (errorCode === 10) {
+      return res.status(403).json({
+        error: "Permission denied",
+        details: errorMsg,
+        instruction: "Check that your System User Token has access to this page and required permissions"
       });
     }
 
     res.status(500).json({
       error: "Failed to fetch forms",
       details: err.response?.data || err.message,
-        });
-      }
+    });
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -1274,7 +1438,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
     try {
       const pagesResponse = await axios.get(
         `https://graph.facebook.com/${META_API_VERSION}/me/accounts`,
-        { params: { access_token: accessToken, fields: "id", limit: 100 } }
+        { params: { access_token: accessToken, fields: "id", limit: 1000 } }
       );
       pages = (pagesResponse.data.data || []).map(p => p.id);
       console.log(`[Forms by Ad] Found ${pages.length} pages`);
@@ -1290,20 +1454,41 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
       return res.json({ data: [], cached: false });
     }
 
-    // Step 2: Fetch all forms from all pages
+    // Step 2: Fetch all forms from all pages using Page Access Tokens
+    // Meta's leadgen_forms API requires a Page Access Token, not a System User Token
     const allForms = [];
-    const formPromises = pages.map(pageId =>
-      axios.get(`https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`, {
-        params: {
-          access_token: accessToken,
-          fields: "id",
-          limit: 1000
+    const formPromises = pages.map(async (pageId) => {
+      try {
+        // Get Page Access Token for this page
+        const pageAccessToken = await getPageAccessToken(pageId);
+        const response = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`, {
+          params: {
+            access_token: pageAccessToken,
+            fields: "id,page_id",
+            limit: 1000
+          }
+        });
+        // Add page_id to each form for later use
+        return (response.data.data || []).map(form => ({ ...form, page_id: pageId }));
+      } catch (err) {
+        const errorData = err.response?.data?.error;
+        const errorCode = errorData?.code;
+        
+        // Handle token errors
+        if (errorCode === 190) {
+          // Clear cache for this page
+          if (pageTokenCache.tokens[pageId]) {
+            delete pageTokenCache.tokens[pageId];
+          }
+          console.warn(`[Forms by Ad] Token expired for page ${pageId}:`, errorData?.message || err.message);
+        } else if (errorCode === 200 || errorCode === 10) {
+          console.warn(`[Forms by Ad] Permission error for page ${pageId}:`, errorData?.message || err.message);
+        } else {
+          console.warn(`[Forms by Ad] Error fetching forms for page ${pageId}:`, err.message);
         }
-      }).then(response => response.data.data || []).catch(err => {
-        console.warn(`[Forms by Ad] Error fetching forms for page ${pageId}:`, err.message);
         return [];
-      })
-    );
+      }
+    });
 
     const allFormsArrays = await Promise.all(formPromises);
     allForms.push(...allFormsArrays.flat());
@@ -1318,9 +1503,17 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
     const formIdsWithLeads = new Set();
     const leadPromises = allForms.map(async (form) => {
       try {
+        // Meta's /leads API requires a Page Access Token for the form's page
+        const formPageId = form.page_id;
+        if (!formPageId) {
+          console.warn(`[Forms by Ad] Form ${form.id} has no page_id, skipping`);
+          return;
+        }
+        
+        const pageAccessToken = await getPageAccessToken(formPageId);
         const leadsUrl = `https://graph.facebook.com/${META_API_VERSION}/${form.id}/leads`;
         const leadsResponse = await axios.get(leadsUrl, {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers: { Authorization: `Bearer ${pageAccessToken}` },
           params: {
             fields: "id,created_time,ad_id",
             limit: 1000 // Fetch enough to find matches
@@ -1347,8 +1540,24 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
           }
         }
       } catch (leadErr) {
-        // Skip forms that can't be accessed - non-fatal
-        console.warn(`[Forms by Ad] Error checking leads for form ${form.id}:`, leadErr.message);
+        const errorData = leadErr.response?.data?.error;
+        const errorCode = errorData?.code;
+        const errorMsg = errorData?.message || leadErr.message;
+        
+        // Handle token errors
+        if (errorCode === 190) {
+          // Clear cache for this page
+          const formPageId = form.page_id;
+          if (formPageId && pageTokenCache.tokens[formPageId]) {
+            delete pageTokenCache.tokens[formPageId];
+          }
+          console.warn(`[Forms by Ad] Token expired while fetching leads for form ${form.id}:`, errorMsg);
+        } else if (errorCode === 200 || errorCode === 10) {
+          console.warn(`[Forms by Ad] Permission error while fetching leads for form ${form.id}:`, errorMsg);
+        } else {
+          // Skip forms that can't be accessed - non-fatal
+          console.warn(`[Forms by Ad] Error checking leads for form ${form.id}:`, errorMsg);
+        }
         // Continue to next form
       }
     });
@@ -1402,7 +1611,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
               headers: { Authorization: `Bearer ${accessToken}` },
               params: {
                 fields: "id,created_time",
-                limit: 1
+                limit: 1000
               }
             });
 
@@ -2352,18 +2561,48 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
     
     if (formId) {
       // Direct form ID provided
+      // We need page_id to get the Page Access Token for fetching leads
       try {
         const formResponse = await axios.get(
           `https://graph.facebook.com/${META_API_VERSION}/${formId}`,
-          { params: { access_token: accessToken, fields: "id,name" } }
+          { params: { access_token: accessToken, fields: "id,name,page_id" } }
         );
+        if (!formResponse.data.page_id) {
+          return res.status(400).json({ 
+            error: "Form missing page_id", 
+            details: "Unable to determine which page this form belongs to. Cannot fetch leads without page_id." 
+          });
+        }
         formsToFetch.push({
           form_id: formId,
-          name: formResponse.data.name || `Form ${formId}`
+          name: formResponse.data.name || `Form ${formId}`,
+          page_id: formResponse.data.page_id
         });
       } catch (err) {
-        console.error(`[Leads API] Error fetching form ${formId}:`, err.message);
-        return res.status(400).json({ error: "Invalid formId", details: err.response?.data?.error?.message });
+        const errorData = err.response?.data?.error;
+        const errorCode = errorData?.code;
+        const errorMsg = errorData?.message || err.message;
+        
+        // Handle token errors
+        if (errorCode === 190) {
+          return res.status(401).json({ 
+            error: "Meta Access Token expired or invalid", 
+            details: errorMsg,
+            isAuthError: true,
+            instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+          });
+        }
+        
+        if (errorCode === 200 || errorCode === 10) {
+          return res.status(403).json({ 
+            error: "Permission error", 
+            details: errorMsg,
+            instruction: "Ensure your System User Token has required permissions"
+          });
+        }
+        
+        console.error(`[Leads API] Error fetching form ${formId}:`, errorMsg);
+        return res.status(400).json({ error: "Invalid formId", details: errorMsg });
       }
     } else if (adId) {
       // Fetch forms associated with ad - use same logic as /forms endpoint
@@ -2405,32 +2644,88 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         );
         const pages = (pagesResponse.data.data || []).map(p => p.id);
         
-        // Step 3: Fetch all forms
-        const formPromises = pages.map(pageId =>
-          axios.get(`https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`, {
-            params: { access_token: accessToken, fields: "id,name", limit: 100 }
-          }).then(r => r.data.data || []).catch(() => [])
-        );
+        // Step 3: Fetch all forms using Page Access Tokens
+        // Meta's leadgen_forms API requires a Page Access Token, not a System User Token
+        const formPromises = pages.map(async (pageId) => {
+          try {
+            const pageAccessToken = await getPageAccessToken(pageId);
+            const response = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`, {
+              params: { access_token: pageAccessToken, fields: "id,name,page_id", limit: 100 }
+            });
+            return (response.data.data || []).map(f => ({ 
+              form_id: f.id, 
+              name: f.name || `Form ${f.id}`,
+              page_id: f.page_id || pageId 
+            }));
+          } catch (err) {
+            const errorData = err.response?.data?.error;
+            const errorCode = errorData?.code;
+            
+            // Handle token errors
+            if (errorCode === 190) {
+              if (pageTokenCache.tokens[pageId]) {
+                delete pageTokenCache.tokens[pageId];
+              }
+              console.warn(`[Leads API] Token expired for page ${pageId}:`, errorData?.message || err.message);
+            } else if (errorCode === 200 || errorCode === 10) {
+              console.warn(`[Leads API] Permission error for page ${pageId}:`, errorData?.message || err.message);
+            } else {
+              console.warn(`[Leads API] Error fetching forms for page ${pageId}:`, err.message);
+            }
+            return [];
+          }
+        });
         
         const allFormsArrays = await Promise.all(formPromises);
-        formsToFetch = allFormsArrays.flat().map(f => ({ form_id: f.id, name: f.name || `Form ${f.id}` }));
+        formsToFetch = allFormsArrays.flat();
         console.log(`[Leads API] Found ${formsToFetch.length} forms for ad ${adId}`);
       } catch (err) {
         console.error(`[Leads API] Error fetching forms for ad:`, err.message);
         formsToFetch = [];
       }
     } else if (pageId) {
-      // Fetch all forms from page
+      // Fetch all forms from page using Page Access Token
+      // Meta's leadgen_forms API requires a Page Access Token, not a System User Token
       try {
+        const pageAccessToken = await getPageAccessToken(pageId);
         const formsResponse = await axios.get(
           `https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`,
-          { params: { access_token: accessToken, fields: "id,name", limit: 100 } }
+          { params: { access_token: pageAccessToken, fields: "id,name,page_id", limit: 100 } }
         );
-        formsToFetch = (formsResponse.data.data || []).map(f => ({ form_id: f.id, name: f.name }));
+        formsToFetch = (formsResponse.data.data || []).map(f => ({ 
+          form_id: f.id, 
+          name: f.name,
+          page_id: f.page_id || pageId 
+        }));
         console.log(`[Leads API] Found ${formsToFetch.length} forms for page ${pageId}`);
       } catch (err) {
+        const errorData = err.response?.data?.error;
+        const errorCode = errorData?.code;
+        const errorMsg = errorData?.message || err.message;
+        
+        // Handle token errors
+        if (errorCode === 190) {
+          if (pageTokenCache.tokens[pageId]) {
+            delete pageTokenCache.tokens[pageId];
+          }
+          return res.status(401).json({ 
+            error: "Meta Access Token expired or invalid", 
+            details: errorMsg,
+            isAuthError: true,
+            instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+          });
+        }
+        
+        if (errorCode === 200 || errorCode === 10) {
+          return res.status(403).json({ 
+            error: "Permission error", 
+            details: errorMsg,
+            instruction: "Ensure your System User Token has 'leads_retrieval' and 'pages_read_engagement' permissions"
+          });
+        }
+        
         console.error(`[Leads API] Error fetching forms for page:`, err.message);
-        return res.status(400).json({ error: "Failed to fetch forms for page", details: err.response?.data?.error?.message });
+        return res.status(400).json({ error: "Failed to fetch forms for page", details: errorMsg });
       }
     }
 
@@ -2447,10 +2742,18 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
 
     for (const formInfo of formsToFetch) {
       try {
+        // Meta's /leads API requires a Page Access Token for the form's page
+        const formPageId = formInfo.page_id;
+        if (!formPageId) {
+          console.warn(`[Leads API] Form ${formInfo.form_id} has no page_id, skipping`);
+          continue;
+        }
+        
+        const pageAccessToken = await getPageAccessToken(formPageId);
         const leadsUrl = `https://graph.facebook.com/${META_API_VERSION}/${formInfo.form_id}/leads`;
         // Request ad_id field if available in Meta API
         const response = await axios.get(leadsUrl, {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers: { Authorization: `Bearer ${pageAccessToken}` },
           params: {
             fields: "id,created_time,field_data,ad_id" // Try to get ad_id if available
           }
@@ -2645,7 +2948,23 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
           allLeads.push(mappedLead);
         }
       } catch (formError) {
-        console.error(`[Leads API] Error fetching leads from form ${formInfo.form_id}:`, formError.message);
+        const errorData = formError.response?.data?.error;
+        const errorCode = errorData?.code;
+        const errorMsg = errorData?.message || formError.message;
+        
+        // Handle token errors
+        if (errorCode === 190) {
+          // Clear cache for this page
+          const formPageId = formInfo.page_id;
+          if (formPageId && pageTokenCache.tokens[formPageId]) {
+            delete pageTokenCache.tokens[formPageId];
+          }
+          console.error(`[Leads API] Token expired while fetching leads from form ${formInfo.form_id}:`, errorMsg);
+        } else if (errorCode === 200 || errorCode === 10) {
+          console.error(`[Leads API] Permission error while fetching leads from form ${formInfo.form_id}:`, errorMsg);
+        } else {
+          console.error(`[Leads API] Error fetching leads from form ${formInfo.form_id}:`, errorMsg);
+        }
         // Continue with other forms
       }
     }
@@ -2717,17 +3036,40 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
   } catch (err) {
     console.error("[Leads API] Error:", err.response?.data || err.message);
 
-    if (err.response?.data?.error?.code === 190) {
+    const errorData = err.response?.data?.error;
+    const errorCode = errorData?.code;
+    const errorMsg = errorData?.message || err.message;
+
+    // Handle token expiration (190)
+    if (errorCode === 190) {
+      // Clear all page token caches on token expiration
+      pageTokenCache.tokens = {};
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
-        details: err.response.data.error.message,
+        details: errorMsg,
         isAuthError: true,
-        instruction: "Please update META_ACCESS_TOKEN in server/.env"
+        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
       });
     }
 
-    const errorCode = err.response?.data?.error?.code;
-    const errorMessage = err.response?.data?.error?.message || '';
+    // Handle permission errors (200, 10)
+    if (errorCode === 200) {
+      return res.status(403).json({
+        error: "Permission error",
+        details: errorMsg,
+        instruction: "Ensure your System User Token has 'leads_retrieval' and 'pages_read_engagement' permissions"
+      });
+    }
+
+    if (errorCode === 10) {
+      return res.status(403).json({
+        error: "Permission denied",
+        details: errorMsg,
+        instruction: "Check that your System User Token has access to the requested resources and required permissions"
+      });
+    }
+
+    const errorMessage = errorMsg;
     
     if (errorCode === 10 || errorCode === 200 || 
         errorMessage.toLowerCase().includes('permission') ||

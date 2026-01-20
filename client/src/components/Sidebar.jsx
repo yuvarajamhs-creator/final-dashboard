@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Link, NavLink, useNavigate, useLocation } from "react-router-dom";
 import { auth } from "../utils/auth";
 import logo from "../assets/MHS_Log.png"; // Import the logo
@@ -9,11 +9,37 @@ export default function Layout({ children }) {
   const location = useLocation();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [openSettingsMenu, setOpenSettingsMenu] = useState(false);
+  const settingsMenuRef = useRef(null);
 
   const handleLogout = () => {
     auth.logout();
     navigate("/login");
   };
+
+  const toggleSettingsMenu = () => {
+    setOpenSettingsMenu(!openSettingsMenu);
+  };
+
+  // Check if current route is a settings route
+  const isSettingsRoute = location.pathname === '/meta-settings' || location.pathname === '/team-management';
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target)) {
+        setOpenSettingsMenu(false);
+      }
+    };
+
+    if (openSettingsMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [openSettingsMenu]);
 
   return (
     <div
@@ -132,18 +158,57 @@ export default function Layout({ children }) {
             </NavLink>
           </li>
 
-          {/* 7. Meta Settings */}
-          <li className="nav-item mb-2">
-            <NavLink
-              to="/meta-settings"
-              className="nav-link sidebar-link d-flex align-items-center"
-              onClick={() => {
-                if (window.innerWidth < 992) setSidebarOpen(false);
-              }}
+          {/* 7. Settings Dropdown */}
+          <li className="nav-item mb-2" ref={settingsMenuRef}>
+            <button
+              className={`nav-link sidebar-link d-flex align-items-center justify-content-between w-100 ${
+                isSettingsRoute ? 'active-parent' : ''
+              }`}
+              onClick={toggleSettingsMenu}
+              style={{ background: 'none', border: 'none', cursor: 'pointer' }}
             >
-              <span className="icon-wrapper me-3">🔐</span>
-              <span>Meta Settings</span>
-            </NavLink>
+              <div className="d-flex align-items-center">
+                <span className="icon-wrapper me-3">⚙️</span>
+                <span>Settings</span>
+              </div>
+              <span className="dropdown-arrow" style={{ 
+                fontSize: '0.75rem', 
+                transition: 'transform 0.2s ease',
+                transform: openSettingsMenu ? 'rotate(180deg)' : 'rotate(0deg)'
+              }}>
+                ▼
+              </span>
+            </button>
+            {openSettingsMenu && (
+              <ul className="settings-submenu animate-submenu">
+                <li>
+                  <NavLink
+                    to="/meta-settings"
+                    className="nav-link sidebar-link submenu-link d-flex align-items-center"
+                    onClick={() => {
+                      setOpenSettingsMenu(false);
+                      if (window.innerWidth < 992) setSidebarOpen(false);
+                    }}
+                  >
+                    <span className="icon-wrapper me-3">🔐</span>
+                    <span>Meta Settings</span>
+                  </NavLink>
+                </li>
+                <li>
+                  <NavLink
+                    to="/team-management"
+                    className="nav-link sidebar-link submenu-link d-flex align-items-center"
+                    onClick={() => {
+                      setOpenSettingsMenu(false);
+                      if (window.innerWidth < 992) setSidebarOpen(false);
+                    }}
+                  >
+                    <span className="icon-wrapper me-3">👥</span>
+                    <span>Team Management</span>
+                  </NavLink>
+                </li>
+              </ul>
+            )}
           </li>
         </ul>
       </aside>
@@ -200,6 +265,8 @@ export default function Layout({ children }) {
             overflow-x: hidden;
             z-index: 1000;
             border-right: 1px solid rgba(255,255,255,0.05);
+            flex: 0 0 auto;
+            flex-shrink: 0;
         }
         
         .sidebar-logo {
@@ -226,6 +293,15 @@ export default function Layout({ children }) {
           transition: all 0.2s ease;
           margin-bottom: 4px;
           border: 1px solid transparent;
+          min-width: 0;
+        }
+
+        /* Prevent label wrapping/clipping inside flex links */
+        .sidebar-link span:not(.icon-wrapper) {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          min-width: 0;
         }
 
         .sidebar-link:hover {
@@ -259,6 +335,40 @@ export default function Layout({ children }) {
         .submenu-link { font-size: 0.85rem; padding-left: 12px; }
         .animate-submenu { animation: slideDown 0.2s ease-out; }
         @keyframes slideDown { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Settings Dropdown */
+        .settings-submenu {
+          list-style: none;
+          padding: 0;
+          margin: 4px 0 0 0;
+          background-color: rgba(0, 0, 0, 0.15);
+          border-radius: 8px;
+          overflow: hidden;
+        }
+        
+        .settings-submenu li {
+          margin: 0;
+        }
+        
+        .settings-submenu .sidebar-link {
+          margin: 0;
+          padding-left: 48px;
+          background-color: transparent;
+        }
+        
+        .settings-submenu .sidebar-link:hover {
+          background-color: rgba(255, 255, 255, 0.1);
+          padding-left: 52px;
+        }
+        
+        .settings-submenu .sidebar-link.active {
+          background: linear-gradient(90deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.1));
+          border: 1px solid rgba(59, 130, 246, 0.4);
+        }
+        
+        .dropdown-arrow {
+          opacity: 0.7;
+        }
 
         /* Responsive */
         @media (min-width: 992px) {

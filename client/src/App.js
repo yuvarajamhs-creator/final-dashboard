@@ -18,6 +18,7 @@ import Audience from "./pages/Audience";
 import AIInsights from "./pages/AIInsights";
 import HighFiveLanding from "./pages/HighFiveLanding";
 import MetaSettings from "./pages/MetaSettings";
+import TeamManagement from "./pages/TeamManagement";
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
                   <Route path="/report/daily" element={<Report />} />
                   <Route path="/high-five" element={<HighFiveLanding />} />
                   <Route path="/meta-settings" element={<MetaSettings />} />
+                  <Route path="/team-management" element={<TeamManagement />} />
                 </Routes>
               </Sidebar>
             </ProtectedRoute>
