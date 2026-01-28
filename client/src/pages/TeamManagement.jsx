@@ -1,90 +1,106 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import "./TeamManagement.css";
 
-export default function TeamManagement() {
-  // Sample data matching the image
-  const initialTeamMembers = [
-    {
-      id: 1,
-      name: "Sri devi Accounts",
-      country: "INDIA",
-      phone: "+91-7845859665",
-      email: "sridevi.m16mhs@gmail.com",
-      type: "Restricted",
-      createdOn: "19 Jan, 2026",
-      profilePicture: null
-    },
-    {
-      id: 2,
-      name: "Kaviyasri",
-      country: "INDIA",
-      phone: "+91-9876543210",
-      email: "kaviyasri@example.com",
-      type: "Restricted",
-      createdOn: "06 Jan, 2026",
-      profilePicture: null
-    },
-    {
-      id: 3,
-      name: "Dhana",
-      country: "INDIA",
-      phone: "+91-8765432109",
-      email: "dhana@example.com",
-      type: "Restricted",
-      createdOn: "22 Dec, 2025",
-      profilePicture: null
-    },
-    {
-      id: 4,
-      name: "Vasanth",
-      country: "INDIA",
-      phone: "+91-7654321098",
-      email: "vasanth@example.com",
-      type: "Admin",
-      createdOn: "19 Dec, 2025",
-      profilePicture: null
-    },
-    {
-      id: 5,
-      name: "Thamil",
-      country: "INDIA",
-      phone: "+91-6543210987",
-      email: "thamil@example.com",
-      type: "Restricted",
-      createdOn: "15 Dec, 2025",
-      profilePicture: null
-    },
-    {
-      id: 6,
-      name: "Sri devi priya",
-      country: "INDIA",
-      phone: "+91-5432109876",
-      email: "sridevipriya@example.com",
-      type: "Restricted",
-      createdOn: "24 Nov, 2025",
-      profilePicture: null
-    }
-  ];
+const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:4000";
 
-  const [teamMembers, setTeamMembers] = useState(initialTeamMembers);
+// Helper to get auth token from localStorage
+const getAuthToken = () => {
+  try {
+    // Try multiple storage keys that might be used
+    const storageKeys = [
+      process.env.REACT_APP_STORAGE_KEY || "app_auth",
+      "59ca69f53c01829c41b079fb15fb5b9bc7ed726f15afdc9da7e57f83543fca15a06130d30bbf6744243d936c7b19d494353d7a55e742b0404ebd6c4704efd50c",
+      "ads_dashboard_auth"
+    ];
+    
+    for (const key of storageKeys) {
+      const authData = localStorage.getItem(key);
+      if (authData) {
+        const parsed = JSON.parse(authData);
+        if (parsed.token) {
+          return parsed.token;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error getting auth token:', e);
+  }
+  return null;
+};
+
+export default function TeamManagement() {
+  const navigate = useNavigate();
+  
+  const [teamMembers, setTeamMembers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
   const [showPermissionsModal, setShowPermissionsModal] = useState(false);
   const [selectedMember, setSelectedMember] = useState(null);
   const [editingMember, setEditingMember] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [formData, setFormData] = useState({
     name: "",
     country: "INDIA",
     phone: "",
     email: "",
-    type: "Restricted"
+    type: "Restricted",
+    password: "",
+    confirmPassword: ""
   });
   const [selectedService, setSelectedService] = useState("All memberships");
+
+  // Fetch users from database
+  const fetchUsers = async () => {
+    const token = getAuthToken();
+    if (!token) {
+      setError("Please log in to view team members");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/users`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (res.status === 401) {
+        setError("Session expired. Please log in again.");
+        navigate("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to fetch users");
+      }
+
+      const users = await res.json();
+      setTeamMembers(users);
+    } catch (err) {
+      console.error("Error fetching users:", err);
+      setError(err.message || "Failed to load team members");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch users on component mount
+  useEffect(() => {
+    fetchUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Filter team members based on search query
   const filteredMembers = teamMembers.filter(member =>
     member.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    member.phone.includes(searchQuery)
+    (member.phone && member.phone.includes(searchQuery)) ||
+    member.email.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   // Copy to clipboard function
@@ -98,12 +114,15 @@ export default function TeamManagement() {
   // Handle add new member
   const handleAddMember = () => {
     setEditingMember(null);
+    setError("");
     setFormData({
       name: "",
       country: "INDIA",
       phone: "",
       email: "",
-      type: "Restricted"
+      type: "Restricted",
+      password: "",
+      confirmPassword: ""
     });
     setShowAddModal(true);
   };
@@ -111,66 +130,172 @@ export default function TeamManagement() {
   // Handle edit member
   const handleEditMember = (member) => {
     setEditingMember(member);
+    setError("");
     setFormData({
-      name: member.name,
-      country: member.country,
-      phone: member.phone,
-      email: member.email,
-      type: member.type
+      name: member.name || "",
+      country: member.country || "INDIA",
+      phone: member.phone || "",
+      email: member.email || "",
+      type: member.type || "Restricted",
+      password: "",
+      confirmPassword: ""
     });
     setShowAddModal(true);
   };
 
   // Handle delete member
-  const handleDeleteMember = (id) => {
-    if (window.confirm("Are you sure you want to delete this team member?")) {
-      setTeamMembers(teamMembers.filter(member => member.id !== id));
+  const handleDeleteMember = async (id) => {
+    if (!window.confirm("Are you sure you want to delete this team member?")) {
+      return;
+    }
+
+    const token = getAuthToken();
+    if (!token) {
+      setError("Please log in to delete team members");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/users/${id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (res.status === 401) {
+        setError("Session expired. Please log in again.");
+        navigate("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to delete user");
+      }
+
+      // Refresh the user list
+      await fetchUsers();
+    } catch (err) {
+      console.error("Error deleting user:", err);
+      setError(err.message || "Failed to delete team member");
+    } finally {
+      setLoading(false);
     }
   };
 
   // Handle manage permissions
   const handleManagePermissions = (member) => {
-    setSelectedMember(member);
-    setShowPermissionsModal(true);
+    navigate(`/manage-permissions/${member.id}`);
   };
 
   // Handle save member (add or edit)
-  const handleSaveMember = () => {
-    if (!formData.name || !formData.email || !formData.phone) {
-      alert("Please fill in all required fields");
+  const handleSaveMember = async () => {
+    // Validation
+    if (!formData.name || !formData.email) {
+      setError("Please fill in name and email");
       return;
     }
 
-    if (editingMember) {
-      // Update existing member
-      setTeamMembers(teamMembers.map(member =>
-        member.id === editingMember.id
-          ? {
-              ...member,
-              ...formData,
-              createdOn: member.createdOn // Keep original date
-            }
-          : member
-      ));
-    } else {
-      // Add new member
-      const newMember = {
-        id: Date.now(),
-        ...formData,
-        createdOn: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-      };
-      setTeamMembers([...teamMembers, newMember]);
+    // For new users, password is required
+    if (!editingMember) {
+      if (!formData.password) {
+        setError("Password is required for new users");
+        return;
+      }
+      if (formData.password !== formData.confirmPassword) {
+        setError("Passwords do not match");
+        return;
+      }
     }
 
-    setShowAddModal(false);
-    setEditingMember(null);
-    setFormData({
-      name: "",
-      country: "INDIA",
-      phone: "",
-      email: "",
-      type: "Restricted"
-    });
+    // If password is provided during edit, confirmPassword must match
+    if (editingMember && formData.password) {
+      if (formData.password !== formData.confirmPassword) {
+        setError("Passwords do not match");
+        return;
+      }
+    }
+
+    const token = getAuthToken();
+    if (!token) {
+      setError("Please log in to save team members");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const requestBody = {
+        email: formData.email,
+        fullName: formData.name,
+        role: formData.type
+      };
+
+      // Include password only if provided
+      if (formData.password) {
+        requestBody.password = formData.password;
+      }
+
+      let res;
+      if (editingMember) {
+        // Update existing user
+        res = await fetch(`${API_BASE}/api/users/${editingMember.id}`, {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(requestBody)
+        });
+      } else {
+        // Create new user
+        res = await fetch(`${API_BASE}/api/users`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(requestBody)
+        });
+      }
+
+      if (res.status === 401) {
+        setError("Session expired. Please log in again.");
+        navigate("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to save user");
+      }
+
+      // Refresh the user list
+      await fetchUsers();
+
+      // Close modal and reset form
+      setShowAddModal(false);
+      setEditingMember(null);
+      setFormData({
+        name: "",
+        country: "INDIA",
+        phone: "",
+        email: "",
+        type: "Restricted",
+        password: "",
+        confirmPassword: ""
+      });
+    } catch (err) {
+      console.error("Error saving user:", err);
+      setError(err.message || "Failed to save team member");
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Handle save permissions
@@ -186,10 +311,23 @@ export default function TeamManagement() {
       {/* Header */}
       <div className="team-header">
         <h1 className="team-title">Team Members</h1>
-        <button className="btn-add-member" onClick={handleAddMember}>
+        <button className="btn-add-member" onClick={handleAddMember} disabled={loading}>
           <span className="plus-icon">+</span> Add new member
         </button>
       </div>
+
+      {/* Error Message */}
+      {error && (
+        <div style={{ 
+          padding: "12px", 
+          margin: "16px 0", 
+          backgroundColor: "#fee", 
+          color: "#c33", 
+          borderRadius: "4px" 
+        }}>
+          {error}
+        </div>
+      )}
 
       {/* Search Bar */}
       <div className="search-container">
@@ -198,7 +336,7 @@ export default function TeamManagement() {
           <input
             type="text"
             className="search-input"
-            placeholder="Search by name, phone"
+            placeholder="Search by name, phone, email"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -207,39 +345,53 @@ export default function TeamManagement() {
 
       {/* Team Members Table */}
       <div className="table-container">
-        <table className="team-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Contact</th>
-              <th>Type</th>
-              <th>Created On</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredMembers.map((member) => (
+        {loading && teamMembers.length === 0 ? (
+          <div style={{ padding: "40px", textAlign: "center" }}>Loading team members...</div>
+        ) : (
+          <table className="team-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Contact</th>
+                <th>Type</th>
+                <th>Created On</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredMembers.length === 0 ? (
+                <tr>
+                  <td colSpan="5" style={{ textAlign: "center", padding: "40px" }}>
+                    {teamMembers.length === 0 ? "No team members found" : "No results match your search"}
+                  </td>
+                </tr>
+              ) : (
+                filteredMembers.map((member) => (
               <tr key={member.id}>
                 <td>
                   <div className="member-name-cell">
-                    <div className="member-name">{member.name}</div>
-                    <div className="member-country">
-                      <span className="flag-icon">🇮🇳</span> {member.country}
-                    </div>
+                    <div className="member-name">{member.name || "N/A"}</div>
+                    {member.country && (
+                      <div className="member-country">
+                        <span className="flag-icon">🇮🇳</span> {member.country}
+                      </div>
+                    )}
                   </div>
                 </td>
                 <td>
                   <div className="contact-cell">
-                    <div className="contact-item">
-                      <span className="contact-value">{member.phone}</span>
-                      <button
-                        className="copy-btn"
-                        onClick={() => copyToClipboard(member.phone, "Phone")}
-                        title="Copy phone number"
-                      >
-                        📋
-                      </button>
-                    </div>
+                    {member.phone && (
+                      <div className="contact-item">
+                        <span className="contact-value">{member.phone}</span>
+                        <button
+                          className="copy-btn"
+                          onClick={() => copyToClipboard(member.phone, "Phone")}
+                          title="Copy phone number"
+                        >
+                          📋
+                        </button>
+                      </div>
+                    )}
                     <div className="contact-item">
                       <span className="contact-value">{member.email}</span>
                       <button
@@ -270,6 +422,7 @@ export default function TeamManagement() {
                       className="btn-action btn-edit"
                       onClick={() => handleEditMember(member)}
                       title="Edit"
+                      disabled={loading}
                     >
                       ✏️
                     </button>
@@ -277,15 +430,18 @@ export default function TeamManagement() {
                       className="btn-action btn-delete"
                       onClick={() => handleDeleteMember(member.id)}
                       title="Delete"
+                      disabled={loading}
                     >
                       🗑️
                     </button>
                   </div>
                 </td>
               </tr>
-            ))}
-          </tbody>
-        </table>
+                ))
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {/* Add/Edit Member Modal */}
@@ -305,6 +461,20 @@ export default function TeamManagement() {
             </div>
 
             <div className="modal-body">
+              {/* Error message in modal */}
+              {error && (
+                <div style={{ 
+                  padding: "8px", 
+                  marginBottom: "16px", 
+                  backgroundColor: "#fee", 
+                  color: "#c33", 
+                  borderRadius: "4px",
+                  fontSize: "14px"
+                }}>
+                  {error}
+                </div>
+              )}
+
               {/* Profile Picture Upload */}
               <div className="profile-upload-container">
                 <div className="profile-upload-circle">
@@ -316,7 +486,7 @@ export default function TeamManagement() {
               {/* Name Field */}
               <div className="form-group">
                 <label className="form-label">
-                  Name
+                  Name *
                   <span className="char-counter">
                     {formData.name.length}/30
                   </span>
@@ -329,6 +499,7 @@ export default function TeamManagement() {
                   onChange={(e) =>
                     setFormData({ ...formData, name: e.target.value })
                   }
+                  disabled={loading}
                 />
               </div>
 
@@ -342,6 +513,7 @@ export default function TeamManagement() {
                     onChange={(e) =>
                       setFormData({ ...formData, country: e.target.value })
                     }
+                    disabled={loading}
                   >
                     <option value="INDIA">India</option>
                     <option value="USA">United States</option>
@@ -357,13 +529,14 @@ export default function TeamManagement() {
                     onChange={(e) =>
                       setFormData({ ...formData, phone: e.target.value })
                     }
+                    disabled={loading}
                   />
                 </div>
               </div>
 
               {/* Email Field */}
               <div className="form-group">
-                <label className="form-label">Email</label>
+                <label className="form-label">Email *</label>
                 <input
                   type="email"
                   className="form-input"
@@ -371,8 +544,74 @@ export default function TeamManagement() {
                   onChange={(e) =>
                     setFormData({ ...formData, email: e.target.value })
                   }
+                  disabled={loading}
                 />
               </div>
+
+              {/* Password Fields */}
+              {!editingMember && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">Password *</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      value={formData.password}
+                      onChange={(e) =>
+                        setFormData({ ...formData, password: e.target.value })
+                      }
+                      disabled={loading}
+                      placeholder="Create a password"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Confirm Password *</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      value={formData.confirmPassword}
+                      onChange={(e) =>
+                        setFormData({ ...formData, confirmPassword: e.target.value })
+                      }
+                      disabled={loading}
+                      placeholder="Confirm password"
+                    />
+                  </div>
+                </>
+              )}
+
+              {editingMember && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">New Password (optional)</label>
+                    <input
+                      type="password"
+                      className="form-input"
+                      value={formData.password}
+                      onChange={(e) =>
+                        setFormData({ ...formData, password: e.target.value })
+                      }
+                      disabled={loading}
+                      placeholder="Leave empty to keep current password"
+                    />
+                  </div>
+                  {formData.password && (
+                    <div className="form-group">
+                      <label className="form-label">Confirm New Password</label>
+                      <input
+                        type="password"
+                        className="form-input"
+                        value={formData.confirmPassword}
+                        onChange={(e) =>
+                          setFormData({ ...formData, confirmPassword: e.target.value })
+                        }
+                        disabled={loading}
+                        placeholder="Confirm new password"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
 
               {/* User Access Type */}
               <div className="form-group">
@@ -417,8 +656,12 @@ export default function TeamManagement() {
             </div>
 
             <div className="modal-footer">
-              <button className="btn-save" onClick={handleSaveMember}>
-                Save
+              <button 
+                className="btn-save" 
+                onClick={handleSaveMember}
+                disabled={loading}
+              >
+                {loading ? "Saving..." : "Save"}
               </button>
             </div>
           </div>

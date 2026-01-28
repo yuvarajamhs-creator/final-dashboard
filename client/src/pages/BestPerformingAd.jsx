@@ -230,7 +230,7 @@ export default function BestPerformingAd() {
                 const campaignData = await fetchCampaigns();
                 setCampaigns(campaignData);
                 if (campaignData.length === 0) {
-                    setError("No campaigns found. Please configure Meta credentials in Settings.");
+                    setError("No campaigns found. Please configure Meta credentials in server/.env file.");
                 }
             } catch (e) {
                 console.error("Failed to load campaigns:", e);
@@ -242,7 +242,8 @@ export default function BestPerformingAd() {
         loadCampaigns();
     }, []);
     
-    // Load ads when campaign changes (same pattern as Dashboards.jsx)
+    // Fetch ads only on explicit campaign selection (not on page load or time range change).
+    // Backend /api/meta/ads uses cache (24h+) and returns cached data on rate limit.
     useEffect(() => {
         const loadAds = async () => {
             if (selectedCampaign && selectedCampaign.trim() !== "") {
@@ -250,7 +251,7 @@ export default function BestPerformingAd() {
                 setAds(adsData);
             } else {
                 setAds([]);
-                setSelectedAd(""); // Reset ad selection when no campaign is selected
+                setSelectedAd("");
             }
         };
         loadAds();
@@ -490,11 +491,7 @@ export default function BestPerformingAd() {
                     <strong>⚠️ {error}</strong>
                     <br />
                     <small>
-                        Please configure your Meta API credentials in{" "}
-                        <a href="/meta-settings" className="alert-link">
-                            Meta Settings
-                        </a>{" "}
-                        to view your ad data.
+                        Please configure your Meta API credentials (META_ACCESS_TOKEN, META_AD_ACCOUNT_ID) in server/.env file to view your ad data.
                     </small>
                     <button
                         type="button"

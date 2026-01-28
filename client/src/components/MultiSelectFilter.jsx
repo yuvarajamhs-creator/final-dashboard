@@ -62,6 +62,9 @@ const MultiSelectFilter = ({
 
   // Get display text
   const getDisplayText = () => {
+    if (loading) {
+      return 'Loading...';
+    }
     if (selectedValues.length === 0) {
       return placeholder;
     }

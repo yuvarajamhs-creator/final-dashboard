@@ -1,4 +1,5 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -12,6 +13,10 @@ app.use(express.json());
 // Import Meta routes
 const metaRoutes = require("./meta/meta.jsx");
 app.use("/api/meta", metaRoutes);
+
+// Import Permissions routes
+const permissionsRoutes = require("./routes/permissions");
+app.use("/api/permissions", permissionsRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend is running...");
@@ -209,7 +214,7 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, full_name')
+      .select('id, email, full_name, role')
       .eq('id', req.user.id)
       .single();
 
@@ -220,11 +225,292 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     res.json({ 
       id: user.id, 
       email: user.email, 
-      FullName: user.full_name 
+      FullName: user.full_name,
+      fullName: user.full_name,
+      role: user.role || 'user'
     });
   } catch (e) {
     console.error('Get user error:', e);
     res.status(500).json({ error: 'Server error: ' + e.message });
+  }
+});
+
+// --- USER MANAGEMENT ENDPOINTS
+
+// GET /api/users - Fetch all users
+app.get('/api/users', authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('id, email, full_name, role, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching users:', error);
+      return res.status(500).json({ error: 'Database error: ' + error.message });
+    }
+
+    // Format users to match UI expectations
+    const formattedUsers = (users || []).map(user => {
+      // Format created_at to "DD MMM, YYYY"
+      const createdOn = user.created_at 
+        ? new Date(user.created_at).toLocaleDateString('en-GB', { 
+            day: 'numeric', 
+            month: 'short', 
+            year: 'numeric' 
+          })
+        : '';
+
+      // Map role to type: "admin" -> "Admin", "user" or "restricted" -> "Restricted"
+      const type = user.role === 'admin' ? 'Admin' : 'Restricted';
+
+      return {
+        id: user.id,
+        name: user.full_name || '',
+        email: user.email,
+        type: type,
+        createdOn: createdOn,
+        country: '', // Not stored in DB
+        phone: '', // Not stored in DB
+        profilePicture: null // Not stored in DB
+      };
+    });
+
+    res.json(formattedUsers);
+  } catch (err) {
+    console.error('Get users error:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
+// POST /api/users - Create new user
+app.post('/api/users', authMiddleware, async (req, res) => {
+  const { email, password, fullName, role } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password required' });
+  }
+
+  try {
+    if (!supabase) {
+      return res.status(500).json({ 
+        error: 'Supabase not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in server/.env' 
+      });
+    }
+
+    // Check if user already exists
+    const { data: existingUser, error: checkError } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (checkError && checkError.code !== 'PGRST116') {
+      console.error('Error checking existing user:', checkError);
+      return res.status(500).json({ error: 'Database error: ' + checkError.message });
+    }
+
+    if (existingUser) {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+
+    // Hash password
+    const hashed = await hashPassword(password);
+
+    // Map role: "Admin" -> "admin", "Restricted" -> "user"
+    const dbRole = role === 'Admin' ? 'admin' : 'user';
+
+    // Insert user into Supabase
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert([
+        {
+          email: email,
+          password_hash: hashed,
+          full_name: fullName || null,
+          role: dbRole
+        }
+      ])
+      .select('id, email, full_name, role, created_at')
+      .single();
+
+    if (insertError) {
+      console.error('Supabase create user error:', insertError);
+      return res.status(500).json({ 
+        error: 'Failed to create user: ' + insertError.message,
+        code: insertError.code
+      });
+    }
+
+    // Format response to match UI expectations
+    const createdOn = newUser.created_at 
+      ? new Date(newUser.created_at).toLocaleDateString('en-GB', { 
+          day: 'numeric', 
+          month: 'short', 
+          year: 'numeric' 
+        })
+      : '';
+
+    const type = newUser.role === 'admin' ? 'Admin' : 'Restricted';
+
+    res.json({
+      id: newUser.id,
+      name: newUser.full_name || '',
+      email: newUser.email,
+      type: type,
+      createdOn: createdOn,
+      country: '',
+      phone: '',
+      profilePicture: null
+    });
+  } catch (err) {
+    console.error('Create user error:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
+// PUT /api/users/:id - Update user
+app.put('/api/users/:id', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { email, fullName, role, password } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'email required' });
+  }
+
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // Check if user exists
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !existingUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if email is being changed and if new email already exists
+    if (email !== existingUser.email) {
+      const { data: emailUser, error: emailCheckError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (emailCheckError) {
+        console.error('Error checking email:', emailCheckError);
+        return res.status(500).json({ error: 'Database error: ' + emailCheckError.message });
+      }
+
+      if (emailUser) {
+        return res.status(409).json({ error: 'Email already exists' });
+      }
+    }
+
+    // Prepare update object
+    const updateData = {
+      email: email,
+      full_name: fullName || null
+    };
+
+    // Map role: "Admin" -> "admin", "Restricted" -> "user"
+    if (role) {
+      updateData.role = role === 'Admin' ? 'admin' : 'user';
+    }
+
+    // Update password if provided
+    if (password) {
+      updateData.password_hash = await hashPassword(password);
+    }
+
+    // Update user in Supabase
+    const { data: updatedUser, error: updateError } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, email, full_name, role, created_at')
+      .single();
+
+    if (updateError) {
+      console.error('Supabase update user error:', updateError);
+      return res.status(500).json({ 
+        error: 'Failed to update user: ' + updateError.message
+      });
+    }
+
+    // Format response to match UI expectations
+    const createdOn = updatedUser.created_at 
+      ? new Date(updatedUser.created_at).toLocaleDateString('en-GB', { 
+          day: 'numeric', 
+          month: 'short', 
+          year: 'numeric' 
+        })
+      : '';
+
+    const type = updatedUser.role === 'admin' ? 'Admin' : 'Restricted';
+
+    res.json({
+      id: updatedUser.id,
+      name: updatedUser.full_name || '',
+      email: updatedUser.email,
+      type: type,
+      createdOn: createdOn,
+      country: '',
+      phone: '',
+      profilePicture: null
+    });
+  } catch (err) {
+    console.error('Update user error:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
+// DELETE /api/users/:id - Delete user
+app.delete('/api/users/:id', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // Check if user exists
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !existingUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Delete user from Supabase
+    const { error: deleteError } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      console.error('Supabase delete user error:', deleteError);
+      return res.status(500).json({ 
+        error: 'Failed to delete user: ' + deleteError.message
+      });
+    }
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (err) {
+    console.error('Delete user error:', err);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
 });
 
@@ -592,12 +878,6 @@ app.get('/api/google-sheets/revenue-metrics', async (req, res) => {
       organicRevenue: 0 // Not in Ads Analytics sheet
     };
     
-    console.log('[Google Sheets] Parsed metrics:', {
-      headerRow: headerRow.slice(0, 10),
-      dataRow: dataRow.slice(0, 10),
-      metrics
-    });
-    
     res.json(metrics);
   } catch (err) {
     console.error('Error fetching Google Sheets data:', err.message);
@@ -713,9 +993,6 @@ app.get('/api/google-sheets/content-marketing-revenue', async (req, res) => {
     // Parse summary row (row 2)
     const summaryRow = parseCsvRow(lines[1] || '');
     
-    console.log('[Content Marketing Revenue] Header row:', headerRow);
-    console.log('[Content Marketing Revenue] Summary row:', summaryRow);
-    
     // Find column indices dynamically by matching header names (case-insensitive)
     const findColumnIndex = (headerName) => {
       const lowerHeader = headerName.toLowerCase();
@@ -735,15 +1012,6 @@ app.get('/api/google-sheets/content-marketing-revenue', async (req, res) => {
     const l1RevenueIdx = findColumnIndex('L1 Revenue Organic');
     const l2RevenueIdx = findColumnIndex('L2 Revenue Organic');
     const totalRevenueIdx = findColumnIndex('Total Organic Revenue');
-    
-    console.log('[Content Marketing Revenue] Column indices:', {
-      organicLeadsIdx,
-      conversionsLeadsIdx,
-      organicConversionIdx,
-      l1RevenueIdx,
-      l2RevenueIdx,
-      totalRevenueIdx
-    });
     
     // Extract values from summary row
     const organicLeads = organicLeadsIdx >= 0 ? parseNumber(summaryRow[organicLeadsIdx] || '0') : 0;
@@ -779,14 +1047,6 @@ app.get('/api/google-sheets/content-marketing-revenue', async (req, res) => {
       totalRevenue = l1Revenue + l2Revenue;
     }
     
-    console.log('[Content Marketing Revenue] Extracted values:', {
-      organicLeads,
-      organicConversion,
-      l1Revenue,
-      l2Revenue,
-      totalRevenue
-    });
-    
     res.json({
       organicLeads,
       organicConversion,
@@ -821,20 +1081,34 @@ app.get('/api/google-sheets/content-marketing-revenue', async (req, res) => {
 const { startLeadsSyncScheduler } = require('./jobs/leadsSync');
 let leadsSyncIntervalId = null;
 
+// Initialize insights sync scheduler (hourly, last 1.5h → DB)
+const { startInsightsSyncScheduler } = require('./jobs/insightsSync');
+let insightsSyncIntervalId = null;
+
+// Initialize token refresh scheduler
+const { startTokenRefreshScheduler } = require('./jobs/metaTokenRefresh');
+let tokenRefreshIntervalId = null;
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Server started on http://localhost:${PORT}`);
-  
   // Start leads sync scheduler
   try {
     leadsSyncIntervalId = startLeadsSyncScheduler();
-    if (leadsSyncIntervalId) {
-      console.log('✅ Leads sync scheduler started successfully (runs every 15 minutes)');
-    } else {
-      console.warn('⚠️  Leads sync scheduler not started - META_PAGE_ID not configured');
-      console.warn('   Add META_PAGE_ID to server/.env to enable automatic leads syncing');
-    }
   } catch (error) {
     console.error('Error starting leads sync scheduler:', error.message);
+  }
+
+  // Start insights sync scheduler (every 1 hour, fetch last 1.5h and upsert to DB)
+  try {
+    insightsSyncIntervalId = startInsightsSyncScheduler();
+  } catch (error) {
+    console.error('Error starting insights sync scheduler:', error.message);
+  }
+
+  // Start token refresh scheduler
+  try {
+    tokenRefreshIntervalId = startTokenRefreshScheduler();
+  } catch (error) {
+    console.error('Error starting token refresh scheduler:', error.message);
   }
 });

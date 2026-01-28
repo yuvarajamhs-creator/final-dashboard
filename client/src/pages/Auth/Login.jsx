@@ -8,8 +8,8 @@ const STORAGE_KEY = process.env.REACT_APP_STORAGE_KEY || "app_auth";
 
 export default function Login() {
   const navigate = useNavigate();
-  const [username, setUsername] = useState("thamilarasu.mhs@gmail.com");
-  const [password, setPassword] = useState("Admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -138,14 +138,14 @@ export default function Login() {
                   <svg viewBox="0 0 24 24" fill="none">
                     <path
                       d="M7.5 10V8.5C7.5 6.01472 9.51472 4 12 4C14.4853 4 16.5 6.01472 16.5 8.5V10"
-                      stroke="white"
+                      stroke="black"
                       strokeOpacity="0.9"
                       strokeWidth="1.6"
                       strokeLinecap="round"
                     />
                     <path
                       d="M7.5 10H16.5C17.3284 10 18 10.6716 18 11.5V18.5C18 19.3284 17.3284 20 16.5 20H7.5C6.67157 20 6 19.3284 6 18.5V11.5C6 10.6716 6.67157 10 7.5 10Z"
-                      stroke="white"
+                      stroke="black"
                       strokeOpacity="0.9"
                       strokeWidth="1.6"
                     />

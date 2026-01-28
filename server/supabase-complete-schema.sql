@@ -89,6 +89,35 @@ CREATE TABLE IF NOT EXISTS public.job_state (
 ALTER TABLE public.job_state DISABLE ROW LEVEL SECURITY;
 
 -- ============================================================================
+-- 5. USER PERMISSIONS TABLE
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.user_permissions (
+  user_id INTEGER PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+  dashboard BOOLEAN DEFAULT false,
+  dashboard_admin_leads BOOLEAN DEFAULT false,
+  dashboard_content_marketing BOOLEAN DEFAULT false,
+  best_ads BOOLEAN DEFAULT false,
+  best_reels BOOLEAN DEFAULT false,
+  plan_view BOOLEAN DEFAULT false,
+  plan_edit BOOLEAN DEFAULT false,
+  audience_view BOOLEAN DEFAULT false,
+  audience_edit BOOLEAN DEFAULT false,
+  audience_export BOOLEAN DEFAULT false,
+  ai_insights BOOLEAN DEFAULT false,
+  settings BOOLEAN DEFAULT false,
+  meta_settings BOOLEAN DEFAULT false,
+  team_management BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create index on user_id for faster lookups
+CREATE INDEX IF NOT EXISTS idx_user_permissions_user_id ON public.user_permissions(user_id);
+
+-- Disable RLS
+ALTER TABLE public.user_permissions DISABLE ROW LEVEL SECURITY;
+
+-- ============================================================================
 -- TRIGGERS: Auto-update updated_at timestamps
 -- ============================================================================
 
@@ -119,6 +148,11 @@ CREATE TRIGGER update_leads_updated_at
 
 CREATE TRIGGER update_job_state_updated_at
   BEFORE UPDATE ON public.job_state
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_permissions_updated_at
+  BEFORE UPDATE ON public.user_permissions
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
 

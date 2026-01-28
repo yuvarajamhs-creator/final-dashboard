@@ -17,8 +17,8 @@ import Plan from "./pages/Plan";
 import Audience from "./pages/Audience";
 import AIInsights from "./pages/AIInsights";
 import HighFiveLanding from "./pages/HighFiveLanding";
-import MetaSettings from "./pages/MetaSettings";
 import TeamManagement from "./pages/TeamManagement";
+import ManagePermissions from "./pages/ManagePermissions";
 
 export default function App() {
   return (
@@ -42,8 +42,8 @@ export default function App() {
                   <Route path="/operation/task" element={<Task />} />
                   <Route path="/report/daily" element={<Report />} />
                   <Route path="/high-five" element={<HighFiveLanding />} />
-                  <Route path="/meta-settings" element={<MetaSettings />} />
                   <Route path="/team-management" element={<TeamManagement />} />
+                  <Route path="/manage-permissions/:userId" element={<ManagePermissions />} />
                 </Routes>
               </Sidebar>
             </ProtectedRoute>

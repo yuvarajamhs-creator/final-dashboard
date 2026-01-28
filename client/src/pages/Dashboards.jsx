@@ -188,7 +188,9 @@ const fetchPerformanceInsights = async ({ pageId, from, to }) => {
   }
 };
 
-// Fetch insights from backend
+// Fetch insights from backend.
+// When "Select All" is chosen for campaigns/ads, we send is_all_campaigns/is_all_ads and omit ID arrays
+// so the backend does one aggregated call. Only send campaign_id/ad_id when user explicitly selected specific items.
 const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignIds = [], adIds = [], allCampaigns = false, allAds = false, adAccountId = null }) => {
   try {
     const token = getAuthToken();
@@ -198,44 +200,39 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
     }
 
     // Build URL with date parameters
-    // Only add date parameters if explicitly provided
     let url = `${API_BASE}/api/meta/insights?time_increment=1`;
-    
-    // Add from and to dates only if explicitly provided
+
     if (from && to) {
       url += `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-    } else {
-      // Don't add days parameter - let API use its default or no filter
-      // Only add days if explicitly provided (not defaulting)
     }
-    
-    // Add ad account ID if provided
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/a31de4bd-79e0-4784-8d49-20b7d56ddf12',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Dashboards.jsx:fetchDashboardData',message:'insights request params',data:{from,to,campaignIds:campaignIds.slice(0,3),adIds:adIds.slice(0,3),allCampaigns,allAds,adAccountId,tzOffsetMin:new Date().getTimezoneOffset()},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1,H5'})}).catch(()=>{});
+    // #endregion
+
     if (adAccountId) {
       url += `&ad_account_id=${encodeURIComponent(adAccountId)}`;
     }
-    
-    // Always add campaign filter when specific campaign IDs are provided
-    // This ensures only selected campaigns are returned, regardless of allCampaigns flag
-    if (campaignIds.length > 0) {
-      // Support multiple campaign IDs - send comma-separated
-      const campaignIdStr = campaignIds.join(',');
-      url += `&campaign_id=${encodeURIComponent(campaignIdStr)}`;
-    }
-    
-    // Only add ad filter if not all ads are selected
-    // allAds flag indicates all ads are selected (or none selected = show all)
-    if (!allAds && adIds.length > 0) {
-      // Support multiple ad IDs - send comma-separated
-      const adIdStr = adIds.join(',');
-      url += `&ad_id=${encodeURIComponent(adIdStr)}`;
+
+    // Select All → omit IDs; send explicit flags so backend treats as aggregated (one call, no filter).
+    if (allCampaigns) {
+      url += '&is_all_campaigns=1';
+      // Do not add campaign_id when "all" — never send full ID list.
+    } else if (campaignIds.length > 0) {
+      url += `&campaign_id=${encodeURIComponent(campaignIds.join(','))}`;
     }
 
-    // Log insights API call with campaign IDs
+    if (allAds) {
+      url += '&is_all_ads=1';
+      // Do not add ad_id when "all".
+    } else if (adIds.length > 0) {
+      url += `&ad_id=${encodeURIComponent(adIds.join(','))}`;
+    }
+
     console.log('[Insights API Call]', {
-      url: url,
-      allCampaigns: allCampaigns,
-      campaignIds: campaignIds.length > 0 ? campaignIds : (allCampaigns ? 'ALL_ACTIVE' : []),
-      campaignIdFilter: campaignIds.length > 0 ? campaignIds.join(',') : 'NONE'
+      allCampaigns,
+      allAds,
+      campaignIdCount: allCampaigns ? 0 : campaignIds.length,
+      adIdCount: allAds ? 0 : adIds.length,
     });
     
     const res = await fetch(url, {
@@ -269,9 +266,7 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
     console.log('[Insights API Response]', {
       rowCount: data.length,
       dataLevel: dataLevel,
-      uniqueCampaignIds: uniqueCampaignIds,
-      sampleCampaignIds: uniqueCampaignIds.slice(0, 5),
-      hasCampaignIdFilter: campaignIds.length > 0
+      uniqueCampaignIds: uniqueCampaignIds.slice(0, 5),
     });
     
     // Normalize data
@@ -348,6 +343,31 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
     });
   } catch (e) {
     console.error("Failed to fetch dashboard data", e);
+    return [];
+  }
+};
+
+// Fetch insights from all ad accounts and combine into one dataset.
+// Used when "All Ad Accounts" is selected so KPI cards show aggregated totals.
+const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adIds, allCampaigns, allAds, accounts }) => {
+  if (!accounts || accounts.length === 0) return [];
+  try {
+    const promises = accounts.map((account) =>
+      fetchDashboardData({
+        days,
+        from,
+        to,
+        campaignIds,
+        adIds,
+        allCampaigns,
+        allAds,
+        adAccountId: account.account_id || account.id
+      })
+    );
+    const results = await Promise.all(promises);
+    return results.flat();
+  } catch (e) {
+    console.error("Failed to fetch multi-account dashboard data", e);
     return [];
   }
 };
@@ -537,32 +557,44 @@ const fetchProjects = async () => {
   }
 }
 
-const fetchAds = async (campaignId) => {
+// Fetch ads for one campaign. Backend reads from DB only; ad_account_id for multi-account.
+const fetchAds = async (campaignId, adAccountId = null) => {
   try {
-    if (!campaignId || campaignId.trim() === "") {
-      return [];
-    }
-
+    if (!campaignId || String(campaignId).trim() === "") return [];
     const token = getAuthToken();
     const headers = { "Content-Type": "application/json" };
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    const res = await fetch(`${API_BASE}/api/meta/ads?campaign_id=${campaignId}`, { headers });
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const params = new URLSearchParams({ campaign_id: campaignId });
+    if (adAccountId) params.set("ad_account_id", String(adAccountId).replace(/^act_/, ""));
+    const res = await fetch(`${API_BASE}/api/meta/ads?${params}`, { headers });
     const data = await res.json();
-    // Return full objects or empty array
-    if (Array.isArray(data)) {
-      return data;
-    } else if (data && Array.isArray(data.data)) {
-      return data.data;
-    }
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
     return [];
   } catch (e) {
     console.error("Error fetching ads:", e);
     return [];
   }
-}
+};
+
+// Fetch all ads for the account from DB (one request; backend never fetches on filter change).
+const fetchAdsAll = async (adAccountId = null) => {
+  try {
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const params = new URLSearchParams({ all: "true" });
+    if (adAccountId) params.set("ad_account_id", String(adAccountId).replace(/^act_/, ""));
+    const res = await fetch(`${API_BASE}/api/meta/ads?${params}`, { headers });
+    const data = await res.json();
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    return [];
+  } catch (e) {
+    console.error("Error fetching all ads:", e);
+    return [];
+  }
+};
 
 // Fetch pages from Meta API
 const fetchPages = async () => {
@@ -868,6 +900,7 @@ export default function AdsDashboardBootstrap() {
   const [selectedAdAccount, setSelectedAdAccount] = useState(null);
   const [campaigns, setCampaigns] = useState([]);
   const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [adsLoading, setAdsLoading] = useState(false);
   const [ads, setAds] = useState([]);
   const [data, setData] = useState([]);
   const [allAdsData, setAllAdsData] = useState([]); // Store all unfiltered data for ad breakdown
@@ -1117,43 +1150,79 @@ export default function AdsDashboardBootstrap() {
         (ads.length > 0 && selectedAds.length === ads.length);
       
 
-      // Fetch dashboard data with proper flags and date range
-      // This includes ad filter for main data display
-      const rows = await fetchDashboardData({ 
-        days, 
-        from: dateFilters.startDate || null,
-        to: dateFilters.endDate || null,
-        campaignIds: selectedCampaigns, 
-        adIds: selectedAds,
-        allCampaigns: allCampaignsSelected,
-        allAds: allAdsSelected,
-        adAccountId: selectedAdAccount || null
-      });
+      // When "All Ad Accounts" is selected, fetch from each account and combine.
+      // Use same filtered list as dropdown (exclude Read-Only names).
+      const isAllAdAccounts = !selectedAdAccount && adAccounts.length > 0;
+      const accountsForFetch = isAllAdAccounts
+        ? adAccounts.filter((account) => {
+            const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+            return !displayName.toLowerCase().includes('read-only');
+          })
+        : [];
 
-      // Fetch ALL ads data separately for Ad Performance Breakdown table
-      // This ignores the "Ad Name" filter so the table always shows all ads
-      const allAdsRows = await fetchDashboardData({ 
-        days, 
-        from: dateFilters.startDate || null,
-        to: dateFilters.endDate || null,
-        campaignIds: selectedCampaigns, 
-        adIds: [], // Don't filter by ads - fetch all ads
-        allCampaigns: allCampaignsSelected,
-        allAds: true, // Force all ads for the breakdown table 
-        adAccountId: selectedAdAccount || null
-      });
+      let rows;
+      let allAdsRows;
+
+      // When "Select All" campaigns/ads, pass empty ID arrays and allCampaigns/allAds so backend
+      // does one aggregated call. Never send full ID list for "all."
+      const campaignIdsToSend = allCampaignsSelected ? [] : selectedCampaigns;
+      const adIdsToSend = allAdsSelected ? [] : selectedAds;
+
+      if (isAllAdAccounts && accountsForFetch.length > 0) {
+        rows = await fetchAllAccountsDashboardData({
+          days,
+          from: dateFilters.startDate || null,
+          to: dateFilters.endDate || null,
+          campaignIds: campaignIdsToSend,
+          adIds: adIdsToSend,
+          allCampaigns: allCampaignsSelected,
+          allAds: allAdsSelected,
+          accounts: accountsForFetch
+        });
+        allAdsRows = await fetchAllAccountsDashboardData({
+          days,
+          from: dateFilters.startDate || null,
+          to: dateFilters.endDate || null,
+          campaignIds: campaignIdsToSend,
+          adIds: [],
+          allCampaigns: allCampaignsSelected,
+          allAds: true,
+          accounts: accountsForFetch
+        });
+      } else {
+        rows = await fetchDashboardData({
+          days,
+          from: dateFilters.startDate || null,
+          to: dateFilters.endDate || null,
+          campaignIds: campaignIdsToSend,
+          adIds: adIdsToSend,
+          allCampaigns: allCampaignsSelected,
+          allAds: allAdsSelected,
+          adAccountId: selectedAdAccount || null
+        });
+        allAdsRows = await fetchDashboardData({
+          days,
+          from: dateFilters.startDate || null,
+          to: dateFilters.endDate || null,
+          campaignIds: campaignIdsToSend,
+          adIds: [],
+          allCampaigns: allCampaignsSelected,
+          allAds: true,
+          adAccountId: selectedAdAccount || null
+        });
+      }
 
 
       // Filter to only include active campaigns and active ads
-      // API filters by effective_status at API level, so we trust returned data is active
-      // This is a safety check for explicit non-active status only
+      // API returns campaigns with all effective statuses
+      // This filters to show only active campaigns and ads
       const filterByActiveStatus = (rowsToFilter) => {
         return rowsToFilter.filter(r => {
           // Get status values (may be null if API doesn't return them)
           const campaignStatus = r.campaign_status || r.status;
           const adStatus = r.ad_status || r.effective_status;
           
-          // Since API filters by effective_status, if status is missing, assume active
+          // API returns all statuses, filter to show only active
           // Only exclude if status is explicitly non-active
           if (campaignStatus && campaignStatus !== 'ACTIVE') {
             return false; // Explicitly not active
@@ -1231,9 +1300,7 @@ export default function AdsDashboardBootstrap() {
           setToast({
             type: 'warning',
             title: 'Warning',
-            message: 'No data available. Please configure Meta credentials in Settings.',
-            link: '/meta-settings',
-            linkText: 'Go to Meta Settings'
+            message: 'No data available. Please configure Meta credentials in server/.env file.'
           });
         }
       } else {
@@ -1615,106 +1682,44 @@ export default function AdsDashboardBootstrap() {
     }
   }, [dateFilters.startDate, dateFilters.endDate, selectedCampaigns, selectedAds, loadLeads]);
 
-  // Load ads when campaigns change
+  // Clear ads when ad account changes (avoid showing stale ads from previous account).
   useEffect(() => {
-    const loadAds = async () => {
-      // Wait for campaigns to be loaded first
-      if (campaigns.length === 0 && selectedCampaigns.length > 0) {
-        // If campaigns haven't loaded yet but we have selections, wait
-        return;
-      }
+    setAds([]);
+  }, [selectedAdAccount]);
 
-      // Check if all campaigns are selected
-      const allCampaignsSelected = selectedCampaigns.length === 0 || 
-        (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
-      
-      
-      if (allCampaignsSelected) {
-        // If all campaigns selected, fetch ads for each active campaign
-        // Use the same approach as individual campaign selection to ensure consistency
-        if (campaigns.length > 0) {
-          try {
-            const allAds = [];
-            for (const campaign of campaigns) {
-              const adsData = await fetchAds(campaign.id);
-              // Add campaign_id to each ad since API doesn't return it
-              const adsWithCampaignId = adsData.map(ad => ({
-                ...ad,
-                campaign_id: campaign.id
-              }));
-              allAds.push(...adsWithCampaignId);
-            }
-            // Remove duplicates based on ad id
-            const uniqueAds = Array.from(
-              new Map(allAds.map(ad => [ad.id, ad])).values()
-            );
-            // Filter to only show active ads (campaigns are already active)
-            const activeAds = uniqueAds.filter(ad => {
-              // Check if ad is active (effective_status or status)
-              const adStatus = ad.effective_status || ad.status;
-              // If status is missing, assume active (since we're fetching from active campaigns)
-              // Only exclude if explicitly not active
-              return !adStatus || adStatus === 'ACTIVE';
-            });
-            // Sort by name
-            activeAds.sort((a, b) => {
-              const nameA = (a.name || '').toLowerCase();
-              const nameB = (b.name || '').toLowerCase();
-              return nameA.localeCompare(nameB);
-            });
-            setAds(activeAds);
-          } catch (e) {
-            console.error("Error fetching ads for all campaigns:", e);
-            setAds([]);
-          }
-        } else {
-          setAds([]);
-        }
-      } else if (selectedCampaigns.length > 0) {
-        // Fetch ads for selected campaigns only
-        const allAds = [];
-        for (const campaignId of selectedCampaigns) {
-          const adsData = await fetchAds(campaignId);
-          // Add campaign_id to each ad since API doesn't return it
-          const adsWithCampaignId = adsData.map(ad => ({
-            ...ad,
-            campaign_id: campaignId
-          }));
-          allAds.push(...adsWithCampaignId);
-        }
-        // Remove duplicates based on ad id
-        const uniqueAds = Array.from(
-          new Map(allAds.map(ad => [ad.id, ad])).values()
-        );
-        // Filter to only show active ads (campaigns are already active since we only show active campaigns)
-        const activeAds = uniqueAds.filter(ad => {
-          // Check if ad is active (effective_status or status)
-          const adStatus = ad.effective_status || ad.status;
-          // If status is missing, assume active (since we're fetching from active campaigns)
-          // Only exclude if explicitly not active
-          return !adStatus || adStatus === 'ACTIVE';
-        });
-        // Sort by name
-        activeAds.sort((a, b) => {
-          const nameA = (a.name || '').toLowerCase();
-          const nameB = (b.name || '').toLowerCase();
-          return nameA.localeCompare(nameB);
-        });
-        setAds(activeAds);
-      } else {
-        // No campaigns selected - clear ads
-        setAds([]);
-        setSelectedAds([]); // Reset ad selection when no campaign is selected
-      }
-    };
-    loadAds();
-  }, [selectedCampaigns, campaigns, activeCampaignIds]);
+  // Fetch ads only on explicit campaign selection (not on page load or time range change).
+  // One request: GET /api/meta/ads?all=true (from DB only); pass ad_account_id for multi-account.
+  const loadAdsForCampaigns = async (selectedIds) => {
+    if (!selectedIds || selectedIds.length === 0) {
+      setAds([]);
+      setSelectedAds([]);
+      return;
+    }
+    setAdsLoading(true);
+    try {
+      const raw = await fetchAdsAll(selectedAdAccount || null);
+      const idSet = new Set(selectedIds.map(String));
+      const filtered = raw.filter(ad => idSet.has(String(ad.campaign_id || '')));
+      const unique = Array.from(new Map(filtered.map(ad => [ad.id, ad])).values());
+      const active = unique.filter(ad => {
+        const s = ad.effective_status || ad.status;
+        return !s || s === 'ACTIVE';
+      });
+      active.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+      setAds(active);
+    } catch (e) {
+      console.error("Error loading ads for campaigns:", e);
+      setAds([]);
+    } finally {
+      setAdsLoading(false);
+    }
+  };
 
 
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [days, selectedAdAccount, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue]);
+  }, [days, selectedAdAccount, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, adAccounts]);
 
   // Load leads when form or date filters change
 
@@ -2041,8 +2046,8 @@ export default function AdsDashboardBootstrap() {
   const byCampaign = useMemo(() => {
     const map = new Map();
     data.forEach((r) => {
-      // API filters by effective_status, so if status is missing, assume active
-      // Only exclude if explicitly not active
+      // API returns campaigns with all effective statuses
+      // Filter to only include active campaigns/ads
       const campaignStatus = r.campaign_status || r.status;
       const adStatus = r.ad_status || r.effective_status;
       if (campaignStatus && campaignStatus !== 'ACTIVE') return;
@@ -2179,8 +2184,8 @@ export default function AdsDashboardBootstrap() {
       .filter(r => {
         // Must have required fields
         if (!r.ad_id || !r.ad_name || !r.campaign_id) return false;
-        // API filters by effective_status, so if status is missing, assume active
-        // Only exclude if explicitly not active
+        // API returns campaigns with all effective statuses
+        // Filter to only include active campaigns/ads
         const campaignStatus = r.campaign_status || r.status;
         const adStatus = r.ad_status || r.effective_status;
         if (campaignStatus && campaignStatus !== 'ACTIVE') return false;
@@ -2223,7 +2228,7 @@ export default function AdsDashboardBootstrap() {
     });
     
     // Merge with insights data (spend, impressions, clicks, etc.)
-    // API filters by effective_status, so if status is missing, assume active
+    // API returns campaigns with all effective statuses
     const insightsByAdId = new Map();
     const sourceData = allAdsData.length > 0 ? allAdsData : data;
     sourceData.forEach(row => {
@@ -3794,15 +3799,20 @@ export default function AdsDashboardBootstrap() {
                     return <option value="" disabled>No ad accounts available</option>;
                   }
                   
-                  return adAccounts.map(account => {
-                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                    const value = account.account_id || account.id;
-                    return (
-                      <option key={value} value={value}>
-                        {displayName}
-                      </option>
-                    );
-                  });
+                  return adAccounts
+                    .filter(account => {
+                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                      return !displayName.toLowerCase().includes('read-only');
+                    })
+                    .map(account => {
+                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                      const value = account.account_id || account.id;
+                      return (
+                        <option key={value} value={value}>
+                          {displayName}
+                        </option>
+                      );
+                    });
                 })()}
               </select>
             </div>
@@ -3816,6 +3826,8 @@ export default function AdsDashboardBootstrap() {
                   setSelectedCampaigns(values);
                   setSelectedAds([]); // Reset ad selection when campaign changes
                   setPage(1);
+                  // Fetch ads only on explicit campaign selection (not on load or time change)
+                  loadAdsForCampaigns(values);
                 }}
                 placeholder="All Campaigns"
                 getOptionLabel={(opt) => opt.name}
@@ -3824,7 +3836,7 @@ export default function AdsDashboardBootstrap() {
                 loading={campaignsLoading}
               />
             </div>
-            <div className="col-12 col-md-auto">
+            <div className="col-12 col-md-auto ad-name-filter-col">
               <MultiSelectFilter
                 label="Ad Name"
                 emoji="📢"
@@ -3837,11 +3849,8 @@ export default function AdsDashboardBootstrap() {
                 placeholder="All Ads"
                 getOptionLabel={(opt) => opt.name}
                 getOptionValue={(opt) => opt.id}
-                disabled={
-                  // Disable only if ads haven't been loaded yet
-                  // Enable when: all campaigns selected (and ads loaded) OR specific campaigns selected (and ads loaded)
-                  ads.length === 0
-                }
+                disabled={adsLoading || ads.length === 0}
+                loading={adsLoading}
               />
             </div>
             <div className="col-12 col-md-auto ms-md-auto">
@@ -4412,10 +4421,6 @@ export default function AdsDashboardBootstrap() {
                                     )}
                                     {leadsError.type === 'permission' && (
                                       <div className="mt-3">
-                                        <a href="/meta-settings" className="btn btn-sm btn-primary me-2">
-                                          <i className="fas fa-cog me-1"></i>
-                                          Go to Meta Settings
-                                        </a>
                                         <button 
                                           className="btn btn-sm btn-outline-secondary"
                                           onClick={() => {
@@ -4435,7 +4440,7 @@ export default function AdsDashboardBootstrap() {
                                       <li>Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer">Facebook Graph API Explorer</a></li>
                                       <li>Select your app and generate a new access token</li>
                                       <li>Ensure <code>leads_retrieval</code> permission is selected</li>
-                                      <li>Copy the new token and update it in Meta Settings</li>
+                                      <li>Copy the new token and update <code>META_ACCESS_TOKEN</code> in server/.env file</li>
                                     </ol>
                                   </div>
                                 </div>
@@ -4652,10 +4657,6 @@ export default function AdsDashboardBootstrap() {
                   )}
                   {filteredLeadsError.type === 'permission' && (
                     <div className="mt-3">
-                      <a href="/meta-settings" className="btn btn-sm btn-primary me-2">
-                        <i className="fas fa-cog me-1"></i>
-                        Go to Meta Settings
-                      </a>
                       <button 
                         className="btn btn-sm btn-outline-secondary"
                         onClick={() => {

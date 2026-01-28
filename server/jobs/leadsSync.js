@@ -11,9 +11,9 @@ const JOBSTATE_LAST_LEADS_SYNC_KEY = 'lastSuccessfulLeadsSyncUtc';
  * Get system access token
  */
 function getSystemToken() {
-  const systemToken = process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+  const systemToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || '').trim();
   if (!systemToken) {
-    throw new Error("Meta System Access Token missing. Please configure it in Settings.");
+    throw new Error("Meta System Access Token missing. Please configure META_SYSTEM_ACCESS_TOKEN or META_ACCESS_TOKEN in server/.env file.");
   }
   return systemToken;
 }
@@ -28,13 +28,11 @@ function getSystemToken() {
 async function getPageAccessToken(pageId) {
   // Option 1: Direct configuration via environment variable
   if (process.env.META_PAGE_ACCESS_TOKEN) {
-    console.log('[LeadsSync] Using META_PAGE_ACCESS_TOKEN from environment');
     return process.env.META_PAGE_ACCESS_TOKEN;
   }
   
   // Option 2: Fetch from Meta API using system token
   try {
-    console.log(`[LeadsSync] Fetching page access token for page ${pageId} from Meta API`);
     const systemToken = getSystemToken();
     const response = await axios.get(
       `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
@@ -51,7 +49,6 @@ async function getPageAccessToken(pageId) {
       throw new Error(`Page access token not found in API response for page ${pageId}`);
     }
     
-    console.log('[LeadsSync] Successfully retrieved page access token from Meta API');
     return response.data.access_token;
   } catch (error) {
     const errorMsg = error.response?.data?.error?.message || error.message;
@@ -192,17 +189,14 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
   const systemToken = getSystemToken();
   
   // Use META_ACCESS_TOKEN for leads API calls
-  const accessToken = process.env.META_ACCESS_TOKEN;
+  const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
   if (!accessToken) {
-    throw new Error("META_ACCESS_TOKEN missing. Please configure it in Settings.");
+    throw new Error("META_ACCESS_TOKEN missing. Please configure META_ACCESS_TOKEN in server/.env file.");
   }
-  console.log('[LeadsSync] Using META_ACCESS_TOKEN for leads API calls');
   
   // Convert date range to Unix timestamps for Meta API
   const startTimestamp = Math.floor(startDate.getTime() / 1000);
   const endTimestamp = Math.floor(endDate.getTime() / 1000);
-  
-  console.log(`[LeadsSync] Fetching leads for page ${pageId} from ${startDate.toISOString()} to ${endDate.toISOString()}`);
   
   let allLeads = [];
   
@@ -249,7 +243,6 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
     } while (nextUrl && formsPageCount < 50);
 
     console.timeEnd('[LeadsSync] Fetch forms list');
-    console.log(`[LeadsSync] Found ${allFormsData.length} total forms for page ${pageId}`);
 
     // Map formId -> form info (for output mapping)
     const formsById = new Map();
@@ -313,13 +306,6 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
       
       // Log raw batch response structure for debugging (only for first batch)
       if (activeForms.length === allFormIds.length) {
-        console.log(`[LeadsSync] ===== RAW BATCH API RESPONSE =====`);
-        console.log(`[LeadsSync] Batch response type:`, Array.isArray(batchResponses) ? 'Array' : typeof batchResponses);
-        console.log(`[LeadsSync] Batch response length:`, batchResponses?.length);
-        if (batchResponses && batchResponses.length > 0) {
-          console.log(`[LeadsSync] First batch item structure:`, JSON.stringify(batchResponses[0], null, 2));
-        }
-        console.log(`[LeadsSync] ===== END RAW BATCH RESPONSE =====`);
       }
       
       if (!Array.isArray(batchResponses) || batchResponses.length !== batchFormIds.length) {
@@ -387,35 +373,10 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
           stats.formsWithLeads++;
         }
 
-        // Debug: Log leads found per form (only first page to avoid spam)
+        // Check how many leads have ad_id/campaign_id vs missing them
         if (state.pages === 0 && leadsData.length > 0) {
-          console.log(`[LeadsSync] Form ${formId}: Found ${leadsData.length} leads in first page`);
-          
-          // Check how many leads have ad_id/campaign_id vs missing them
           const leadsWithAttribution = leadsData.filter(l => l.ad_id && l.campaign_id).length;
           const leadsMissingAttribution = leadsData.length - leadsWithAttribution;
-          
-          if (leadsMissingAttribution > 0) {
-            console.log(`[LeadsSync] Form ${formId}: ${leadsWithAttribution} leads have attribution, ${leadsMissingAttribution} missing ad_id/campaign_id`);
-            
-            // Log a sample lead missing attribution with full details for debugging
-            const sampleMissing = leadsData.find(l => !l.ad_id || !l.campaign_id);
-            if (sampleMissing) {
-              console.log(`[LeadsSync] Form ${formId}: Sample lead MISSING attribution:`, {
-                lead_id: sampleMissing.id,
-                created_time: sampleMissing.created_time,
-                has_ad_id: !!sampleMissing.ad_id,
-                ad_id: sampleMissing.ad_id,
-                has_campaign_id: !!sampleMissing.campaign_id,
-                campaign_id: sampleMissing.campaign_id,
-                available_fields: Object.keys(sampleMissing).join(', ')
-              });
-            }
-          }
-          
-          if (leadsData.length > 0 && leadsData[0]?.created_time) {
-            console.log(`[LeadsSync] Form ${formId}: Sample lead (first): created_time=${leadsData[0].created_time}, ad_id=${leadsData[0].ad_id || 'MISSING'}, campaign_id=${leadsData[0].campaign_id || 'MISSING'}`);
-          }
         }
 
         // Decide whether we should stop paging further based on oldest lead time
@@ -433,14 +394,8 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
           if (oldestMs !== null && oldestMs < startMs) {
             stopBecauseOld = true;
           }
-          // Log date range for debugging (only once per form)
-          if (state.pages === 0 && oldestMs !== null && newestMs !== null) {
-            console.log(`[LeadsSync] Form ${formId}: Leads date range ${new Date(oldestMs).toISOString()} to ${new Date(newestMs).toISOString()}, requested ${new Date(startMs).toISOString()} to ${new Date(endMs).toISOString()}`);
-          }
         } else if (state.pages === 0) {
-          // Log empty responses on first page
           stats.formsWithoutLeads++;
-          console.log(`[LeadsSync] Form ${formId}: No leads found in first page`);
         }
 
         // Process leads from this response
@@ -607,10 +562,6 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
           stats.processedSuccessfully++;
         }
 
-        // Log processing stats for first page
-        if (state.pages === 0 && leadsData.length > 0) {
-          console.log(`[LeadsSync] Form ${formId}: Processed ${leadsProcessed} leads, filtered by date: ${leadsFilteredOutDate}, filtered by missing ad/campaign: ${leadsFilteredOutMissing} (total in batch: ${leadsData.length})`);
-        }
 
         state.pages += 1;
         state.retries = 0; // reset on success
@@ -634,29 +585,6 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
     // Note: formsWithoutLeads is already tracked in the loop above
 
     console.timeEnd('[LeadsSync] Fetch leads (batched)');
-    console.log(`[LeadsSync] ===== Batch Fetch Summary =====`);
-    console.log(`[LeadsSync] Total forms checked: ${allFormIds.length}`);
-    console.log(`[LeadsSync] Forms with leads: ${stats.formsWithLeads}, Forms without leads: ${stats.formsWithoutLeads}`);
-    console.log(`[LeadsSync] Total leads from API: ${stats.totalLeadsFromAPI}`);
-    console.log(`[LeadsSync] Filtered by date range: ${stats.filteredByDate}`);
-    console.log(`[LeadsSync] Filtered by missing ad_id/campaign_id: ${stats.filteredByMissingAdCampaign}`);
-    console.log(`[LeadsSync] Successfully processed: ${stats.processedSuccessfully}`);
-    console.log(`[LeadsSync] Final leads array size: ${allLeads.length}`);
-    
-    // Log sample filtered leads if any
-    if (stats.sampleFilteredLeads.length > 0) {
-      console.log(`[LeadsSync] Sample filtered leads (showing why they were excluded):`);
-      stats.sampleFilteredLeads.forEach((sample, idx) => {
-        if (sample.reason === 'date') {
-          console.log(`[LeadsSync]   ${idx + 1}. Form ${sample.formId}, Lead ${sample.leadId}:`);
-          console.log(`[LeadsSync]      Lead date: ${sample.leadDateStr || sample.created_time}`);
-          console.log(`[LeadsSync]      Requested range: ${sample.startDateStr} to ${sample.endDateStr}`);
-          console.log(`[LeadsSync]      Filtered: ${sample.isBefore ? 'BEFORE' : 'AFTER'} requested range`);
-        } else if (sample.reason === 'missing ad_id or campaign_id') {
-          console.log(`[LeadsSync]   ${idx + 1}. Form ${sample.formId}, Lead ${sample.leadId}: ad_id=${sample.ad_id || 'MISSING'}, campaign_id=${sample.campaign_id || 'MISSING'}`);
-        }
-      });
-    }
     
     return allLeads;
   } catch (error) {
@@ -677,20 +605,17 @@ async function syncLeads() {
   }
 
   try {
-    console.log('[LeadsSync] Starting scheduled leads sync...');
     
     const endDate = new Date();
 
     // Incremental sync: fetch since last successful run, with a small overlap to avoid missing late-arriving leads
     const overlapMinutes = 10;
     const lastSyncValue = await getJobState(JOBSTATE_LAST_LEADS_SYNC_KEY);
-    console.log(`[LeadsSync] Last sync timestamp from JobState: ${lastSyncValue || 'null (first run or cleared)'}`);
     let startDate;
 
     if (lastSyncValue) {
       const parsed = new Date(lastSyncValue);
       if (!isNaN(parsed.getTime())) {
-        console.log(`[LeadsSync] Parsed last sync timestamp: ${parsed.toISOString()}, Current time: ${endDate.toISOString()}`);
         // Check if stored timestamp is in the future (likely invalid)
         if (parsed > endDate) {
           console.warn(`[LeadsSync] ⚠️  Stored last sync timestamp (${parsed.toISOString()}) is in the future. Resetting JobState.`);
@@ -700,7 +625,6 @@ async function syncLeads() {
         } else {
           startDate = parsed;
           startDate = new Date(startDate.getTime() - overlapMinutes * 60 * 1000);
-          console.log(`[LeadsSync] Using incremental sync: from ${startDate.toISOString()} (last sync: ${parsed.toISOString()} - ${overlapMinutes} min overlap)`);
         }
       } else {
         console.warn(`[LeadsSync] ⚠️  Invalid last sync timestamp format: ${lastSyncValue}`);
@@ -710,7 +634,6 @@ async function syncLeads() {
     // First run fallback: last 24 hours
     if (!startDate) {
       startDate = new Date(endDate.getTime() - 24 * 60 * 60 * 1000);
-      console.log(`[LeadsSync] First run or no valid last sync - using 24 hour window`);
     }
     
     // Validate date range (warn if dates seem incorrect)
@@ -723,13 +646,9 @@ async function syncLeads() {
       console.warn(`[LeadsSync] ⚠️  Invalid date range: startDate (${startDate.toISOString()}) >= endDate (${endDate.toISOString()})`);
     }
     
-    // Log the date range being used for debugging
+    // Detect and fix invalid date ranges
     const hoursInRange = (endDate - startDate) / (1000 * 60 * 60);
     const daysInRange = hoursInRange / 24;
-    console.log(`[LeadsSync] Using date range: startDate=${startDate.toISOString()}, endDate=${endDate.toISOString()}`);
-    console.log(`[LeadsSync] Date range spans ${hoursInRange.toFixed(2)} hours (${daysInRange.toFixed(2)} days)`);
-    
-    // Detect and fix invalid date ranges
     const shouldResetJobState = startDate > now || (daysInRange < 0.5 && lastSyncValue); // Less than 12 hours and has JobState
     
     if (shouldResetJobState) {
@@ -737,7 +656,6 @@ async function syncLeads() {
       console.warn(`[LeadsSync] Resetting JobState and using 24-hour window instead.`);
       await setJobState(JOBSTATE_LAST_LEADS_SYNC_KEY, '');
       startDate = new Date(endDate.getTime() - 24 * 60 * 60 * 1000);
-      console.log(`[LeadsSync] Reset to 24-hour window: startDate=${startDate.toISOString()}, endDate=${endDate.toISOString()}`);
     }
     
     // Fetch leads from Meta API
@@ -745,18 +663,13 @@ async function syncLeads() {
     const leads = await fetchLeadsFromMeta(pageId, startDate, endDate);
     console.timeEnd('[LeadsSync] Total Meta fetch');
     
-    console.log(`[LeadsSync] Fetched ${leads.length} leads from Meta API`);
-    //console.log('[LeadsSync] Leads:', leads);
     if (leads.length === 0) {
-      console.log('[LeadsSync] No leads to save');
-      
       // Recalculate days after potential reset
       const finalHoursInRange = (endDate - startDate) / (1000 * 60 * 60);
       const finalDaysInRange = finalHoursInRange / 24;
       
       // If date range is reasonable (less than 7 days) and not in the future, advance cursor
       if (finalDaysInRange <= 7 && startDate <= now) {
-        console.log(`[LeadsSync] Date range is reasonable (${finalDaysInRange.toFixed(2)} days), advancing JobState cursor`);
         await setJobState(JOBSTATE_LAST_LEADS_SYNC_KEY, endDate.toISOString());
       } else {
         console.warn(`[LeadsSync] ⚠️  Date range issue detected (${finalDaysInRange.toFixed(2)} days, startDate ${startDate > now ? 'in future' : 'valid'}). Not advancing JobState cursor to prevent getting stuck.`);
@@ -769,7 +682,6 @@ async function syncLeads() {
     console.time('[LeadsSync] Save leads to DB');
     const result = await saveLeads(leads);
     console.timeEnd('[LeadsSync] Save leads to DB');
-    console.log(`[LeadsSync] Sync completed: ${result.inserted} inserted, ${result.updated} updated`);
 
     // Persist last successful sync timestamp only after DB save succeeds
     await setJobState(JOBSTATE_LAST_LEADS_SYNC_KEY, endDate.toISOString());
@@ -795,7 +707,6 @@ function startLeadsSyncScheduler() {
     return null;
   }
 
-  console.log('[LeadsSync] Starting leads sync scheduler (every 15 minutes)');
   
   // Run immediately on startup
   syncLeads().catch(err => {

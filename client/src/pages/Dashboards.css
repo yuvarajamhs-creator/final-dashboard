@@ -25,6 +25,9 @@
 /* Main Page Wrapper */
 .dashboard-wrapper {
   min-height: 100vh;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   background: var(--bg, var(--app-bg, #f0f2f5));
   padding: 1.5rem;
   font-family: 'Roboto', 'Inter', sans-serif;
@@ -68,7 +71,7 @@
 }
 
 .dashboard-subtitle {
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(6, 6, 6, 0.7);
   margin-top: 0.4rem;
   font-size: 0.8rem;
 }
@@ -105,6 +108,20 @@
   border: 1px solid rgba(0, 0, 0, 0.1);
   color: var(--text, #1e293b);
   transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+/* Ensure row inside filter-card wraps properly */
+.filter-card .row {
+  flex-wrap: wrap;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* Ad Name filter column: prevent collapse when row wraps */
+.ad-name-filter-col {
+  min-width: 160px;
 }
 
 .filter-label {
@@ -645,6 +662,26 @@
   .filter-row > .col-12 {
     margin-bottom: 0.75rem;
   }
+
+  /* Ensure refresh button is visible and doesn't overflow on mobile */
+  .filter-row > .col-12.col-md-auto.ms-md-auto {
+    flex: 1 1 100%;
+    margin-left: 0 !important;
+    width: 100%;
+    margin-top: 0.5rem;
+  }
+
+  .refresh-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Ensure filter card doesn't overflow on mobile */
+  .filter-card {
+    overflow-x: visible;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
 }
 
 /* Small Devices (tablets, 576px and up) */
@@ -680,6 +717,20 @@
   .table td {
     padding: 0.6rem 0.5rem;
   }
+
+  /* Ensure filter card doesn't overflow on small tablets */
+  .filter-card {
+    overflow-x: auto;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  /* Ensure refresh button is visible on small tablets */
+  .filter-row > .col-12.col-md-auto.ms-md-auto {
+    flex: 1 1 auto;
+    margin-left: auto !important;
+    margin-top: 0;
+  }
 }
 
 /* Medium Devices (tablets in landscape, 768px and up) */
@@ -694,6 +745,13 @@
 
   .table-responsive {
     overflow-x: auto;
+  }
+
+  /* Ensure filter card doesn't overflow on medium tablets */
+  .filter-card {
+    overflow-x: auto;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 }
 
@@ -737,6 +795,19 @@
     min-width: 150px;
     max-width: 100%;
   }
+
+  /* Ensure filter card doesn't overflow */
+  .filter-card {
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  /* Ensure refresh button column wraps properly */
+  .filter-row > .col-12.col-md-auto.ms-md-auto {
+    flex: 1 1 100%;
+    margin-left: 0 !important;
+    margin-top: 0.75rem;
+  }
 }
 
 /* Touch-friendly improvements for mobile */
@@ -764,6 +835,20 @@
   .chart-container,
   .chart-container-large {
     min-height: 200px;
+  }
+
+  /* Ensure refresh button wraps on tablet */
+  .filter-row > .col-12.col-md-auto.ms-md-auto {
+    flex: 1 1 100%;
+    margin-left: 0 !important;
+    margin-top: 0.75rem;
+  }
+
+  /* Ensure filter card doesn't overflow on tablet */
+  .filter-card {
+    overflow-x: auto;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 }
 

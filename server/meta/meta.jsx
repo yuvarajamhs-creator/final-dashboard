@@ -3,25 +3,61 @@ const express = require("express");
 const axios = require("axios");
 const fs = require('fs');
 const path = require('path');
+// Ensure .env is loaded with explicit path
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const router = express.Router();
 const { authMiddleware, optionalAuthMiddleware } = require("../auth");
 const { saveLeads, getLeadsByCampaignAndAd } = require("../repositories/leadsRepository");
+const { getInsights, upsertInsights } = require("../repositories/insightsRepository");
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
-
+const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
+const { fetchInsightsFromMetaLive } = require("./insightsService");
+const adsCache = require("./adsCache");
+// Meta API best-practice layer: DB cache, rate limit, one request per resource
+const adAccountsService = require("../services/meta/adAccountsService");
+const campaignsServiceMeta = require("../services/meta/campaignsService");
+const adsServiceMeta = require("../services/meta/adsService");
 const META_API_VERSION = "v21.0";
 
-// In-memory cache for campaigns and ads
+// In-memory cache for campaigns (ads use adsCache with Redis/in-memory, TTL 24h+)
 let campaignsCache = {
   data: [],
   lastFetched: null,
   ttl: 5 * 60 * 1000 // 5 minutes
 };
 
-let adsCache = {
-  data: [],
-  lastFetched: null,
-  ttl: 5 * 60 * 1000 // 5 minutes
-};
+// Rate limiter for /api/meta/ads: max 2 concurrent, ~2s between starts to avoid "too many API calls"
+const ADS_QUEUE = [];
+let adsRateRunning = 0;
+let adsRateLastStart = 0;
+function scheduleAdsRateLimited(fn) {
+  return new Promise((resolve, reject) => {
+    ADS_QUEUE.push({ fn, resolve, reject });
+    dequeueAdsRate();
+  });
+}
+function dequeueAdsRate() {
+  if (adsRateRunning >= 2 || ADS_QUEUE.length === 0) return;
+  const now = Date.now();
+  if (now - adsRateLastStart < 2000 && adsRateRunning > 0) {
+    setTimeout(dequeueAdsRate, 2000 - (now - adsRateLastStart));
+    return;
+  }
+  const { fn, resolve, reject } = ADS_QUEUE.shift();
+  adsRateRunning++;
+  adsRateLastStart = Date.now();
+  Promise.resolve(fn()).then(resolve, reject).finally(() => {
+    adsRateRunning--;
+    dequeueAdsRate();
+  });
+}
+
+function isMetaRateLimitError(err) {
+  const c = err?.response?.data?.error?.code;
+  const sub = err?.response?.data?.error?.error_subcode;
+  const msg = (err?.response?.data?.error?.message || "").toLowerCase();
+  return c === 4 || c === 17 || c === 80004 || sub === 2446079 || msg.includes("too many") || msg.includes("rate limit") || msg.includes("api call");
+}
 
 // In-memory cache for forms by ad
 let formsCache = {
@@ -46,11 +82,14 @@ function normalizeAdAccountId(adAccountId) {
 
 // Helper to validate and return env credentials
 function getCredentials() {
-  const accessToken = process.env.META_ACCESS_TOKEN;
-  const adAccountId = process.env.META_AD_ACCOUNT_ID;
+  const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
+  const adAccountId = (process.env.META_AD_ACCOUNT_ID || '').trim();
 
   if (!accessToken || !adAccountId) {
-    throw new Error("Meta credentials missing. Please configure them in Settings.");
+    const missing = [];
+    if (!accessToken) missing.push('META_ACCESS_TOKEN');
+    if (!adAccountId) missing.push('META_AD_ACCOUNT_ID');
+    throw new Error(`Meta credentials missing. Please configure ${missing.join(' and ')} in server/.env file.`);
   }
   return {
     accessToken,
@@ -60,22 +99,25 @@ function getCredentials() {
 
 // Helper to get system token for leads API (separate from user token)
 function getSystemCredentials() {
-  const systemToken = process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
-  const adAccountId = process.env.META_AD_ACCOUNT_ID;
+  const systemToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || '').trim();
+  const adAccountId = (process.env.META_AD_ACCOUNT_ID || '').trim();
 
   if (!systemToken || !adAccountId) {
     // Fallback to regular token if system token not configured
-    const regularToken = process.env.META_ACCESS_TOKEN;
+    const regularToken = (process.env.META_ACCESS_TOKEN || '').trim();
     if (!regularToken || !adAccountId) {
-      throw new Error("Meta credentials missing. Please configure them in Settings.");
+      const missing = [];
+      if (!regularToken) missing.push('META_ACCESS_TOKEN');
+      if (!adAccountId) missing.push('META_AD_ACCOUNT_ID');
+      throw new Error(`Meta credentials missing. Please configure ${missing.join(' and ')} in server/.env file.`);
     }
-    console.log("System token not configured, using regular token for leads API");
+  
     return {
       accessToken: regularToken,
       adAccountId: normalizeAdAccountId(adAccountId),
     };
   }
-  console.log("Using system token for leads API");
+
   return {
     accessToken: systemToken,
     adAccountId: normalizeAdAccountId(adAccountId),
@@ -84,9 +126,9 @@ function getSystemCredentials() {
 
 // Helper to get system token only (for pages/forms APIs that don't need adAccountId)
 function getSystemToken() {
-  const systemToken = process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+  const systemToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || '').trim();
   if (!systemToken) {
-    throw new Error("Meta System Access Token missing. Please configure it in Settings.");
+    throw new Error("Meta System Access Token missing. Please configure META_SYSTEM_ACCESS_TOKEN or META_ACCESS_TOKEN in server/.env file.");
   }
   return systemToken;
 }
@@ -336,114 +378,21 @@ async function getFormsFromAdAccount(adAccountId, accessToken) {
 }
 
 // ---------------------------------------------------------------------
-// 0) CREDENTIALS API
-//    GET /api/meta/credentials - Check if configured
-//    POST /api/meta/credentials - Save to .env
-// ---------------------------------------------------------------------
-router.get("/credentials", optionalAuthMiddleware, (req, res) => {
-  const configured = !!process.env.META_ACCESS_TOKEN && !!process.env.META_AD_ACCOUNT_ID;
-  res.json({
-    configured,
-    appId: process.env.META_APP_ID || "",
-    adAccountId: process.env.META_AD_ACCOUNT_ID || "",
-  });
-});
-
-router.post("/credentials", optionalAuthMiddleware, async (req, res) => {
-  const { appId, appSecret, adAccountId, accessToken, systemAccessToken } = req.body;
-
-  if (!adAccountId || !accessToken) {
-    return res.status(400).json({ error: "Ad Account ID and Access Token are required" });
-  }
-
-  try {
-    // 1. Update process.env in memory
-    if (appId) process.env.META_APP_ID = appId;
-    if (appSecret) process.env.META_APP_SECRET = appSecret;
-    process.env.META_AD_ACCOUNT_ID = adAccountId;
-    process.env.META_ACCESS_TOKEN = accessToken;
-    // System token for leads API (optional, falls back to regular token if not provided)
-    if (systemAccessToken) {
-      process.env.META_SYSTEM_ACCESS_TOKEN = systemAccessToken;
-    }
-
-    // 2. Write to server/.env file
-    const envPath = path.join(__dirname, '..', '.env');
-
-    let envContent = '';
-    if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, 'utf8');
-    }
-
-    const updateKey = (key, val) => {
-      const regex = new RegExp(`^${key}=.*`, 'm');
-      if (regex.test(envContent)) {
-        envContent = envContent.replace(regex, `${key}=${val}`);
-      } else {
-        envContent += `\n${key}=${val}`;
-      }
-    };
-
-    if (appId) updateKey('META_APP_ID', appId);
-    if (appSecret) updateKey('META_APP_SECRET', appSecret);
-    updateKey('META_AD_ACCOUNT_ID', adAccountId);
-    updateKey('META_ACCESS_TOKEN', accessToken);
-    if (systemAccessToken) {
-      updateKey('META_SYSTEM_ACCESS_TOKEN', systemAccessToken);
-    }
-
-    fs.writeFileSync(envPath, envContent.trim() + '\n');
-
-    res.json({
-      success: true,
-      message: "Credentials saved successfully.",
-      configured: true
-    });
-
-  } catch (error) {
-    console.error("Error saving credentials:", error);
-    res.status(500).json({ error: "Failed to save credentials to server" });
-  }
-});
-
-// ---------------------------------------------------------------------
-// 1) CAMPAIGN LIST API
-//    GET /api/meta/campaigns (fetch all campaigns from ad account)
+// 1) CAMPAIGN LIST API — DB cache 24h+. GET /api/meta/campaigns?ad_account_id=
+//    Uses /act_{id}/campaigns via campaignsService; UI reads from DB only.
 // ---------------------------------------------------------------------
 router.get("/campaigns", optionalAuthMiddleware, async (req, res) => {
   try {
     const credentials = getCredentials();
-    
-    // Check cache first
-    const now = Date.now();
-    if (campaignsCache.data.length > 0 && campaignsCache.lastFetched && (now - campaignsCache.lastFetched) < campaignsCache.ttl) {
-      console.log("Returning cached campaigns data");
-      return res.json({ data: campaignsCache.data, cached: true });
+    const adAccountId = (req.query.ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId) {
+      return res.status(400).json({ error: "ad_account_id required", details: "Set query param or META_AD_ACCOUNT_ID in server/.env" });
     }
-
-    // Fetch all campaigns from ad account
-    const { data } = await axios.get(
-      `https://graph.facebook.com/${META_API_VERSION}/act_${credentials.adAccountId}/campaigns`,
-      {
-        params: {
-          access_token: credentials.accessToken,
-          fields: "id,name,status,effective_status,objective",
-          limit: 1000, // Increased limit to get all campaigns
-        },
-      }
-    );
-
-    const campaigns = data.data || [];
-
-    // Update cache
-    campaignsCache.data = campaigns;
-    campaignsCache.lastFetched = now;
-
-    res.json({ data: campaigns, cached: false });
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const data = await campaignsServiceMeta.list(adAccountId, { forceRefresh });
+    res.json({ data: data || [], cached: !forceRefresh });
   } catch (err) {
     console.error("Meta API Campaigns Error:", err.response?.data || err.message);
-
-    // Check for Meta OAuth errors (expired token, etc.)
     if (err.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
@@ -452,7 +401,6 @@ router.get("/campaigns", optionalAuthMiddleware, async (req, res) => {
         instruction: "Please update META_ACCESS_TOKEN in server/.env"
       });
     }
-
     res.status(500).json({
       error: "Failed to fetch campaigns",
       details: err.response?.data || err.message,
@@ -461,263 +409,279 @@ router.get("/campaigns", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// 2) INSIGHTS API (CAMPAIGN-BASED + DATE-BASED)
+// 2) INSIGHTS API — reads from database (and optionally live Meta via insightsService).
 //    GET /api/meta/insights
+//    Query: from, to, ad_account_id, time_increment, is_all_campaigns, is_all_ads, campaign_id, ad_id.
+//    Select All → is_all_campaigns=1 or is_all_ads=1 (or omit IDs); backend passes '' to getInsights.
+//    Explicit selection → campaign_id / ad_id comma-separated. One call per account per request; no loop over IDs.
 // ---------------------------------------------------------------------
 router.get("/insights", optionalAuthMiddleware, async (req, res) => {
   try {
-    const credentials = getCredentials();
-    const { campaign_id, ad_id, from, to, days, time_increment, ad_account_id } = req.query;
-    console.log("Insights","campaign_id", campaign_id, "ad_id", ad_id, "from", from, "to", to, "days", days, "time_increment", time_increment, "ad_account_id", ad_account_id);
-    
-    // Use provided ad_account_id or fall back to env variable
-    let adAccountId = ad_account_id || credentials.adAccountId;
-    
-    // Validate ad account ID
-    if (!adAccountId) {
+    let credentials;
+    try {
+      credentials = getCredentials();
+    } catch (e) {
+      return res.status(400).json({
+        error: "Meta credentials required",
+        details: e.message,
+      });
+    }
+    const { campaign_id, ad_id, from, to, days, ad_account_id, is_all_campaigns, is_all_ads } = req.query;
+
+    let adAccountIds = [ad_account_id || credentials.adAccountId].flat().filter(Boolean);
+    const raw = (ad_account_id || credentials.adAccountId || '').toString();
+    if (raw.includes(',')) {
+      adAccountIds = raw.split(',').map((s) => s.trim().replace(/^act_/, '')).filter(Boolean);
+    } else if (adAccountIds[0]) {
+      adAccountIds[0] = String(adAccountIds[0]).replace(/^act_/, '');
+    }
+    if (!adAccountIds.length) {
       return res.status(400).json({
         error: "Ad Account ID is required",
-        details: "Please provide ad_account_id parameter or configure META_AD_ACCOUNT_ID in settings"
+        details: "Provide ad_account_id or set META_AD_ACCOUNT_ID in server/.env",
       });
     }
-    
-    // Remove 'act_' prefix if present
-    if (adAccountId && adAccountId.startsWith('act_')) {
-      adAccountId = adAccountId.substring(4);
-    }
-    
-    // Validate ad account ID format (should be numeric after removing act_)
-    if (!/^\d+$/.test(adAccountId)) {
+    if (adAccountIds.some((id) => !/^\d+$/.test(id))) {
       return res.status(400).json({
         error: "Invalid Ad Account ID format",
-        details: `Ad Account ID must be numeric, got: ${adAccountId}`
+        details: `Ad Account IDs must be numeric, got: ${adAccountIds.join(',')}`,
       });
     }
-    
+
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-
-    let useTimeRange = false;
-    let timeRange = null;
-
-    if (from && to && dateRegex.test(from) && dateRegex.test(to)) {
-      useTimeRange = true;
-      timeRange = JSON.stringify({ since: from, until: to });
+    let fromDate = from;
+    let toDate = to;
+    const usedDefaultDates = !fromDate || !toDate || !dateRegex.test(fromDate) || !dateRegex.test(toDate);
+    if (usedDefaultDates) {
+      const today = new Date().toISOString().slice(0, 10);
+      const dayMap = { 7: 7, 14: 14, 30: 30, 90: 90 };
+      const d = days && dayMap[Number(days)] ? dayMap[Number(days)] : 7;
+      const fromD = new Date();
+      fromD.setDate(fromD.getDate() - d);
+      fromDate = fromD.toISOString().slice(0, 10);
+      toDate = today;
     }
-    console.log("timeRange", timeRange, "days", days, "time_increment", time_increment, "adAccountId", adAccountId);
-    const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
-
-    // Determine level: 
-    // - If ad_id is provided, use ad level
-    // - If no campaign_id filter (all campaigns selected), use ad level to filter by ad status
-    // - Otherwise, use campaign level
-    // Use ad-level when we need to filter by ad status (when all campaigns selected or ad_id provided)
-    // Safely check if campaign_id is empty (undefined, null, or empty string)
-    const campaignIdIsEmpty = !campaign_id || (typeof campaign_id === 'string' && campaign_id.trim() === "");
-    const needsAdLevelFiltering = (ad_id && ad_id.trim() !== "") || campaignIdIsEmpty;
-    const level = needsAdLevelFiltering ? "ad" : "campaign";
-    const fields = level === "ad" 
-      ? "ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop"
-      : "campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,account_name";
-
-    const params = {
-      access_token: credentials.accessToken,
-      level: level,
-      fields: fields,
-      limit: 1000, // Increased limit to get more data when all campaigns are selected
+    // #region agent log
+    // Best-effort local debug ingestion. Must never crash the server if the ingest service isn't running.
+    const _log = (obj) => {
+      try {
+        const req = require('http').request(
+          {
+            hostname: '127.0.0.1',
+            port: 7244,
+            path: '/ingest/a31de4bd-79e0-4784-8d49-20b7d56ddf12',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 1500,
+          },
+          () => {}
+        );
+        req.on('error', () => {});
+        req.on('timeout', () => {
+          try {
+            req.destroy();
+          } catch (_) {}
+        });
+        req.end(JSON.stringify(obj));
+      } catch (_) {}
     };
+    _log({ location: 'meta.jsx:GET/insights', message: 'parsed dates and filters', data: { rawFrom: from, rawTo: to, fromDate, toDate, campaign_id, ad_id, usedDefaultDates }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2,H4' });
+    // #endregion
 
-    // Build filtering array
-    const filtering = [];
-    
-    // Support filtering by both campaigns and ads simultaneously
-    // Parse ad IDs if provided
-    let adIdArray = [];
-    if (ad_id && ad_id.trim() !== "") {
-      adIdArray = ad_id.split(',').map(id => id.trim()).filter(id => id !== '');
-      filtering.push({
-        field: "ad.id",
-        operator: "IN",
-        value: adIdArray,
-      });
-    }
-    
-    // Add campaign filter if provided (can be combined with ad filter)
-    let campaignIdArray = [];
-    if (campaign_id && campaign_id.trim() !== "") {
-      campaignIdArray = campaign_id.split(',').map(id => id.trim()).filter(id => id !== '');
-      filtering.push({
-        field: "campaign.id",
-        operator: "IN",
-        value: campaignIdArray,
-      });
-    }
+    // Select All → no campaign.id / ad.id in filtering. Explicit selection → IN operator (single/multi).
+    const isAllCampaigns = is_all_campaigns === '1' || is_all_campaigns === 'true';
+    const isAllAds = is_all_ads === '1' || is_all_ads === 'true';
+    const campaignIdForDb = isAllCampaigns ? '' : (campaign_id || '');
+    const adIdForDb = isAllAds ? '' : (ad_id || '');
+    const campaignIds = (campaign_id || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const adIds = (ad_id || '').split(',').map((s) => s.trim()).filter(Boolean);
 
-    // Always filter by active status using effective_status
-    // This ensures only active campaigns/ads are returned
-    if (level === "campaign") {
-      filtering.push({
-        field: "campaign.effective_status",
-        operator: "IN",
-        value: ["ACTIVE"]
+    const useLive = req.query.live === '1' || req.query.live === 'true';
+    let data = [];
+    for (const adAccountId of adAccountIds) {
+      const rows = await getInsights({
+        ad_account_id: adAccountId,
+        from: fromDate,
+        to: toDate,
+        campaign_id: campaignIdForDb,
+        ad_id: adIdForDb,
       });
-    } else if (level === "ad") {
-      // For ad-level insights, filter by both campaign and ad status
-      filtering.push({
-        field: "campaign.effective_status",
-        operator: "IN",
-        value: ["ACTIVE"]
-      });
-      filtering.push({
-        field: "ad.effective_status",
-        operator: "IN",
-        value: ["ACTIVE"]
-      });
+      data = data.concat(rows);
     }
+    // #region agent log
+    _log({ location: 'meta.jsx:GET/insights', message: 'db result', data: { source: 'db', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
+    // #endregion
 
-    // Always add filtering (now includes status filters)
-    if (filtering.length > 0) {
-      params.filtering = JSON.stringify(filtering);
-      console.log("[Backend] Filtering by campaigns:", campaignIdArray.length > 0 ? campaignIdArray : 'none');
-      console.log("[Backend] Filtering by ads:", adIdArray.length > 0 ? adIdArray : 'none');
-      console.log("[Backend] Status filters: campaign.effective_status=ACTIVE" + (level === "ad" ? ", ad.effective_status=ACTIVE" : ""));
-      console.log("[Backend] Total filters:", filtering.length);
-    }
-
-    // Support for time_increment (charts)
-    if (time_increment) {
-      params.time_increment = time_increment;
-    }
-
-    if (useTimeRange) {
-      params.time_range = timeRange;
-    } else {
-      // Fallback or 'days' param support
-      const dayMap = { '7': 'last_7d', '14': 'last_14d', '30': 'last_30d', '90': 'last_90d' };
-      if (days && dayMap[days]) {
-        params.date_preset = dayMap[days];
-      } else {
-        params.date_preset = "last_7d";
+    if (useLive || data.length === 0) {
+      let liveAggregate = [];
+      for (const adAccountId of adAccountIds) {
+        try {
+          const liveData = await fetchInsightsFromMetaLive({
+            accessToken: credentials.accessToken,
+            adAccountId,
+            from: fromDate,
+            to: toDate,
+            isAllCampaigns,
+            isAllAds,
+            campaignIds,
+            adIds,
+          });
+          if (liveData && liveData.length > 0) {
+            await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
+            liveAggregate = liveAggregate.concat(liveData);
+          }
+        } catch (liveErr) {
+          if (useLive) {
+            console.error("Insights live fetch error:", liveErr?.message || liveErr);
+            return res.status(500).json({
+              error: "Failed to fetch insights from Meta",
+              details: liveErr?.message || String(liveErr),
+            });
+          }
+        }
       }
+      if (liveAggregate.length > 0) data = liveAggregate;
+      // #region agent log
+      _log({ location: 'meta.jsx:GET/insights', message: 'live result', data: { source: 'live', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
+      // #endregion
     }
 
-    // Fetch insights with pagination support
-    let allInsights = [];
-    let nextUrl = null;
-    let currentParams = { ...params };
-    let pageCount = 0;
-    const maxPages = 10; // Limit to prevent infinite loops
-
-    do {
-      const response = await axios.get(insightsUrl, { params: currentParams });
-      const responseData = response.data;
-      
-      if (Array.isArray(responseData.data)) {
-        allInsights = allInsights.concat(responseData.data);
-      } else if (Array.isArray(responseData)) {
-        allInsights = allInsights.concat(responseData);
-      }
-
-      // Check for pagination
-      if (responseData.paging && responseData.paging.next) {
-        nextUrl = responseData.paging.next;
-        // Extract cursor from next URL for next request
-        const urlObj = new URL(responseData.paging.next);
-        currentParams.after = urlObj.searchParams.get('after');
-        pageCount++;
-      } else {
-        nextUrl = null;
-      }
-    } while (nextUrl && pageCount < maxPages);
-
-    // Return aggregated insights
-    res.json({ data: allInsights });
+    res.json({ data });
   } catch (err) {
-    console.error("Meta API Insights Error:", err.response?.data || err.message);
-
-    if (err.response?.data?.error?.code === 190) {
-      return res.status(401).json({
-        error: "Meta Access Token expired or invalid",
-        details: err.response.data.error.message,
-        isAuthError: true,
-        instruction: "Please update META_ACCESS_TOKEN in server/.env"
-      });
-    }
-
+    console.error("Insights DB Error:", err?.message || err);
     res.status(500).json({
       error: "Failed to fetch insights",
-      details: err.response?.data || err.message,
+      details: err?.message || String(err),
     });
   }
 });
 
 // ---------------------------------------------------------------------
-// 3) ACTIVE CAMPAIGNS SUMMARY (SPEND, LEADS, CPL, etc.)
-//    GET /api/meta/active-campaigns
+// INSIGHTS BACKFILL — trigger via Postman: POST body { from, to } (YYYY-MM-DD), optional ad_account_id.
+// If ad_account_id omitted: fetch all ad accounts from Meta and run backfill for each.
+// ---------------------------------------------------------------------
+router.post("/insights/backfill", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { from, to, ad_account_id } = req.body || req.query;
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !to || !dateRegex.test(from) || !dateRegex.test(to)) {
+      return res.status(400).json({
+        error: "Invalid or missing date range",
+        details: "Send JSON body: { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' }. Optional: ad_account_id.",
+      });
+    }
+
+    const singleId = (ad_account_id != null && ad_account_id !== '' ? ad_account_id : '').toString().replace(/^act_/, '').trim();
+    if (singleId && /^\d+$/.test(singleId)) {
+      const { count } = await runInsightsSyncForRange(singleId, from, to);
+      return res.json({ ok: true, message: `Backfill done for ${from}..${to}`, count });
+    }
+
+    let accounts;
+    try {
+      accounts = await fetchAllAdAccountIds();
+      console.log(`[Backfill] Fetched ${accounts.length} ad accounts from Meta API:`, accounts.map(a => `${a.name} (${a.id})`).join(', '));
+    } catch (e) {
+      console.error('[Backfill] Failed to fetch ad accounts:', e.message, e.stack);
+      return res.status(500).json({
+        error: "Failed to fetch ad accounts",
+        details: e?.message || String(e),
+      });
+    }
+    if (!accounts || accounts.length === 0) {
+      console.warn('[Backfill] No ad accounts found from Meta API. Check token permissions (e.g. ads_read).');
+      return res.status(400).json({
+        error: "No ad accounts found",
+        details: "Check token permissions (e.g. ads_read). Meta API /me/adaccounts returned empty.",
+      });
+    }
+
+    console.log(`[Backfill] Processing ${accounts.length} ad accounts for date range ${from}..${to}`);
+    const results = [];
+    let totalCount = 0;
+    for (const { id, name } of accounts) {
+      try {
+        console.log(`[Backfill] Syncing account ${name} (${id}) for ${from}..${to}...`);
+        const { count } = await runInsightsSyncForRange(id, from, to);
+        console.log(`[Backfill] ✓ Account ${name} (${id}): ${count} insights rows synced`);
+        results.push({ account_id: id, account_name: name, count });
+        totalCount += count;
+      } catch (err) {
+        console.error(`[Backfill] ✗ Error for account ${id} (${name}):`, err?.response?.data || err?.message);
+        results.push({ account_id: id, account_name: name, count: 0, error: err?.message || String(err) });
+      }
+    }
+    
+    console.log(`[Backfill] Completed: ${results.length} accounts processed, ${totalCount} total rows synced`);
+    res.json({
+      ok: true,
+      message: `Backfill done for ${from}..${to}`,
+      accounts: results,
+      totalCount,
+    });
+  } catch (err) {
+    console.error("Insights backfill error:", err?.response?.data || err?.message || err);
+    const code = err?.response?.data?.error?.code;
+    if (code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: err.response?.data?.error?.message,
+        isAuthError: true,
+      });
+    }
+    res.status(500).json({
+      error: "Backfill failed",
+      details: err?.message || String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 3) CAMPAIGNS SUMMARY (SPEND, LEADS, CPL, etc.) — DB-first campaigns, one /insights request
+//    GET /api/meta/active-campaigns?ad_account_id=&from=&to=
 // ---------------------------------------------------------------------
 router.get("/active-campaigns", optionalAuthMiddleware, async (req, res) => {
   try {
     const credentials = getCredentials();
     const { from, to, ad_account_id } = req.query;
 
-    // Use provided ad_account_id or fall back to env variable
-    let adAccountId = ad_account_id || credentials.adAccountId;
-    // Remove 'act_' prefix if present
-    if (adAccountId && adAccountId.startsWith('act_')) {
-      adAccountId = adAccountId.substring(4);
+    let adAccountId = (ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId) {
+      return res.status(400).json({ error: "ad_account_id required" });
     }
 
-    // Validate date format: YYYY-MM-DD
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    let timeRange = null;
-
+    let since = null;
+    let until = null;
     if (from && to && dateRegex.test(from) && dateRegex.test(to)) {
-      timeRange = JSON.stringify({ since: from, until: to });
+      since = from;
+      until = to;
     }
 
-    // 1) Get all campaigns
-    const campaignsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/campaigns`;
-    const campaignsResp = await axios.get(campaignsUrl, {
-      params: {
-        access_token: credentials.accessToken,
-        fields: "id,name,status,effective_status,objective",
-        limit: 100,
-      },
-    });
-
-    const allCampaigns = campaignsResp.data.data || [];
-
-    // 2) Only ACTIVE
-    const activeCampaigns = allCampaigns.filter(
-      (c) => c.effective_status === "ACTIVE" || c.status === "ACTIVE"
-    );
-
-    if (!activeCampaigns.length) {
-      return res.json({ data: [], message: "No active campaigns found" });
+    // 1) Campaign list from DB (cache 24h+); no Meta /campaigns call on every request
+    const campaigns = await campaignsServiceMeta.list(adAccountId);
+    if (!campaigns || campaigns.length === 0) {
+      return res.json({ data: [], message: "No campaigns found" });
     }
 
-    const activeIds = activeCampaigns.map((c) => c.id);
+    const campaignIds = campaigns.map((c) => c.id || c.campaign_id);
 
-    // 3) Insights for active campaigns - use the same adAccountId (from query or default)
+    // 2) One /insights request with IN filter for campaigns (per Meta best practice)
     const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
-
     const filtering = [
-      {
-        field: "campaign.id",
-        operator: "IN",
-        value: activeIds,
-      },
+      { field: "campaign.effective_status", operator: "IN", value: ["ACTIVE", "PAUSED", "ARCHIVED", "IN_REVIEW", "REJECTED", "PENDING_REVIEW", "LEARNING", "ENDED"] },
+      { field: "campaign.id", operator: "IN", value: campaignIds },
     ];
-
     const params = {
       access_token: credentials.accessToken,
       level: "campaign",
       fields: "campaign_id,campaign_name,spend,actions,unique_actions",
       filtering: JSON.stringify(filtering),
-      limit: 100,
+      limit: 1000,
     };
-
-    if (timeRange) {
-      params.time_range = timeRange;
+    if (since && until) {
+      params.time_range = JSON.stringify({ since, until });
     } else {
       params.date_preset = "last_30d";
     }
@@ -769,7 +733,7 @@ router.get("/active-campaigns", optionalAuthMiddleware, async (req, res) => {
       };
     });
 
-    const result = activeCampaigns.map((c) => {
+    const result = campaigns.map((c) => {
       const m = metricsByCampaign[c.id] || {
         spend: 0,
         leads: 0,
@@ -791,7 +755,6 @@ router.get("/active-campaigns", optionalAuthMiddleware, async (req, res) => {
     });
 
     res.json({ data: result });
-    console.log("Fetched active campaign metrics successfully");
   } catch (err) {
     console.error("Error fetching active campaign metrics:", err.response?.data || err.message);
 
@@ -812,132 +775,99 @@ router.get("/active-campaigns", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// 4) ADS LIST API
-//    GET /api/meta/ads?campaign_id=xxx (legacy - for backward compatibility)
-//    GET /api/meta/ads/all (new - fetch all ads from ad account)
+// 4) ADS LIST API — DB only. Never fetch on filter change. Sync via POST /ads/sync.
+//    GET /api/meta/ads?ad_account_id=&campaign_id= (or &all=true)
+//    UI reads from DB only; /act_{id}/ads is called once per account via sync.
 // ---------------------------------------------------------------------
 router.get("/ads", optionalAuthMiddleware, async (req, res) => {
+  const send = (data, cached = true) => res.json({ data: Array.isArray(data) ? data : (data?.data ?? []), cached });
+
   try {
     const credentials = getCredentials();
+    const accId = normalizeAdAccountId(req.query.ad_account_id || credentials.adAccountId);
+    if (!accId) {
+      return res.status(400).json({ error: "ad_account_id required", details: "Set query param or META_AD_ACCOUNT_ID in server/.env" });
+    }
     const { campaign_id, all } = req.query;
 
-    // New endpoint: fetch all ads from ad account
     if (all === 'true' || all === '1') {
-      return await fetchAllAds(credentials, res);
+      let data = await adsServiceMeta.listFromDb(accId);
+      if ((!data || data.length === 0)) {
+        try {
+          await adsServiceMeta.fetchAndCache(accId);
+          data = await adsServiceMeta.listFromDb(accId);
+        } catch (_) {}
+      }
+      return send(data || [], true);
     }
 
-    // Legacy endpoint: fetch ads for specific campaign
-    if (!campaign_id || campaign_id.trim() === "") {
-      return res.status(400).json({ error: "campaign_id is required" });
+    if (campaign_id && String(campaign_id).trim() !== "") {
+      const data = await adsServiceMeta.listFromDb(accId, { campaign_ids: [String(campaign_id).trim()] });
+      return send(data || [], true);
     }
 
-    // Fetch ads for the given campaign using the campaign's ads edge
-    const adsUrl = `https://graph.facebook.com/${META_API_VERSION}/${campaign_id}/ads`;
-    const { data } = await axios.get(adsUrl, {
-      params: {
-        access_token: credentials.accessToken,
-        fields: "id,name,status,effective_status",
-        limit: 200,
-      },
-    });
-
-    // Return the data in the same format as campaigns endpoint
-    res.json(data);
+    const data = await adsServiceMeta.listFromDb(accId);
+    return send(data || [], true);
   } catch (err) {
     console.error("Meta API Ads Error:", err.response?.data || err.message);
-
-    // Handle authentication errors
     if (err.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
-        details: err.response.data.error.message,
+        details: err.response?.data?.error?.message,
         isAuthError: true,
-        instruction: "Please update META_ACCESS_TOKEN in server/.env"
+        instruction: "Please update META_ACCESS_TOKEN in server/.env",
       });
     }
-
-    // Handle invalid parameter errors (campaign might not exist or have no ads)
-    if (err.response?.data?.error?.code === 100) {
-      console.warn("Invalid parameter or campaign has no ads, returning empty array");
-      return res.json({ data: [] });
-    }
-
-    // Handle invalid campaign ID errors (campaign might not exist or be inaccessible)
-    if (err.response?.data?.error?.code === 1487295 || 
-        err.response?.data?.error?.error_subcode === 1487295 ||
-        (err.response?.data?.error?.message && 
-         (err.response.data.error.message.includes('Invalid campaign') || 
-          err.response.data.error.message.includes('does not exist')))) {
-      console.warn("Campaign not found or invalid, returning empty array");
-      return res.json({ data: [] });
-    }
-
-    // Handle permission errors
-    if (err.response?.data?.error?.code === 200 || 
-        err.response?.data?.error?.code === 10) {
-      return res.status(403).json({
-        error: "Insufficient permissions",
-        details: err.response.data.error.message || "Permission denied",
-        isPermissionError: true
-      });
-    }
-
-    // For other errors, log and return 500 with details
-    res.status(500).json({
+    return res.status(500).json({
       error: "Failed to fetch ads",
       details: err.response?.data || err.message,
     });
   }
 });
 
-// Helper function to fetch all ads from ad account
-async function fetchAllAds(credentials, res) {
+// POST /api/meta/ads/sync — trigger one-time fetch /act_{id}/ads and store in DB. Never called on filter change.
+router.post("/ads/sync", optionalAuthMiddleware, async (req, res) => {
   try {
-    // Check cache first
-    const now = Date.now();
-    if (adsCache.data.length > 0 && adsCache.lastFetched && (now - adsCache.lastFetched) < adsCache.ttl) {
-      console.log("Returning cached ads data");
-      return res.json({ data: adsCache.data, cached: true });
+    const credentials = getCredentials();
+    const accId = normalizeAdAccountId(req.body?.ad_account_id || req.query?.ad_account_id || credentials.adAccountId);
+    if (!accId) {
+      return res.status(400).json({ error: "ad_account_id required" });
     }
+    await adsServiceMeta.fetchAndCache(accId);
+    const data = await adsServiceMeta.listFromDb(accId);
+    return res.json({ ok: true, data: data || [], message: "Ads synced for account " + accId });
+  } catch (err) {
+    console.error("Meta ads/sync Error:", err.response?.data || err.message);
+    if (err.response?.data?.error?.code === 190) {
+      return res.status(401).json({ error: "Meta Access Token expired or invalid", details: err.response?.data?.error?.message, isAuthError: true });
+    }
+    return res.status(500).json({ error: "Failed to sync ads", details: err.response?.data?.error?.message || err.message });
+  }
+});
 
-    // Fetch all ads from ad account
+async function fetchAllAdsCached(credentials, res, send, sendError) {
+  const accId = normalizeAdAccountId(credentials.adAccountId);
+  try {
     const adsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${credentials.adAccountId}/ads`;
     const { data } = await axios.get(adsUrl, {
       params: {
         access_token: credentials.accessToken,
         fields: "id,name,status,effective_status,campaign_id",
-        limit: 1000, // Increased limit to get more ads
+        limit: 1000,
       },
     });
-
-    let allAds = data.data || [];
-
-    // Fetch campaign names for each ad
-    // First, get all unique campaign IDs
+    let allAds = data?.data ?? [];
     const campaignIds = [...new Set(allAds.map(ad => ad.campaign_id).filter(Boolean))];
-    
-    // Fetch campaign details
     const campaignsMap = new Map();
     if (campaignIds.length > 0) {
       try {
         const campaignsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${credentials.adAccountId}/campaigns`;
         const campaignsResp = await axios.get(campaignsUrl, {
-          params: {
-            access_token: credentials.accessToken,
-            fields: "id,name",
-            limit: 1000,
-          },
+          params: { access_token: credentials.accessToken, fields: "id,name", limit: 1000 },
         });
-        
-        (campaignsResp.data.data || []).forEach(campaign => {
-          campaignsMap.set(campaign.id, campaign.name);
-        });
-      } catch (campaignErr) {
-        console.warn("Error fetching campaign names:", campaignErr.message);
-      }
+        (campaignsResp.data?.data ?? []).forEach(c => campaignsMap.set(c.id, c.name));
+      } catch (_) {}
     }
-
-    // Enrich ads with campaign name
     const enrichedAds = allAds.map(ad => ({
       id: ad.id,
       name: ad.name,
@@ -946,84 +876,63 @@ async function fetchAllAds(credentials, res) {
       campaign_id: ad.campaign_id,
       campaign_name: campaignsMap.get(ad.campaign_id) || null,
     }));
-
-    // Update cache
-    adsCache.data = enrichedAds;
-    adsCache.lastFetched = now;
-
-    res.json({ data: enrichedAds, cached: false });
+    await adsCache.set(accId, 'all', enrichedAds);
+    return send(enrichedAds, false);
   } catch (err) {
-    console.error("Error fetching all ads:", err.response?.data || err.message);
+    if (isMetaRateLimitError(err)) {
+      const fallback = await adsCache.getAnyCached(accId);
+      if (fallback) {
+        console.warn("Meta ads rate limit (all); returning cached data for account", accId);
+        return send(fallback.data, true);
+      }
+      return sendError(429, {
+        error: "Ad account has too many API calls",
+        details: err.response?.data?.error?.message || "Rate limit reached.",
+        code: "RATE_LIMIT",
+      });
+    }
     throw err;
   }
 }
 
 // ---------------------------------------------------------------------
-// 5.0) AD ACCOUNTS API - Fetch ad accounts
-//    GET /api/meta/ad-accounts
-//    Uses META_SYSTEM_ACCESS_TOKEN
+// 5.0) AD ACCOUNTS API - DB-first. UI dropdown reads from DB only.
+//    GET /api/meta/ad-accounts → list from DB; if empty, fetch /me/adaccounts and cache, then return.
 // ---------------------------------------------------------------------
 router.get("/ad-accounts", optionalAuthMiddleware, async (req, res) => {
   try {
-    const accessToken = process.env.META_ACCESS_TOKEN;
-    if (!accessToken) {
-      throw new Error("Meta Access Token missing. Please configure it in Settings.");
-    }
-
-    const response = await axios.get(
-      `https://graph.facebook.com/${META_API_VERSION}/me/adaccounts`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-        params: {
-          fields: "account_id,name,currency,timezone_name,account_status",
-          limit: 100,
-        },
+    let accounts = await adAccountsService.listFromDb();
+    if (!accounts || accounts.length === 0) {
+      try {
+        await adAccountsService.fetchAndCache();
+        accounts = await adAccountsService.listFromDb();
+      } catch (e) {
+        console.warn("Meta /ad-accounts fetchAndCache failed:", e.message);
       }
-    );
-    
-    // Log raw response structure for debugging
-    console.log(`[Ad Accounts API] Raw response structure:`, {
-      hasData: !!response.data,
-      hasDataData: !!(response.data && response.data.data),
-      dataKeys: response.data ? Object.keys(response.data) : [],
-      isArray: Array.isArray(response.data),
-      sampleResponse: response.data ? (Array.isArray(response.data) ? response.data[0] : response.data.data?.[0]) : null
-    });
-    
-    const accountsData = response.data.data || [];
-    
-    console.log(`[Ad Accounts API] Fetched ${accountsData.length} ad accounts from Meta API`);
-    
-    const accounts = accountsData.map(account => ({
-      account_id: account.account_id,
-      account_name: account.name || account.account_name || `Account ${account.account_id}`,
-      currency: account.currency || "INR",
-      timezone: account.timezone_name || "Asia/Kolkata",
-      status: account.account_status === 1 ? "ACTIVE" : "INACTIVE",
+    }
+    const normalized = (accounts || []).map((a) => ({
+      account_id: a.account_id,
+      account_name: a.account_name || a.name || `Account ${a.account_id}`,
+      currency: a.currency || "INR",
+      timezone: a.timezone || a.timezone_name || "Asia/Kolkata",
+      status: a.status || (a.account_status === 1 ? "ACTIVE" : "INACTIVE"),
     }));
-
-    console.log(`[Ad Accounts API] Returning ${accounts.length} formatted accounts`);
-    
-    res.json(accounts);
+    res.json(normalized);
   } catch (error) {
-    console.error("Meta /ad-accounts error:", error.response?.data || error.message);
-    
+    console.error("Meta /ad-accounts error:", error.message);
     if (error.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
         details: error.response.data.error.message,
         isAuthError: true,
-        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env",
+        instruction: "Please update META_ACCESS_TOKEN in server/.env",
       });
     }
-
     res.status(500).json({
       error: "Failed to fetch ad accounts",
-      details: error.response?.data || error.message,
+      details: error.response?.data?.error?.message || error.message,
     });
-    }
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -1033,9 +942,9 @@ router.get("/ad-accounts", optionalAuthMiddleware, async (req, res) => {
 // ---------------------------------------------------------------------
 router.get("/businesses", optionalAuthMiddleware, async (req, res) => {
   try {
-    const accessToken = process.env.META_ACCESS_TOKEN;
+    const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
     if (!accessToken) {
-      throw new Error("Meta Access Token missing. Please configure it in Settings.");
+      throw new Error("Meta Access Token missing. Please configure META_ACCESS_TOKEN in server/.env file.");
     }
 
     let allBusinesses = [];
@@ -1072,16 +981,12 @@ router.get("/businesses", optionalAuthMiddleware, async (req, res) => {
       }
     }
     
-    console.log(`[Businesses API] Fetched ${allBusinesses.length} businesses from Meta API`);
-    
     // Normalize response format
     const businesses = allBusinesses.map(business => ({
       business_id: business.id,
       business_name: business.name || `Business ${business.id}`,
     }));
 
-    console.log(`[Businesses API] Returning ${businesses.length} formatted businesses`);
-    
     res.json({ businesses });
   } catch (error) {
     console.error("Meta /businesses error:", error.response?.data || error.message);
@@ -1129,9 +1034,9 @@ router.get("/businesses", optionalAuthMiddleware, async (req, res) => {
 // ---------------------------------------------------------------------
 router.get("/pages", optionalAuthMiddleware, async (req, res) => {
   try {
-    const accessToken = process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+    const accessToken = ((process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || '').trim();
     if (!accessToken) {
-      throw new Error("Meta Access Token missing. Please configure it in Settings.");
+      throw new Error("Meta Access Token missing. Please configure META_SYSTEM_ACCESS_TOKEN or META_ACCESS_TOKEN in server/.env file.");
     }
 
     const response = await axios.get(
@@ -1142,7 +1047,6 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
         },
       }
     );
-    console.log("response", response.data);
     
     // Handle single object response (not an array)
     let pages = [];
@@ -1268,13 +1172,11 @@ router.get("/pages/:pageId/forms", optionalAuthMiddleware, async (req, res) => {
       limit: 1000,
     };
 
-    console.log(`Fetching forms for page ${pageId} from:`, formsUrl);
     const { data } = await axios.get(formsUrl, { params });
     
     const forms = data.data || [];
 
     res.json({ data: forms });
-    console.log(`Found ${forms.length} forms for page ${pageId}`);
   } catch (err) {
     console.error("Error fetching forms:", err.response?.data || err.message);
     
@@ -1365,16 +1267,12 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
       const now = Date.now();
       if (preloadLeadsCache.data[preloadCacheKey] && preloadLeadsCache.lastFetched[preloadCacheKey] &&
           (now - preloadLeadsCache.lastFetched[preloadCacheKey]) < preloadLeadsCache.ttl) {
-        console.log(`[Forms by Ad] Using pre-loaded leads data for page ${pageId}`);
-        
         const preloadedData = preloadLeadsCache.data[preloadCacheKey];
         const leads = preloadedData.leads || [];
         const forms = preloadedData.forms || [];
         
         // Normalize adId to string for comparison
         const normalizedAdId = String(adId);
-        console.log(`[Forms by Ad] Filtering leads for ad ${adId} (normalized: ${normalizedAdId})`);
-        console.log(`[Forms by Ad] Total pre-loaded leads: ${leads.length}`);
         
         // Filter leads by adId - both sides normalized to strings
         const matchingLeads = leads.filter(lead => {
@@ -1383,11 +1281,8 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
           return leadAdId === normalizedAdId;
         });
         
-        console.log(`[Forms by Ad] Found ${matchingLeads.length} matching leads for ad ${adId}`);
-        
         // Get unique form_ids from matching leads
         const formIds = [...new Set(matchingLeads.map(lead => lead.form_id).filter(Boolean))];
-        console.log(`[Forms by Ad] Unique form IDs from matching leads:`, formIds);
         
         // Map to forms with names from preloaded forms or from lead's form_name
         const formsList = formIds.map(formId => {
@@ -1408,8 +1303,6 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
           };
         });
         
-        console.log(`[Forms by Ad] Found ${formsList.length} forms from pre-loaded data for ad ${adId}:`, formsList);
-        
         // Cache the result for future use
         const cacheKey = `${adId}_${dateFrom}_${dateTo}`;
         formsCache.data[cacheKey] = formsList;
@@ -1424,14 +1317,11 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
     const now = Date.now();
     if (formsCache.data[cacheKey] && formsCache.lastFetched[cacheKey] && 
         (now - formsCache.lastFetched[cacheKey]) < formsCache.ttl) {
-      console.log(`[Forms by Ad] Returning cached forms for ad ${adId}`);
       return res.json({ data: formsCache.data[cacheKey], cached: true });
     }
 
     const accessToken = getSystemToken();
     const credentials = getCredentials();
-    
-    console.log(`[Forms by Ad] Fetching forms for ad ${adId} from ${dateFrom} to ${dateTo}`);
 
     // Step 1: Fetch all accessible pages and their forms
     let pages = [];
@@ -1441,14 +1331,13 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
         { params: { access_token: accessToken, fields: "id", limit: 1000 } }
       );
       pages = (pagesResponse.data.data || []).map(p => p.id);
-      console.log(`[Forms by Ad] Found ${pages.length} pages`);
     } catch (pagesErr) {
       console.error(`[Forms by Ad] Error fetching pages:`, pagesErr.response?.data || pagesErr.message);
       return res.json({ data: [], cached: false });
     }
 
     if (pages.length === 0) {
-      console.log(`[Forms by Ad] No pages found`);
+      
       formsCache.data[cacheKey] = [];
       formsCache.lastFetched[cacheKey] = now;
       return res.json({ data: [], cached: false });
@@ -1492,7 +1381,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
 
     const allFormsArrays = await Promise.all(formPromises);
     allForms.push(...allFormsArrays.flat());
-    console.log(`[Forms by Ad] Found ${allForms.length} total forms across all pages`);
+    
 
     // Step 3: Fetch leads from all forms in the date range
     const startDate = new Date(dateFrom);
@@ -1536,7 +1425,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
           // Note: Meta Leads API may not always return ad_id - we'll check if it exists
           if (lead.ad_id && lead.ad_id === adId) {
             formIdsWithLeads.add(form.id);
-            console.log(`[Forms by Ad] Found matching lead in form ${form.id} with ad_id ${lead.ad_id}`);
+            
           }
         }
       } catch (leadErr) {
@@ -1567,7 +1456,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
     // If no forms found via ad_id matching, try alternative approach:
     // Use Insights API to verify ad has leads, then return all forms from pages that have leads in date range
     if (formIdsWithLeads.size === 0) {
-      console.log(`[Forms by Ad] No leads found with ad_id=${adId}, trying Insights API correlation`);
+     
       
       // Check if ad has leads via Insights API
       let accountId = credentials.adAccountId;
@@ -1596,7 +1485,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
         );
 
         if (!hasLeads) {
-          console.log(`[Forms by Ad] Ad ${adId} has no leads in date range`);
+         
           formsCache.data[cacheKey] = [];
           formsCache.lastFetched[cacheKey] = now;
           return res.json({ data: [], cached: false });
@@ -1636,7 +1525,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
     }
 
     if (formIdsWithLeads.size === 0) {
-      console.log(`[Forms by Ad] No forms found with leads attributed to ad ${adId}`);
+     
       formsCache.data[cacheKey] = [];
       formsCache.lastFetched[cacheKey] = now;
       return res.json({ data: [], cached: false });
@@ -1664,7 +1553,7 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
       }
     }
 
-    console.log(`[Forms by Ad] Returning ${formsList.length} forms for ad ${adId}`);
+   
 
     // Cache the result
     formsCache.data[cacheKey] = formsList;
@@ -1855,7 +1744,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
     };
     
     // Fetch current period insights
-    console.log(`[Page Insights] Fetching insights for page ${pageId} from ${since} to ${until}`);
+   
     const { data } = await axios.get(insightsUrl, { params });
     
     // Meta API returns insights as an array of metric objects
@@ -1874,18 +1763,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
     const prevSince = prevSinceDate.toISOString().split('T')[0];
     const prevUntil = prevUntilDate.toISOString().split('T')[0];
 
-    console.log(`[Page Insights] Totals:`, {
-      total_follows: processedData.total_follows,
-      total_unfollows: processedData.total_unfollows,
-      total_reached: processedData.total_reached,
-      total_views: processedData.total_views,
-      total_interactions: processedData.total_interactions,
-      current_followers: processedData.current_followers,
-      current_reach: processedData.current_reach
-    });
-    
-    console.log(`[Page Insights] Processed insights: ${processedData.followers.length} follower data points, ${processedData.reach.length} reach data points`);
-    
+   
     res.json({ data: processedData });
   } catch (err) {
     console.error("Error fetching page insights:", err.response?.data || err.message);
@@ -1946,7 +1824,7 @@ router.get("/leads/preload", optionalAuthMiddleware, async (req, res) => {
       });
     }
 
-    console.log(`[Pre-load] Pre-loading leads for page ${pageId} from ${start} to ${end}`);
+  
 
     // Convert date range to Date objects
     const startDate = new Date(start + 'T00:00:00');
@@ -1955,7 +1833,7 @@ router.get("/leads/preload", optionalAuthMiddleware, async (req, res) => {
     // Fetch leads from Meta API using the scheduler function
     const allLeads = await fetchLeadsFromMeta(pageId, startDate, endDate);
     
-    console.log(`[Pre-load] Fetched ${allLeads.length} leads from Meta API`);
+    
 
     // Save leads to database (only those with ad_id and campaign_id)
     let savedCount = 0;
@@ -1963,9 +1841,9 @@ router.get("/leads/preload", optionalAuthMiddleware, async (req, res) => {
       try {
         const result = await saveLeads(allLeads);
         savedCount = result.inserted + result.updated;
-        console.log(`[Pre-load] Saved ${result.inserted} new leads, updated ${result.updated} existing leads to database`);
+        
       } catch (dbError) {
-        console.error('[Pre-load] Error saving leads to database:', dbError);
+        
         return res.status(500).json({
           error: "Failed to save leads to database",
           details: dbError.message
@@ -2045,27 +1923,19 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
     const campaignIds = parseIds(campaignId);
     const adIds = parseIds(adId);
     
-    console.log('[Leads DB] Fetching leads from database with filters:', {
-      campaignIds,
-      adIds,
-      formId,
-      pageId,
-      startDate,
-      endDate
-    });
+    
     
     // Fetch leads from database
     const leads = await getLeadsByCampaignAndAd(campaignIds, adIds, startDate, endDate, formId, pageId);
     
-    console.log(`[Leads DB] Found ${leads.length} leads in database`);
-    
+   
     // Enrich ad names from Meta API only for leads missing ad_name (legacy data)
     const adNameCache = {};
     const leadsNeedingAdEnrichment = leads.filter(lead => lead.ad_id && !lead.ad_name);
     const uniqueAdIds = [...new Set(leadsNeedingAdEnrichment.map(lead => lead.ad_id).filter(Boolean))];
     
     if (uniqueAdIds.length > 0) {
-      console.log(`[Leads DB] Enriching ${uniqueAdIds.length} ad names from Meta API (for leads missing ad_name in DB)`);
+      
       const accessToken = getSystemToken();
       
       // Fetch ad names in parallel (with rate limiting - batch of 10 at a time)
@@ -2094,7 +1964,7 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
         }
       }
     } else {
-      console.log(`[Leads DB] All leads have ad_name in database, no API enrichment needed`);
+      
     }
     
     // Enrich form names from Meta API for all leads (form_name is not stored in DB)
@@ -2103,7 +1973,7 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
     const uniqueFormIds = [...new Set(leadsNeedingFormEnrichment.map(lead => lead.form_id).filter(Boolean))];
     
     if (uniqueFormIds.length > 0) {
-      console.log(`[Leads DB] Enriching ${uniqueFormIds.length} form names from Meta API`);
+      
       const accessToken = getSystemToken();
       
       // Fetch form names in parallel (with rate limiting - batch of 10 at a time)
@@ -2132,7 +2002,7 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
         }
       }
     } else {
-      console.log(`[Leads DB] No form IDs found in leads, skipping form name enrichment`);
+      
     }
     
     // Format response to match frontend expectations
@@ -2182,14 +2052,7 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
       };
     });
     
-    if (Object.keys(adNameCache).length > 0) {
-      console.log(`[Leads DB] Enriched ${Object.keys(adNameCache).length} ad names from API (legacy data)`);
-    }
-    
-    if (Object.keys(formNameCache).length > 0) {
-      console.log(`[Leads DB] Enriched ${Object.keys(formNameCache).length} form names from API`);
-    }
-    
+   
     res.json({
       data: formattedLeads,
         meta: {
@@ -2303,18 +2166,16 @@ async function handleBackfillRequest(req, res) {
     const startDateStr = startDateObj.toISOString().split('T')[0];
     const endDateStr = endDateObj.toISOString().split('T')[0];
 
-    console.log(`[Backfill] Starting manual backfill for page ${pageId} from ${startDateStr} to ${endDateStr}`);
-
+    
     // Fetch leads from Meta API
     const allLeads = await fetchLeadsFromMeta(pageId, startDateObj, endDateObj);
-    console.log(`[Backfill] Fetched ${allLeads.length} leads from Meta API`);
-
+    
     // Save leads to database
     let result = { inserted: 0, updated: 0 };
     if (allLeads.length > 0) {
       try {
         result = await saveLeads(allLeads);
-        console.log(`[Backfill] Saved ${result.inserted} new leads, updated ${result.updated} existing leads to database`);
+        
       } catch (dbError) {
         console.error('[Backfill] Error saving leads to database:', dbError);
         return res.status(500).json({
@@ -2421,7 +2282,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
       dateFrom = startDate.toISOString().slice(0, 10);
       dateTo = endDate.toISOString().slice(0, 10);
       
-      console.log(`[Leads API] Using date range: ${dateFrom} to ${dateTo}`);
+     
     }
 
     // Check for pre-loaded data first (if pageId is provided and matches cache)
@@ -2430,7 +2291,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
       const now = Date.now();
       if (preloadLeadsCache.data[preloadCacheKey] && preloadLeadsCache.lastFetched[preloadCacheKey] &&
           (now - preloadLeadsCache.lastFetched[preloadCacheKey]) < preloadLeadsCache.ttl) {
-        console.log(`[Leads API] Using pre-loaded leads data for page ${pageId}`);
+        
         
         const preloadedData = preloadLeadsCache.data[preloadCacheKey];
         let filteredLeads = [...(preloadedData.leads || [])];
@@ -2542,7 +2403,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         // Apply limit if specified
         const limitedLeads = limit ? enrichedLeads.slice(0, parseInt(limit, 10)) : enrichedLeads;
         
-        console.log(`[Leads API] Returning ${limitedLeads.length} filtered leads from pre-loaded data`);
+      
         
         return res.json({
           data: limitedLeads,
@@ -2633,7 +2494,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         );
         
         if (!hasLeads) {
-          console.log(`[Leads API] Ad ${adId} has no leads in date range`);
+        
           return res.json({ data: [], meta: { total_leads: 0, message: "Ad has no leads in date range" } });
         }
         
@@ -2678,9 +2539,9 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         
         const allFormsArrays = await Promise.all(formPromises);
         formsToFetch = allFormsArrays.flat();
-        console.log(`[Leads API] Found ${formsToFetch.length} forms for ad ${adId}`);
+       
       } catch (err) {
-        console.error(`[Leads API] Error fetching forms for ad:`, err.message);
+       
         formsToFetch = [];
       }
     } else if (pageId) {
@@ -2697,7 +2558,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
           name: f.name,
           page_id: f.page_id || pageId 
         }));
-        console.log(`[Leads API] Found ${formsToFetch.length} forms for page ${pageId}`);
+        
       } catch (err) {
         const errorData = err.response?.data?.error;
         const errorCode = errorData?.code;
@@ -2760,7 +2621,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         });
         
         const leads = response.data.data || [];
-        console.log(`[Leads API] Found ${leads.length} leads in form ${formInfo.form_id}`);
+        
 
         // Process each lead
         for (const lead of leads) {
@@ -2983,7 +2844,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         return leadDate >= startDate && leadDate <= endDate;
       });
       
-      console.log(`[Leads API] Filtered to ${filteredLeads.length} leads in date range`);
+      
     }
 
     // Step 4: Apply additional filters
@@ -3001,9 +2862,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
       });
       
       // If no leads match after adId filter, the ad might not have attributed leads
-      if (filteredLeads.length === 0) {
-        console.log(`[Leads API] No leads found with ad_id=${adId}`);
-      }
+     
     }
     
     // Note: pageId filtering is already handled in Step 1 (we only fetch forms from that page)
@@ -3148,10 +3007,10 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
       dateFrom = startDate.toISOString().slice(0, 10);
       dateTo = endDate.toISOString().slice(0, 10);
       
-      console.log(`[Leads-With-Context] No explicit date range provided, using last 30 days (${dateFrom} to ${dateTo})`);
+      
     }
 
-    console.log(`[Leads-With-Context] Fetching leads for form ${form_id} from ${dateFrom} to ${dateTo}`);
+   
 
     // STEP 1: Fetch leads from Meta Leads API
     // This returns only: created_time, id, field_data
@@ -3185,8 +3044,7 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
         const responseData = leadsResponse.data;
         const leads = responseData.data || [];
         allRawLeads = allRawLeads.concat(leads);
-        console.log(`[Leads-With-Context] Fetched page ${pageCount + 1}: ${leads.length} leads (total so far: ${allRawLeads.length})`);
-        
+       
         // Check for next page
         if (responseData.paging && responseData.paging.next) {
           nextUrl = responseData.paging.next;
@@ -3202,7 +3060,6 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
       } while (nextUrl && pageCount < maxPages);
       
       const rawLeads = allRawLeads;
-      console.log(`[Leads-With-Context] Fetched ${rawLeads.length} total raw leads from Meta API across ${pageCount + 1} page(s)`);
       
       // Process and filter leads by date
       const startDate = new Date(dateFrom);
@@ -3289,7 +3146,7 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
       } else {
         leadsData = processedLeads; // Return all leads if no limit specified
       }
-      console.log(`[Leads-With-Context] Processed ${leadsData.length} leads within date range`);
+      
     } catch (leadsError) {
       console.error(`[Leads-With-Context] Error fetching leads:`, leadsError.response?.data || leadsError.message);
       // Continue even if leads fetch fails - return empty leads with insights context
@@ -3299,8 +3156,7 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
     // STEP 2: Fetch insights from Meta Insights API
     // This provides aggregated metrics at ad/campaign level
     // Used for CONTEXT only, not per-lead attribution
-    console.log(`[Leads-With-Context] Fetching insights context...`);
-    
+   
     let insightsContext = {
       campaign_name: null,
       ad_name: null,
@@ -3357,7 +3213,7 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
       const insightsResponse = await axios.get(insightsUrl, { params });
       const insightsRows = insightsResponse.data.data || [];
       
-      console.log(`[Leads-With-Context] Fetched ${insightsRows.length} insights rows`);
+      
 
       // Aggregate insights to extract context
       let totalLeads = 0;
@@ -3426,10 +3282,9 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
                                   null;
       }
 
-      console.log(`[Leads-With-Context] Insights context: ${insightsContext.campaign_name || 'No campaign'}, ${totalLeads} leads, ₹${totalSpend} spend`);
+      
     } catch (insightsError) {
-      console.error(`[Leads-With-Context] Error fetching insights:`, insightsError.response?.data || insightsError.message);
-      // Continue even if insights fetch fails - return leads without context
+     
     }
 
     // STEP 3: Return leads with contextual metadata
@@ -3482,7 +3337,7 @@ router.post("/ads/filtered", optionalAuthMiddleware, async (req, res) => {
     let allAds = [];
 
     if (adsCache.data.length > 0 && adsCache.lastFetched && (now - adsCache.lastFetched) < adsCache.ttl) {
-      console.log("Using cached ads for filtering");
+    
       allAds = adsCache.data;
     } else {
       // Fetch fresh data

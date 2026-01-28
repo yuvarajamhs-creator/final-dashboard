@@ -22,7 +22,7 @@ export default function Layout({ children }) {
   };
 
   // Check if current route is a settings route
-  const isSettingsRoute = location.pathname === '/meta-settings' || location.pathname === '/team-management';
+  const isSettingsRoute = location.pathname === '/team-management';
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -183,19 +183,6 @@ export default function Layout({ children }) {
               <ul className="settings-submenu animate-submenu">
                 <li>
                   <NavLink
-                    to="/meta-settings"
-                    className="nav-link sidebar-link submenu-link d-flex align-items-center"
-                    onClick={() => {
-                      setOpenSettingsMenu(false);
-                      if (window.innerWidth < 992) setSidebarOpen(false);
-                    }}
-                  >
-                    <span className="icon-wrapper me-3">🔐</span>
-                    <span>Meta Settings</span>
-                  </NavLink>
-                </li>
-                <li>
-                  <NavLink
                     to="/team-management"
                     className="nav-link sidebar-link submenu-link d-flex align-items-center"
                     onClick={() => {
@@ -254,8 +241,8 @@ export default function Layout({ children }) {
         
         /* Layout Structure */
         .app-shell { height: 100vh; display: flex; background-color: var(--bg, #f3f4f6); transition: background-color 0.3s ease; }
-        .main-area { flex: 1; display: flex; flex-direction: column; min-height: 0; background-color: var(--bg, #f3f4f6); transition: background-color 0.3s ease; }
-        .layout-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2rem; background-color: var(--bg, #f5f7fa); color: var(--text, #1a1d1f); transition: background-color 0.3s ease, color 0.3s ease; }
+        .main-area { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; width: 100%; overflow-x: hidden; background-color: var(--bg, #f3f4f6); transition: background-color 0.3s ease; }
+        .layout-content { flex: 1; overflow-y: auto; overflow-x: auto; padding: 2rem; width: 100%; max-width: 100%; box-sizing: border-box; background-color: var(--bg, #f5f7fa); color: var(--text, #1a1d1f); transition: background-color 0.3s ease, color 0.3s ease; }
 
         /* Sidebar Styling */
         .sidebar {
@@ -305,15 +292,15 @@ export default function Layout({ children }) {
         }
 
         .sidebar-link:hover {
-          background-color: rgba(255, 255, 255, 0.08);
-          color: #fff !important;
+          background-color: rgba(255, 255, 255, 0.9);
+          color: #000 !important;
           padding-left: 20px;
         }
 
         .nav-link.active, .active-parent {
           background: linear-gradient(90deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.1));
           border: 1px solid rgba(59, 130, 246, 0.4);
-          color: #fff !important;
+          color: #000 !important;
           box-shadow: 0 0 15px rgba(59, 130, 246, 0.1);
         }
         
@@ -322,6 +309,7 @@ export default function Layout({ children }) {
              background: linear-gradient(90deg, rgba(139, 92, 246, 0.2), rgba(217, 70, 239, 0.1));
              border-color: rgba(168, 85, 247, 0.4);
              box-shadow: 0 0 15px rgba(168, 85, 247, 0.2);
+             color: #000 !important;
         }
 
         .icon-wrapper {
@@ -357,13 +345,15 @@ export default function Layout({ children }) {
         }
         
         .settings-submenu .sidebar-link:hover {
-          background-color: rgba(255, 255, 255, 0.1);
+          background-color: rgba(255, 255, 255, 0.9);
+          color: #000 !important;
           padding-left: 52px;
         }
         
         .settings-submenu .sidebar-link.active {
           background: linear-gradient(90deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.1));
           border: 1px solid rgba(59, 130, 246, 0.4);
+          color: #000 !important;
         }
         
         .dropdown-arrow {
