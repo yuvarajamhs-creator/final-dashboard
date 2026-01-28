@@ -11,7 +11,6 @@ export default function ManagePermissions() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
-  const [targetUser, setTargetUser] = useState(null);
   const [permissions, setPermissions] = useState({
     dashboard: false,
     dashboard_admin_leads: false,
@@ -90,12 +89,8 @@ export default function ManagePermissions() {
           return;
         }
 
-        // Fetch target user info (for display)
-        const userRes = await fetch(`${API_BASE}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        // Note: In a real app, you'd have a GET /api/users/:userId endpoint
-        // For now, we'll use the userId from params
+        // Note: In a real app, you'd fetch target user via GET /api/users/:userId
+        // For now we use userId from params for display
 
       } catch (err) {
         console.error('Error fetching data:', err);
@@ -197,7 +192,7 @@ export default function ManagePermissions() {
       });
 
       if (res.ok) {
-        const data = await res.json();
+        await res.json();
         alert('Permissions saved successfully!');
         // Optionally navigate back
         // navigate('/team-management');

@@ -2644,43 +2644,6 @@ export default function AdsDashboardBootstrap() {
     }
   };
 
-  // Helper to get campaign context for a lead (for download)
-  const getCampaignContextForDownload = (context) => {
-    if (context?.campaign_name) {
-      return context.campaign_name;
-    }
-    if (selectedCampaigns.length === 0 || 
-        (campaigns.length > 0 && selectedCampaigns.length === campaigns.length)) {
-      return "Multiple / Not Attributed";
-    }
-    if (selectedCampaigns.length === 1) {
-      const campaign = campaigns.find(c => c.id === selectedCampaigns[0] || c.id?.toString() === selectedCampaigns[0]?.toString());
-      if (campaign && campaign.name) {
-        return campaign.name;
-      }
-      return "Multiple / Not Attributed";
-    }
-    return `${selectedCampaigns.length} Campaigns Selected`;
-  };
-
-  // Helper to get ad context for a lead (for download)
-  const getAdContextForDownload = (context) => {
-    if (context?.ad_name) {
-      return context.ad_name;
-    }
-    if (selectedAds.length === 0 || (ads.length > 0 && selectedAds.length === ads.length)) {
-      return "Multiple / Not Attributed";
-    }
-    if (selectedAds.length === 1) {
-      const ad = ads.find(a => a.id === selectedAds[0] || a.id?.toString() === selectedAds[0]?.toString());
-      if (ad && ad.name) {
-        return ad.name;
-      }
-      return "Multiple / Not Attributed";
-    }
-    return `${selectedAds.length} Ads Selected`;
-  };
-
   // Handle CSV download
   const handleDownloadCSV = async () => {
     if (leadDetails.length === 0) {
@@ -3012,113 +2975,6 @@ export default function AdsDashboardBootstrap() {
     setShowLeadsDateRangeFilter(false);
   };
 
-  // Helper to get display text for leads time range
-  const getLeadsTimeRangeDisplay = () => {
-    if (leadsDateRangeFilterValue) {
-      if (leadsDateRangeFilterValue.range_type === 'custom') {
-        const start = new Date(leadsDateRangeFilterValue.start_date);
-        const end = new Date(leadsDateRangeFilterValue.end_date);
-        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        return `${startDisplay} - ${endDisplay}`;
-      }
-      const presetLabels = {
-        'today': 'Today',
-        'yesterday': 'Yesterday',
-        'today_yesterday': 'Today & Yesterday',
-        'last_7_days': 'Last 7 days',
-        'last_14_days': 'Last 14 days',
-        'last_28_days': 'Last 28 days',
-        'last_30_days': 'Last 30 days',
-        'this_week': 'This week',
-        'last_week': 'Last week',
-        'this_month': 'This month',
-        'last_month': 'Last month',
-        'maximum': 'Maximum'
-      };
-      return presetLabels[leadsDateRangeFilterValue.range_type] || leadsTimeRange;
-    }
-    const presetLabels = {
-      'last_7_days': 'Last 7 days',
-      'last_14_days': 'Last 14 days',
-      'last_30_days': 'Last 30 days',
-      'last_90_days': 'Last 90 days',
-      'this_month': 'This month',
-      'last_month': 'Last month'
-    };
-    return presetLabels[leadsTimeRange] || 'Last 7 days';
-  };
-
-  // Handle time range filter apply for admin view
-  const handleAdminViewDateRangeApply = (payload) => {
-    
-    // Validate dates before setting
-    if (!payload.start_date || !payload.end_date) {
-      console.error('[AdminViewDateRangeFilter] Invalid dates received:', payload);
-      alert('Invalid date range selected. Please try again.');
-      return;
-    }
-    
-    // Validate date format (YYYY-MM-DD)
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
-      console.error('[AdminViewDateRangeFilter] Invalid date format:', {
-        start_date: payload.start_date,
-        end_date: payload.end_date
-      });
-      alert('Invalid date format. Please try again.');
-      return;
-    }
-    
-    setAdminViewDateRangeFilterValue(payload);
-    
-    // Update admin view date filters - useEffect will automatically reload leads
-    setAdminViewDateFilters({
-      startDate: payload.start_date,
-      endDate: payload.end_date
-    });
-    
-    // Close the modal
-    setShowAdminViewDateRangeFilter(false);
-  };
-
-  // Helper to get display text for admin view time range
-  const getAdminViewTimeRangeDisplay = () => {
-    if (adminViewDateRangeFilterValue) {
-      if (adminViewDateRangeFilterValue.range_type === 'custom') {
-        const start = new Date(adminViewDateRangeFilterValue.start_date);
-        const end = new Date(adminViewDateRangeFilterValue.end_date);
-        const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        return `${startDisplay} - ${endDisplay}`;
-      }
-      const presetLabels = {
-        'today': 'Today',
-        'yesterday': 'Yesterday',
-        'today_yesterday': 'Today & Yesterday',
-        'last_7_days': 'Last 7 days',
-        'last_14_days': 'Last 14 days',
-        'last_28_days': 'Last 28 days',
-        'last_30_days': 'Last 30 days',
-        'this_week': 'This week',
-        'last_week': 'Last week',
-        'this_month': 'This month',
-        'last_month': 'Last month',
-        'maximum': 'Maximum'
-      };
-      return presetLabels[adminViewDateRangeFilterValue.range_type] || 'Last 7 days';
-    }
-    // Default display from current date filters
-    if (adminViewDateFilters.startDate && adminViewDateFilters.endDate) {
-      const start = new Date(adminViewDateFilters.startDate);
-      const end = new Date(adminViewDateFilters.endDate);
-      const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      return `${startDisplay} - ${endDisplay}`;
-    }
-    return 'Last 7 days';
-  };
-
   // Handle time range filter apply for filtered leads table
   const handleFilteredLeadsDateRangeApply = (payload) => {
     
@@ -3413,45 +3269,6 @@ export default function AdsDashboardBootstrap() {
     return selectedDateRange.includes('Week') ? selectedDateRange : `${dateFilters.startDate ? 'Custom' : 'Select Date'}: ${selectedDateRange}`;
   };
 
-  // Legacy date filter handlers (keeping for backward compatibility)
-  const handleDateFilterChange = (e) => {
-    const { name, value } = e.target;
-    setDateFilters(prev => ({ ...prev, [name]: value }));
-  };
-
-  const applyDatePreset = (type) => {
-    const today = new Date();
-    const day = today.getDay();
-    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-    const monday = new Date(today.setDate(diff));
-    const sunday = new Date(today.setDate(diff + 6));
-
-    let start = new Date(monday);
-    let end = new Date(sunday);
-
-    if (type === 'last_week') {
-      start.setDate(start.getDate() - 7);
-      end.setDate(end.getDate() - 7);
-      setSelectedDateRange('Last Week');
-    } else if (type === 'next_week') {
-      start.setDate(start.getDate() + 7);
-      end.setDate(end.getDate() + 7);
-      setSelectedDateRange('Next Week');
-    } else {
-      setSelectedDateRange('This Week');
-    }
-
-    setDateFilters({
-      startDate: start.toISOString().split('T')[0],
-      endDate: end.toISOString().split('T')[0]
-    });
-    
-    // Calculate days from date range
-    const diffTime = Math.abs(end - start);
-    const calculatedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-    setDays(calculatedDays);
-  };
-
   // Platform options
   const platformOptions = [
     { id: 'facebook', name: 'Facebook' },
@@ -3471,7 +3288,7 @@ export default function AdsDashboardBootstrap() {
       // For now, show the selected page's followers
       // If multiple pages/platforms are needed, we can aggregate later
       return [
-        { platform: selectedPage && pages.find(p => p.id === selectedPage)?.name || 'Facebook', followers: pageInsightsData.current_followers }
+        { platform: (selectedPage && pages.find(p => p.id === selectedPage)?.name) || 'Facebook', followers: pageInsightsData.current_followers }
       ];
     }
     // Fallback to mock data
@@ -3521,7 +3338,7 @@ export default function AdsDashboardBootstrap() {
   const accountReachByFollowersData = useMemo(() => {
     // If we have real page insights data, use it
     if (pageInsightsData && pageInsightsData.current_followers > 0 && pageInsightsData.current_reach > 0) {
-      const pageName = selectedPage && pages.find(p => p.id === selectedPage)?.name || 'Facebook';
+      const pageName = (selectedPage && pages.find(p => p.id === selectedPage)?.name) || 'Facebook';
       return [
         { platform: pageName, followers: pageInsightsData.current_followers, reach: pageInsightsData.current_reach }
       ];
