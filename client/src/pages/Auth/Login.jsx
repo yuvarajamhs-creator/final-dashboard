@@ -75,7 +75,12 @@ export default function Login() {
 
       navigate("/");
     } catch (err) {
-      setError("Network error — please try again");
+      const base = process.env.REACT_APP_API_BASE || "";
+      setError(
+        base
+          ? "Network error — please try again. Check that the API server is running and reachable."
+          : "Network error — API URL is not set. For production, set REACT_APP_API_BASE to your backend URL and redeploy."
+      );
     } finally {
       setLoading(false);
     }
