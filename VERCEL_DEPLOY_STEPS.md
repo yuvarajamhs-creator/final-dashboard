@@ -22,14 +22,23 @@ Remove-Item ".git\index.lock" -Force -ErrorAction SilentlyContinue
 ```
 
 **3. Stage, commit, and push to GitHub**  
+You must **stage** files before committing. If you run `git commit` without `git add` first, Git will say **"nothing to commit, working tree clean"** — that means no files were staged.
+
 ```powershell
-git add package.json vercel.json server/package.json server/vercel.json client/.env.production VERCEL_DEPLOY_STEPS.md
-git commit -m "Fix Vercel build: DISABLE_ESLINT_PLUGIN and .env.production so build passes"
+# Stage the files you changed (or use git add -A for all changes)
+git add package.json vercel.json server/package.json server/vercel.json client/.env.production client/src/pages/BestPerformingAd.jsx PRODUCTION_API_SETUP.md VERCEL_DEPLOY_STEPS.md
+
+# Then commit
+git commit -m "Fix BestPerformingAd Bar import; REACT_APP_API_BASE; production API doc"
+
+# Then push
 git push origin main
 ```
 
+To stage **everything** that changed: `git add -A` then `git commit -m "Your message"` then `git push origin main`.
+
 **4. Deploy with Vercel CLI**  
-From the same project root:
+From the same project root. Use **`vercel`** (correct spelling — not "versel").
 
 - **Preview deployment:**  
   ```powershell
