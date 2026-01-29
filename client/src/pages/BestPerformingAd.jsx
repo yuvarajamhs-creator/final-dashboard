@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import './BestPerformingAd.css';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    Line, ComposedChart, Legend,
+    Bar, Line, ComposedChart, Legend,
     FunnelChart, Funnel, LabelList
 } from 'recharts';
 

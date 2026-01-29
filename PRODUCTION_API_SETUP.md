@@ -34,6 +34,8 @@ Set any env vars your server needs (e.g. Supabase URL/key, JWT secret) in that h
 
 Create React App bakes `REACT_APP_*` in at **build time**, so you must **redeploy** the frontend after adding this variable (new deployment from Git or **Redeploy** in Vercel).
 
+**Alternative:** Edit `client/.env.production` and set `REACT_APP_API_BASE=https://your-backend-url.com` (replace the placeholder). Commit, push, and redeploy so the build picks it up.
+
 ---
 
 ## 3. CORS on the backend
