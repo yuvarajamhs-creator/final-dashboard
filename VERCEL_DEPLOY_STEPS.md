@@ -1,58 +1,47 @@
-# Vercel build fix – commit and deploy
+# Vercel build fix – commit, push, and deploy
 
 ## What was fixed
 
-ESLint errors that caused **"Treating warnings as errors because process.env.CI = true"** on Vercel:
-
-1. **App.js** – Removed unused imports (`Home`, `Layout`). Renamed `AdsDashboard_OptionA` → `AdsDashboardOptionA` (PascalCase for JSX).
-2. **DateRangeFilter.jsx** – Removed unused `istDate`; fixed `isSelectingCompare` destructuring.
-3. **Sidebar.jsx** – Prefixed unused `handleLogout` with `_` and added `void` so it’s not reported as unused.
-4. **AIInsights.jsx** – Prefixed unused `selectedPlatform` / `setSelectedPlatform` with `_`.
-5. **BestPerformingAd.jsx** – Removed unused recharts imports (`AreaChart`, `Area`, `BarChart`, `Bar`). Prefixed unused `selectedAdSet` with `_`.
-6. **BestPerformingReel.jsx** – Removed unused `Area` import.
-7. **Dashboards.jsx** – Added file-level `/* eslint-disable no-unused-vars */` and `/* eslint-disable react-hooks/exhaustive-deps */` so existing unused vars and hook dependency warnings don’t fail the build.
+- **ESLint:** Unused vars, PascalCase (AdsDashboardOptionA), exhaustive-deps in App.js, DateRangeFilter, Sidebar, AIInsights, BestPerformingAd, BestPerformingReel, Dashboards.jsx.
+- **Build:** Root `package.json` and **server** `package.json` both have a `build` script so Vercel works whether **Root Directory** is `.` (repo root) or `server`.
+- **Missing script: build:** Added `build` script in `server/package.json` and `server/vercel.json` so when Vercel uses `server` as root, it builds the client and serves from `client/build`.
 
 ---
 
-## 1. Commit and push (run locally)
+## Run these steps in order (PowerShell outside Cursor)
 
-In **PowerShell outside Cursor** (e.g. right‑click project folder → Open in Terminal):
+**1. Open Terminal**  
+Right‑click the project folder → **Open in Terminal** (or open PowerShell and `cd` to the project).
 
+**2. Remove stale Git lock (if needed)**  
 ```powershell
 cd "d:\React\App backup\3.Backup\Live Backup\Marketing-Dashboard-mainv-28-01-26"
-
-# Remove stale lock if Git complains
 Remove-Item ".git\index.lock" -Force -ErrorAction SilentlyContinue
+```
 
-# Stage and commit
-git add client/src/App.js client/src/components/DateRangeFilter.jsx client/src/components/Sidebar.jsx client/src/pages/AIInsights.jsx client/src/pages/BestPerformingAd.jsx client/src/pages/BestPerformingReel.jsx client/src/pages/Dashboards.jsx
-git commit -m "Fix ESLint errors for Vercel CI build: unused vars, PascalCase, exhaustive-deps"
-
-# Push to GitHub
+**3. Stage, commit, and push to GitHub**  
+```powershell
+git add package.json vercel.json server/package.json server/vercel.json client/src/App.js client/src/components/DateRangeFilter.jsx client/src/components/Sidebar.jsx client/src/pages/AIInsights.jsx client/src/pages/BestPerformingAd.jsx client/src/pages/BestPerformingReel.jsx client/src/pages/Dashboards.jsx VERCEL_DEPLOY_STEPS.md
+git commit -m "Fix Vercel Missing script build: add build in server/package.json and server/vercel.json"
 git push origin main
 ```
 
----
+**4. Deploy with Vercel CLI**  
+From the same project root:
 
-## 2. Next deployment steps
-
-- **If the project is connected to Vercel (Git integration):**  
-  Pushing to `main` will trigger a new deployment. Check the deployment at:  
-  https://vercel.com/yuvis-projects-06eb1a50/final-dashboard-gxau
-
-- **If you deploy with the Vercel CLI:**  
-  From the project root, run:
+- **Preview deployment:**  
   ```powershell
   vercel
   ```
-  For production:
+- **Production deployment:**  
   ```powershell
   vercel --prod
   ```
 
-- **Vercel project settings:**  
-  - **Root Directory:** leave as **`.`** (repo root) so Vercel uses the root `package.json` and `vercel.json`.  
-  - **Build Command:** `npm run build` (default).  
-  - **Output Directory:** `client/build` (from `vercel.json`).
+If the project is connected to Vercel via Git, pushing to `main` may already trigger a deployment; check:  
+https://vercel.com/yuvis-projects-06eb1a50/final-dashboard-gxau
 
-After pushing, the next Vercel build should pass and your preview/production URL will serve the updated app.
+**5. Vercel project settings**  
+- **Root Directory:** Either `.` (repo root) or `server` — both work now.  
+- **Build Command:** `npm run build`  
+- **Output Directory:** `client/build` (or `../client/build` when root is `server`, from `server/vercel.json`)
