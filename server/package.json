@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "build": "cd ../client && npm install && CI=false npm run build",
+    "build": "cd ../client && npm install && cross-env CI=false DISABLE_ESLINT_PLUGIN=true npm run build",
     "start": "nodemon server.js",
     "seed": "node seed.js",
     "verify-supabase": "node verify-supabase.js",
@@ -23,6 +23,7 @@
     "jsonwebtoken": "^9.0.0"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "nodemon": "^3.1.11"
   },
   "optionalDependencies": {

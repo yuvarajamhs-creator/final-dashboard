@@ -12,11 +12,11 @@ export default function Layout({ children }) {
   const [openSettingsMenu, setOpenSettingsMenu] = useState(false);
   const settingsMenuRef = useRef(null);
 
-  const _handleLogout = () => {
+  // eslint-disable-next-line no-unused-vars -- used by logout UI when wired
+  const handleLogout = () => {
     auth.logout();
     navigate("/login");
   };
-  void _handleLogout; // reserved for logout UI
 
   const toggleSettingsMenu = () => {
     setOpenSettingsMenu(!openSettingsMenu);
