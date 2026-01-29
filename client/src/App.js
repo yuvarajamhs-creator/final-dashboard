@@ -2,15 +2,13 @@ import React from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Login from "./pages/Auth/Login";
 import Signup from "./pages/Auth/Signup";
-import Home from "./pages/Home";
 import Task from "./pages/Operations/Task";
 import Report from "./pages/Reports/Report";
 import ProtectedRoute from "./components/ProtectedRoute";
-import Layout from "./components/Layout";
 import Sidebar from "./components/Sidebar"
 import "./App.css";
 import "bootstrap/dist/css/bootstrap.min.css";
-import AdsDashboard_OptionA from "./pages/Dashboards";
+import AdsDashboardOptionA from "./pages/Dashboards";
 import BestPerformingAd from "./pages/BestPerformingAd";
 import BestPerformingReel from "./pages/BestPerformingReel";
 import Plan from "./pages/Plan";
@@ -33,7 +31,7 @@ export default function App() {
             <ProtectedRoute>
               <Sidebar>
                 <Routes>
-                  <Route path="/" element={<AdsDashboard_OptionA />} />
+                  <Route path="/" element={<AdsDashboardOptionA />} />
                   <Route path="/best-ad" element={<BestPerformingAd />} />
                   <Route path="/best-reel" element={<BestPerformingReel />} />
                   <Route path="/plan" element={<Plan />} />

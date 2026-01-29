@@ -44,7 +44,6 @@ const parseDateIST = (dateString) => {
   // Create date in local timezone, then adjust for IST
   const localDate = new Date(year, month - 1, day);
   // Get IST offset and adjust
-  const istDate = new Date(localDate.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   return new Date(year, month - 1, day);
 };
 
@@ -183,7 +182,7 @@ const DateRangeFilter = ({ isOpen, onClose, onApply, initialValue }) => {
   const [compareEndDate, setCompareEndDate] = useState(initialValue?.compare?.end_date ? parseDateIST(initialValue.compare.end_date) : null);
   const [tempStartDate, setTempStartDate] = useState(null); // For calendar selection
   const [tempCompareStartDate, setTempCompareStartDate] = useState(null); // For compare calendar selection
-  const [isSelectingCompare, setIsSelectingCompare] = useState(false); // Track if selecting compare dates
+  const [, setIsSelectingCompare] = useState(false); // Track if selecting compare dates
   const [calendarMonth1, setCalendarMonth1] = useState(() => {
     const today = getISTDate();
     return { year: today.getFullYear(), month: today.getMonth() };

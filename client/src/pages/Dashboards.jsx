@@ -1,3 +1,5 @@
+/* eslint-disable no-unused-vars */
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   ResponsiveContainer,

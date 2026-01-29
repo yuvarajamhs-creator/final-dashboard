@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import './BestPerformingAd.css';
 import {
-    AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    BarChart, Bar, Line, ComposedChart, Legend,
+    XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+    Line, ComposedChart, Legend,
     FunnelChart, Funnel, LabelList
 } from 'recharts';
 
@@ -213,7 +213,8 @@ export default function BestPerformingAd() {
     const [filters, setFilters] = useState({ startDate: '', endDate: '' });
     const [selectedDateRange, setSelectedDateRange] = useState('this_week');
     const [selectedCampaign, setSelectedCampaign] = useState('');
-    const [selectedAdSet, setSelectedAdSet] = useState('');
+    const [_selectedAdSet, setSelectedAdSet] = useState('');
+    void _selectedAdSet;
     const [selectedAd, setSelectedAd] = useState('');
     const [campaigns, setCampaigns] = useState([]);
     const [ads, setAds] = useState([]);

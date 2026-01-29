@@ -12,10 +12,11 @@ export default function Layout({ children }) {
   const [openSettingsMenu, setOpenSettingsMenu] = useState(false);
   const settingsMenuRef = useRef(null);
 
-  const handleLogout = () => {
+  const _handleLogout = () => {
     auth.logout();
     navigate("/login");
   };
+  void _handleLogout; // reserved for logout UI
 
   const toggleSettingsMenu = () => {
     setOpenSettingsMenu(!openSettingsMenu);

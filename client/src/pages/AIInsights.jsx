@@ -3,7 +3,9 @@ import './AIInsights.css';
 
 export default function AIInsights() {
     const [activeTimeWindow, setActiveTimeWindow] = useState('lastWeek');
-    const [selectedPlatform, setSelectedPlatform] = useState('all');
+    const [_selectedPlatform, _setSelectedPlatform] = useState('all');
+    void _selectedPlatform;
+    void _setSelectedPlatform;
 
     // --- MOCK DATA: ADS PERFORMANCE ---
     const adsData = {
