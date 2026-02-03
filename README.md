@@ -67,6 +67,7 @@ A comprehensive marketing analytics dashboard for tracking Meta (Facebook) ads, 
    META_APP_ID=your_app_id
    META_APP_SECRET=your_app_secret
    META_SYSTEM_ACCESS_TOKEN=your_system_token
+   # META_SYSTEM_ACCESS_TOKEN must include instagram_manage_insights and pages_read_engagement for Instagram Insights and Page Insights.
    
    DB_SERVER=your_db_server
    DB_DATABASE=your_database

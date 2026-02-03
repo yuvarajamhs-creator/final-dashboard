@@ -13,11 +13,14 @@ const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
 const { fetchInsightsFromMetaLive } = require("./insightsService");
 const adsCache = require("./adsCache");
+const { fetchInstagramInsights, resolveIgAccountsFromPages } = require("./instagramInsightsService");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
 const campaignsServiceMeta = require("../services/meta/campaignsService");
 const adsServiceMeta = require("../services/meta/adsService");
 const META_API_VERSION = "v21.0";
+// Page Insights requires v22+ for page_follows, page_media_view (v21.0 returns invalid metric)
+const META_PAGE_INSIGHTS_API_VERSION = process.env.META_PAGE_INSIGHTS_API_VERSION || "v24.0";
 
 // In-memory cache for campaigns (ads use adsCache with Redis/in-memory, TTL 24h+)
 let campaignsCache = {
@@ -613,7 +616,7 @@ router.post("/insights/backfill", optionalAuthMiddleware, async (req, res) => {
       }
     }
     
-    console.log(`[Backfill] Completed: ${results.length} accounts processed, ${totalCount} total rows synced`);
+   
     res.json({
       ok: true,
       message: `Backfill done for ${from}..${to}`,
@@ -1028,47 +1031,58 @@ router.get("/businesses", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// 5.1) PAGES API - Fetch pages
+// 5.1) PAGES API - Fetch pages (Content Marketing PAGE filter)
 //    GET /api/meta/pages
-//    Uses META_SYSTEM_ACCESS_TOKEN
+//    Uses META_SYSTEM_ACCESS_TOKEN_1 if set, else META_SYSTEM_ACCESS_TOKEN
 // ---------------------------------------------------------------------
 router.get("/pages", optionalAuthMiddleware, async (req, res) => {
   try {
-    const accessToken = ((process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || '').trim();
+    const accessToken = (
+      (process.env.META_SYSTEM_ACCESS_TOKEN_1 || process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || ''
+    ).trim();
     if (!accessToken) {
-      throw new Error("Meta Access Token missing. Please configure META_SYSTEM_ACCESS_TOKEN or META_ACCESS_TOKEN in server/.env file.");
+      throw new Error("Meta Access Token missing. Configure META_SYSTEM_ACCESS_TOKEN_1 or META_SYSTEM_ACCESS_TOKEN in server/.env");
     }
 
     const response = await axios.get(
       `https://graph.facebook.com/${META_API_VERSION}/me/accounts`,
       {
+        params: {
+          fields: "id,name,access_token,instagram_business_account{id}",
+        },
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
       }
     );
-    
-    // Handle single object response (not an array)
-    let pages = [];
+
+    const mapPage = (page) => ({
+      id: page.id,
+      name: page.name,
+      instagram_business_account_id: page.instagram_business_account?.id || null,
+    });
+
+    let rawPages = [];
     if (response.data && response.data.id) {
-      // Single page object - wrap in array
-      pages = [{
-        id: response.data.id,
-        name: response.data.name,
-      }];
+      rawPages = [response.data];
     } else if (Array.isArray(response.data)) {
-      // Array of pages
-      pages = response.data.map(page => ({
-        id: page.id,
-        name: page.name,
-      }));
+      rawPages = response.data;
     } else if (response.data && response.data.data && Array.isArray(response.data.data)) {
-      // Nested array structure
-      pages = response.data.data.map(page => ({
-        id: page.id,
-        name: page.name,
-      }));
+      rawPages = response.data.data;
     }
+
+    const now = Date.now();
+    const ttl = pageTokenCache.ttl || 60 * 60 * 1000;
+    for (const page of rawPages) {
+      if (page && page.id && page.access_token) {
+        pageTokenCache.tokens[page.id] = {
+          token: page.access_token,
+          expiresAt: now + ttl,
+        };
+      }
+    }
+
+    const pages = rawPages.map(mapPage);
 
     res.json({ data: pages });
   } catch (error) {
@@ -1582,17 +1596,17 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
 // ---------------------------------------------------------------------
 // 5.2.1) PAGE INSIGHTS API - Fetch page insights (followers, reach, etc.)
 //    GET /api/meta/pages/:pageId/insights
-//    Uses META_SYSTEM_ACCESS_TOKEN
+//    Uses Page Access Token (required by Meta for this endpoint)
 // ---------------------------------------------------------------------
 router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) => {
   try {
     const { pageId } = req.params;
     const { from, to, metric } = req.query;
+
+    const accessToken = await getPageAccessToken(pageId);
     
-    const accessToken = getSystemToken();
-    
-    // Default metrics if not specified
-    const metrics = metric || "page_fans,page_reach,page_impressions,page_fan_adds,page_fan_removes";
+    // Default metrics: valid in v24.0+ (page_reach not in current docs; page_follows, page_media_view are replacements for deprecated metrics)
+    const metrics = metric || "page_follows,page_media_view";
     
     // Date range handling
     let since = null;
@@ -1615,7 +1629,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
       since = thirtyDaysAgo.toISOString().split('T')[0];
     }
     
-    const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}/insights`;
+    const insightsUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}/insights`;
     
     const params = {
       access_token: accessToken,
@@ -1649,7 +1663,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
         const metricName = metric.name;
         const values = metric.values || [];
         
-        if (metricName === 'page_fans') {
+        if (metricName === 'page_fans' || metricName === 'page_follows') {
           if (values.length > 0) {
             processedData.current_followers = parseInt(values[values.length - 1].value || 0);
           }
@@ -1688,11 +1702,16 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
             date: v.end_time ? v.end_time.split('T')[0] : null,
             value: parseInt(v.value || 0)
           })).filter(v => v.date);
-        } else if (metricName === 'page_impressions') {
+        } else if (metricName === 'page_impressions' || metricName === 'page_media_view') {
           processedData.impressions = values.map(v => ({
             date: v.end_time ? v.end_time.split('T')[0] : null,
             value: parseInt(v.value || 0)
           })).filter(v => v.date);
+          if (processedData.total_reached === 0) {
+            let sum = 0;
+            values.forEach(v => { sum += parseInt(v.value || 0); });
+            processedData.total_reached = sum;
+          }
         } else if (metricName === 'page_fan_adds') {
           let totalFollows = 0;
           processedData.fan_adds = values.map(v => {
@@ -1766,29 +1785,198 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
    
     res.json({ data: processedData });
   } catch (err) {
+    const metaError = err.response?.data?.error;
+    const errDetails = typeof metaError?.message === 'string'
+      ? metaError.message
+      : (typeof err.response?.data === 'object' ? JSON.stringify(err.response.data) : String(err.response?.data || err.message));
     console.error("Error fetching page insights:", err.response?.data || err.message);
-    
+
+    if (!err.response && err.message) {
+      return res.status(503).json({
+        error: "Could not obtain Page Access Token",
+        details: err.message,
+        isAuthError: false,
+        instruction: "Ensure META_SYSTEM_ACCESS_TOKEN is valid so the server can fetch the page token from Meta."
+      });
+    }
+
+    if (metaError?.code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: metaError.message || errDetails,
+        isAuthError: true,
+        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env so the server can obtain a Page Access Token."
+      });
+    }
+
+    if (metaError?.code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions",
+        details: metaError.message || errDetails,
+        isPermissionError: true,
+        instruction: "Please ensure your Meta Access Token has 'pages_read_engagement' permission"
+      });
+    }
+
+    if (metaError?.code === 100) {
+      return res.status(400).json({
+        error: "Invalid insights metric",
+        details: metaError.message || "Some requested metrics are deprecated or invalid. Check Meta Page Insights documentation.",
+        isPermissionError: false,
+        instruction: "Use valid metrics: page_follows, page_media_view (and Page Insights API v24.0+)"
+      });
+    }
+
+    res.status(500).json({
+      error: "Failed to fetch page insights",
+      details: errDetails,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 5.2.1b) INSTAGRAM INSIGHTS API - Fetch insights for multiple IG Business Accounts
+//    GET /api/meta/instagram/insights?accountIds=id1,id2&from=...&to=...
+//    OR  GET /api/meta/instagram/insights?pageIds=id1,id2&from=...&to=...
+//    POST /api/meta/instagram/insights  body: { accountIds: [...], from?, to?, period? }
+//
+//    Uses META_SYSTEM_ACCESS_TOKEN. Supports partial failures and rate limiting.
+// ---------------------------------------------------------------------
+router.get("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period } = req.query;
+
+    let accountIds = [];
+    if (accountIdsParam) {
+      accountIds = (typeof accountIdsParam === "string" ? accountIdsParam.split(",") : accountIdsParam || [])
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }
+    let pageIds = [];
+    if (pageIdsParam) {
+      pageIds = (typeof pageIdsParam === "string" ? pageIdsParam.split(",") : pageIdsParam || [])
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }
+
+    const fetchParams = {
+      accountIds: accountIds.length > 0 ? accountIds : undefined,
+      pageIds: pageIds.length > 0 ? pageIds : undefined,
+      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
+      from: from || undefined,
+      to: to || undefined,
+      period: period || undefined,
+    };
+    console.log("[Instagram Insights API] Request params:", {
+      accountIds: fetchParams.accountIds,
+      pageIds: fetchParams.pageIds,
+      from: fetchParams.from,
+      to: fetchParams.to,
+      period: fetchParams.period,
+    });
+
+    const result = await fetchInstagramInsights(fetchParams);
+
+    console.log("[Instagram Insights API] Response:", {
+      totalReached: result?.totalReached,
+      totalFollows: result?.totalFollows,
+      totalViews: result?.totalViews,
+      totalInteractions: result?.totalInteractions,
+      error: result?.error,
+    });
+    return res.json(result);
+  } catch (err) {
+    console.error("[Instagram Insights API] Error:", {
+      message: err.message,
+      responseData: err.response?.data,
+      status: err.response?.status,
+    });
     if (err.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
         details: err.response.data.error.message,
         isAuthError: true,
-        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
       });
     }
-    
-    // Check for permission errors
     if (err.response?.data?.error?.code === 200) {
       return res.status(403).json({
-        error: "Insufficient permissions",
+        error: "Insufficient permissions for Instagram insights",
         details: err.response.data.error.message,
         isPermissionError: true,
-        instruction: "Please ensure your Meta Access Token has 'pages_read_engagement' permission"
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
       });
     }
-    
-    res.status(500).json({
-      error: "Failed to fetch page insights",
+    return res.status(500).json({
+      error: "Failed to fetch Instagram insights",
+      details: err.response?.data || err.message,
+    });
+  }
+});
+
+router.post("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { accountIds, pageIds, from, to, period } = req.body || {};
+
+    const result = await fetchInstagramInsights({
+      accountIds: Array.isArray(accountIds) && accountIds.length > 0 ? accountIds : undefined,
+      pageIds: Array.isArray(pageIds) && pageIds.length > 0 ? pageIds : undefined,
+      getPageToken: Array.isArray(pageIds) && pageIds.length > 0 ? getPageAccessToken : undefined,
+      from: from || undefined,
+      to: to || undefined,
+      period: period || undefined,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error("[Instagram Insights] Error:", err.response?.data || err.message);
+    if (err.response?.data?.error?.code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: err.response.data.error.message,
+        isAuthError: true,
+      });
+    }
+    if (err.response?.data?.error?.code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: err.response.data.error.message,
+        isPermissionError: true,
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram insights",
+      details: err.response?.data || err.message,
+    });
+  }
+});
+
+// GET /api/meta/instagram/accounts?pageIds=id1,id2 - Resolve IG Business Account IDs from pages
+router.get("/instagram/accounts", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { pageIds: pageIdsParam } = req.query;
+    if (!pageIdsParam) {
+      return res.status(400).json({
+        error: "pageIds parameter is required",
+        message: "Provide pageIds as comma-separated list",
+      });
+    }
+    const pageIds = (typeof pageIdsParam === "string" ? pageIdsParam.split(",") : pageIdsParam || [])
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (pageIds.length === 0) {
+      return res.status(400).json({ error: "No valid pageIds provided" });
+    }
+
+    const accessToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "").trim();
+    if (!accessToken) {
+      throw new Error("Meta Access Token missing.");
+    }
+    const accountIds = await resolveIgAccountsFromPages(pageIds, accessToken);
+    return res.json({ data: accountIds, pageIds });
+  } catch (err) {
+    console.error("[Instagram Accounts] Error:", err.response?.data || err.message);
+    return res.status(500).json({
+      error: "Failed to resolve Instagram accounts",
       details: err.response?.data || err.message,
     });
   }

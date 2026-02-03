@@ -14,6 +14,10 @@ app.use(express.json());
 const metaRoutes = require("./meta/meta.jsx");
 app.use("/api/meta", metaRoutes);
 
+// Import Wix routes
+const wixRoutes = require("./routes/wix");
+app.use("/api/wix", wixRoutes);
+
 // Import Permissions routes
 const permissionsRoutes = require("./routes/permissions");
 app.use("/api/permissions", permissionsRoutes);

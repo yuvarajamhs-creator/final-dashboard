@@ -12,7 +12,8 @@ const MultiSelectFilter = ({
   getOptionValue = (opt) => opt.id || opt.value || opt,
   disabled = false,
   loading = false,
-  maxHeight = '300px'
+  maxHeight = '300px',
+  singleSelect = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -42,16 +43,23 @@ const MultiSelectFilter = ({
     return label.toLowerCase().includes(searchTerm.toLowerCase());
   });
 
-  // Handle checkbox toggle
+  // Handle checkbox toggle (multi) or single selection
   const handleToggle = (value) => {
+    if (singleSelect) {
+      const alreadySelected = selectedValues.includes(value);
+      onChange(alreadySelected ? [] : [value]);
+      setIsOpen(false);
+      return;
+    }
     const newSelected = selectedValues.includes(value)
       ? selectedValues.filter(v => v !== value)
       : [...selectedValues, value];
     onChange(newSelected);
   };
 
-  // Handle select all
+  // Handle select all (only for multi-select)
   const handleSelectAll = () => {
+    if (singleSelect) return;
     if (selectedValues.length === filteredOptions.length) {
       onChange([]);
     } else {
@@ -68,8 +76,12 @@ const MultiSelectFilter = ({
     if (selectedValues.length === 0) {
       return placeholder;
     }
-    // Check if all options are selected
-    if (filteredOptions.length > 0 && filteredOptions.every(opt => selectedValues.includes(getOptionValue(opt)))) {
+    if (singleSelect && selectedValues.length === 1) {
+      const selectedOption = options.find(opt => getOptionValue(opt) === selectedValues[0]);
+      return selectedOption ? getOptionLabel(selectedOption) : placeholder;
+    }
+    // Check if all options are selected (multi only)
+    if (!singleSelect && filteredOptions.length > 0 && filteredOptions.every(opt => selectedValues.includes(getOptionValue(opt)))) {
       return placeholder; // Show "All Campaigns" or "All Ads" when all selected
     }
     if (selectedValues.length === 1) {
@@ -81,6 +93,8 @@ const MultiSelectFilter = ({
 
   const allSelected = filteredOptions.length > 0 && 
     filteredOptions.every(opt => selectedValues.includes(getOptionValue(opt)));
+
+  const radioName = singleSelect ? `filter-${label}` : undefined;
 
   return (
     <div className="multi-select-filter-wrapper" ref={dropdownRef}>
@@ -113,8 +127,8 @@ const MultiSelectFilter = ({
               />
             </div>
 
-            {/* Select All Option */}
-            {filteredOptions.length > 0 && (
+            {/* Select All Option - only for multi-select */}
+            {!singleSelect && filteredOptions.length > 0 && (
               <div className="multi-select-item multi-select-item-all">
                 <label className="multi-select-checkbox-label">
                   <input
@@ -148,7 +162,8 @@ const MultiSelectFilter = ({
                     >
                       <label className="multi-select-checkbox-label">
                         <input
-                          type="checkbox"
+                          type={singleSelect ? 'radio' : 'checkbox'}
+                          name={radioName}
                           checked={isSelected}
                           onChange={() => handleToggle(value)}
                           onClick={(e) => e.stopPropagation()}
