@@ -191,13 +191,10 @@ async function checkAndRefreshToken() {
  * Refresh system access token if configured
  * Uses the same Meta oauth/access_token endpoint format as refreshAccessToken()
  * API Format: https://graph.facebook.com/v24.0/oauth/access_token?grant_type=fb_exchange_token&client_id={META_APP_ID}&client_secret={META_APP_SECRET}&fb_exchange_token={META_SYSTEM_ACCESS_TOKEN}
- * 
- * NOTE: This function is NOT called automatically. It's available for manual use only.
- * To refresh system token manually, call: refreshSystemToken()
  */
 async function refreshSystemToken() {
   const systemToken = process.env.META_SYSTEM_ACCESS_TOKEN;
-  
+
   if (!systemToken) {
     return { success: true, message: 'System token not configured' };
   }
@@ -255,6 +252,16 @@ async function refreshSystemToken() {
       console.error('[TokenRefresh] Error Type:', error.response.data.error.type);
     }
     
+    // Check if token is expired (same as user token)
+    if (error.response?.data?.error?.code === 190) {
+      console.error('[TokenRefresh] System token is expired. Generate a new token from Meta Business Suite (System Users) and update META_SYSTEM_ACCESS_TOKEN in server/.env');
+      console.error('[TokenRefresh] ========================================');
+      return {
+        success: false,
+        error: 'Token is expired. Generate a new token from Meta Business Suite (System Users) and update META_SYSTEM_ACCESS_TOKEN in server/.env'
+      };
+    }
+
     console.error('[TokenRefresh] ========================================');
     return {
       success: false,
@@ -264,17 +271,52 @@ async function refreshSystemToken() {
 }
 
 /**
- * Main function to check and refresh all tokens
- * Note: System token refresh is not included in automatic refresh
+ * Check if system token needs refresh and refresh if necessary (same logic as checkAndRefreshToken)
+ */
+async function checkAndRefreshSystemToken() {
+  const currentToken = process.env.META_SYSTEM_ACCESS_TOKEN;
+
+  if (!currentToken) {
+    return { success: true, message: 'System token not configured' };
+  }
+
+  try {
+    const expiresAt = await getTokenExpiry(currentToken);
+
+    if (!expiresAt) {
+      return await refreshSystemToken();
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const timeUntilExpiry = expiresAt - now;
+    const daysUntilExpiry = timeUntilExpiry / 86400;
+
+    if (timeUntilExpiry <= REFRESH_BUFFER_SECONDS) {
+      return await refreshSystemToken();
+    }
+    return {
+      success: true,
+      message: 'System token is still valid',
+      daysUntilExpiry: Math.round(daysUntilExpiry)
+    };
+  } catch (error) {
+    console.error('[TokenRefresh] ❌ Error checking system token:', error.message);
+    return await refreshSystemToken();
+  }
+}
+
+/**
+ * Main function to check and refresh all tokens (user and system)
  */
 async function refreshAllTokens() {
   const results = {
-    accessToken: null
+    accessToken: null,
+    systemAccessToken: null
   };
-  
-  // Refresh main access token only
+
   results.accessToken = await checkAndRefreshToken();
-  
+  results.systemAccessToken = await checkAndRefreshSystemToken();
+
   return results;
 }
 
@@ -305,13 +347,17 @@ async function testTokenRefresh() {
 }
 
 function startTokenRefreshScheduler() {
-  // Check if required credentials are available
   const appId = process.env.META_APP_ID;
   const appSecret = process.env.META_APP_SECRET;
   const accessToken = process.env.META_ACCESS_TOKEN;
+  const systemToken = process.env.META_SYSTEM_ACCESS_TOKEN;
 
-  if (!appId || !appSecret || !accessToken) {
-    console.warn('[TokenRefresh] ⚠️  Scheduler not started - Missing META_APP_ID, META_APP_SECRET, or META_ACCESS_TOKEN in .env file');
+  if (!appId || !appSecret) {
+    console.warn('[TokenRefresh] ⚠️  Scheduler not started - Missing META_APP_ID or META_APP_SECRET in .env file');
+    return null;
+  }
+  if (!accessToken && !systemToken) {
+    console.warn('[TokenRefresh] ⚠️  Scheduler not started - Set META_ACCESS_TOKEN and/or META_SYSTEM_ACCESS_TOKEN in .env file');
     return null;
   }
 
@@ -334,6 +380,7 @@ module.exports = {
   refreshAccessToken,
   refreshSystemToken,
   checkAndRefreshToken,
+  checkAndRefreshSystemToken,
   refreshAllTokens,
   startTokenRefreshScheduler,
   testTokenRefresh

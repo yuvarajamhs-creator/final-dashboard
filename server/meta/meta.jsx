@@ -1034,41 +1034,119 @@ router.get("/businesses", optionalAuthMiddleware, async (req, res) => {
 // 5.1) PAGES API - Fetch pages (Content Marketing PAGE filter)
 //    GET /api/meta/pages
 //    Uses META_SYSTEM_ACCESS_TOKEN_1 if set, else META_SYSTEM_ACCESS_TOKEN
+//    Fallbacks: 1) me/accounts 2) businesses -> owned_pages 3) META_PAGE_ID
 // ---------------------------------------------------------------------
+const mapPage = (page) => ({
+  id: page.id,
+  name: page.name || `Page ${page.id}`,
+  instagram_business_account_id: page.instagram_business_account?.id || null,
+});
+
+async function fetchPagesFromMeAccounts(accessToken) {
+  const response = await axios.get(
+    `https://graph.facebook.com/${META_API_VERSION}/me/accounts`,
+    {
+      params: {
+        fields: "id,name,access_token,instagram_business_account{id}",
+      },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+  if (response.data && response.data.id) return [response.data];
+  if (Array.isArray(response.data)) return response.data;
+  if (response.data?.data && Array.isArray(response.data.data)) return response.data.data;
+  return [];
+}
+
+async function fetchPagesFromBusinesses(accessToken) {
+  const businessesRes = await axios.get(
+    `https://graph.facebook.com/${META_API_VERSION}/me/businesses`,
+    {
+      params: { fields: "id,name", limit: 100 },
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+  const businesses = businessesRes.data?.data || [];
+  if (businesses.length === 0) return [];
+
+  const allPages = [];
+  for (const biz of businesses) {
+    try {
+      const pagesRes = await axios.get(
+        `https://graph.facebook.com/${META_API_VERSION}/${biz.id}/owned_pages`,
+        {
+          params: {
+            fields: "id,name,access_token,instagram_business_account{id}",
+          },
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      );
+      const pages = pagesRes.data?.data || [];
+      allPages.push(...pages);
+    } catch (e) {
+      console.warn(`[Pages] Could not fetch owned_pages for business ${biz.id}:`, e.response?.data?.error?.message || e.message);
+    }
+  }
+  return allPages;
+}
+
+async function fetchPageById(pageId, accessToken) {
+  const response = await axios.get(
+    `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
+    {
+      params: {
+        fields: "id,name,access_token,instagram_business_account{id}",
+      },
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+  return response.data ? [response.data] : [];
+}
+
 router.get("/pages", optionalAuthMiddleware, async (req, res) => {
   try {
-    const accessToken = (
+    const systemToken = (
       (process.env.META_SYSTEM_ACCESS_TOKEN_1 || process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || ''
     ).trim();
-    if (!accessToken) {
+    const userToken = (process.env.META_ACCESS_TOKEN || '').trim();
+    const pageIdEnv = (process.env.META_PAGE_ID || '').trim();
+
+    if (!systemToken && !userToken) {
       throw new Error("Meta Access Token missing. Configure META_SYSTEM_ACCESS_TOKEN_1 or META_SYSTEM_ACCESS_TOKEN in server/.env");
     }
 
-    const response = await axios.get(
-      `https://graph.facebook.com/${META_API_VERSION}/me/accounts`,
-      {
-        params: {
-          fields: "id,name,access_token,instagram_business_account{id}",
-        },
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    const mapPage = (page) => ({
-      id: page.id,
-      name: page.name,
-      instagram_business_account_id: page.instagram_business_account?.id || null,
-    });
-
+    const accessToken = systemToken || userToken;
     let rawPages = [];
-    if (response.data && response.data.id) {
-      rawPages = [response.data];
-    } else if (Array.isArray(response.data)) {
-      rawPages = response.data;
-    } else if (response.data && response.data.data && Array.isArray(response.data.data)) {
-      rawPages = response.data.data;
+
+    // 1) Try me/accounts (works with User tokens; System User often returns empty)
+    try {
+      rawPages = await fetchPagesFromMeAccounts(accessToken);
+    } catch (e) {
+      console.warn("[Pages] me/accounts failed:", e.response?.data?.error?.message || e.message);
+    }
+
+    // 2) If empty, try businesses -> owned_pages (works when pages are linked to Business)
+    // Use user token first (often has business_management), then system token
+    if (rawPages.length === 0) {
+      const bizToken = userToken || systemToken;
+      if (bizToken) {
+        try {
+          rawPages = await fetchPagesFromBusinesses(bizToken);
+        } catch (e) {
+          console.warn("[Pages] businesses/owned_pages fallback failed:", e.response?.data?.error?.message || e.message);
+        }
+      }
+    }
+
+    // 3) If still empty and META_PAGE_ID is set, fetch that specific page
+    if (rawPages.length === 0 && pageIdEnv) {
+      try {
+        rawPages = await fetchPageById(pageIdEnv, accessToken);
+      } catch (e) {
+        console.warn("[Pages] META_PAGE_ID fallback failed:", e.response?.data?.error?.message || e.message);
+      }
     }
 
     const now = Date.now();
@@ -1087,13 +1165,13 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
     res.json({ data: pages });
   } catch (error) {
     console.error("Meta /pages error:", error.response?.data || error.message);
-    
+
     if (error.response?.data?.error?.code === 190) {
       return res.status(401).json({
         error: "Meta Access Token expired or invalid",
         details: error.response.data.error.message,
         isAuthError: true,
-        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env",
+        instruction: "Please update META_SYSTEM_ACCESS_TOKEN_1 or META_SYSTEM_ACCESS_TOKEN in server/.env",
       });
     }
 
