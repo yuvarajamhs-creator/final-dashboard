@@ -1,6 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './MultiSelectFilter.css';
 
+const DEFAULT_STATUS_COLORS = {
+  ACTIVE: '#16a34a',
+  PAUSED: '#ea580c',
+  ARCHIVED: '#64748b',
+  ENDED: '#64748b',
+  REJECTED: '#dc2626',
+  IN_REVIEW: '#d97706',
+  PENDING_REVIEW: '#d97706',
+  LEARNING: '#d97706',
+};
+
+const DEFAULT_STATUS_COLOR = '#94a3b8';
+
 const MultiSelectFilter = ({
   label,
   emoji,
@@ -10,6 +23,8 @@ const MultiSelectFilter = ({
   placeholder = "All",
   getOptionLabel = (opt) => opt.name || opt.label || opt,
   getOptionValue = (opt) => opt.id || opt.value || opt,
+  getOptionStatus,
+  statusColors = DEFAULT_STATUS_COLORS,
   disabled = false,
   loading = false,
   maxHeight = '300px',
@@ -153,6 +168,10 @@ const MultiSelectFilter = ({
                   const value = getOptionValue(option);
                   const label = getOptionLabel(option);
                   const isSelected = selectedValues.includes(value);
+                  const status = getOptionStatus ? getOptionStatus(option) : null;
+                  const statusColor = status
+                    ? (statusColors[status] || DEFAULT_STATUS_COLOR)
+                    : DEFAULT_STATUS_COLOR;
 
                   return (
                     <div
@@ -168,7 +187,20 @@ const MultiSelectFilter = ({
                           onChange={() => handleToggle(value)}
                           onClick={(e) => e.stopPropagation()}
                         />
-                        <span className="multi-select-checkbox-text">{label}</span>
+                        {getOptionStatus && status && (
+                          <span
+                            className="multi-select-status-dot"
+                            style={{ backgroundColor: statusColor }}
+                            title={status}
+                            aria-hidden
+                          />
+                        )}
+                        <span className="multi-select-checkbox-text">
+                          {label}
+                          {getOptionStatus && status && (
+                            <span className="multi-select-status-label">{status}</span>
+                          )}
+                        </span>
                       </label>
                     </div>
                   );

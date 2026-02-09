@@ -1683,8 +1683,8 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
 
     const accessToken = await getPageAccessToken(pageId);
     
-    // Default metrics: valid in v24.0+ (page_reach not in current docs; page_follows, page_media_view are replacements for deprecated metrics)
-    const metrics = metric || "page_follows,page_media_view";
+    // Default metrics: valid in v24.0+ (page_reach not in current docs; page_follows, page_media_view are replacements for deprecated metrics; page_fan_removes for unfollows)
+    const metrics = metric || "page_follows,page_media_view,page_fan_removes";
     
     // Date range handling
     let since = null;
@@ -2666,8 +2666,9 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
           return enriched;
         }));
         
-        // Apply limit if specified
-        const limitedLeads = limit ? enrichedLeads.slice(0, parseInt(limit, 10)) : enrichedLeads;
+        // Apply limit if specified (clamp to 25-10000)
+        const clampedLimit = Math.min(10000, Math.max(25, parseInt(limit, 10) || 500));
+        const limitedLeads = limit ? enrichedLeads.slice(0, clampedLimit) : enrichedLeads;
         
       
         
@@ -2867,8 +2868,12 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
     const adNameCache = {}; // Cache ad names
     const campaignNameCache = {}; // Cache campaign names
 
+    const leadLimit = Math.min(10000, Math.max(25, parseInt(limit, 10) || 500));
+
     for (const formInfo of formsToFetch) {
       try {
+        if (allLeads.length >= leadLimit) break;
+
         // Meta's /leads API requires a Page Access Token for the form's page
         const formPageId = formInfo.page_id;
         if (!formPageId) {
@@ -2878,15 +2883,24 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
         
         const pageAccessToken = await getPageAccessToken(formPageId);
         const leadsUrl = `https://graph.facebook.com/${META_API_VERSION}/${formInfo.form_id}/leads`;
-        // Request ad_id field if available in Meta API
-        const response = await axios.get(leadsUrl, {
-          headers: { Authorization: `Bearer ${pageAccessToken}` },
-          params: {
-            fields: "id,created_time,field_data,ad_id" // Try to get ad_id if available
-          }
-        });
-        
-        const leads = response.data.data || [];
+        // Request ad_id and campaign_id; use limit and pagination to fetch up to leadLimit (Meta default is 25 per page)
+        let leads = [];
+        let nextUrl = null;
+        const metaPageLimit = 1000;
+        do {
+          const response = nextUrl
+            ? await axios.get(nextUrl, { headers: { Authorization: `Bearer ${pageAccessToken}` } })
+            : await axios.get(leadsUrl, {
+                headers: { Authorization: `Bearer ${pageAccessToken}` },
+                params: {
+                  fields: "id,created_time,field_data,ad_id,campaign_id",
+                  limit: metaPageLimit
+                }
+              });
+          const chunk = response.data.data || [];
+          leads = leads.concat(chunk);
+          nextUrl = (response.data.paging && response.data.paging.next) || null;
+        } while (nextUrl && leads.length < leadLimit);
         
 
         // Process each lead
@@ -2976,23 +2990,18 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
             pageName = pageNameCache[pageId];
           }
 
-          // Get ad name if adId provided
-          // Try to get from Insights API first (more reliable), fallback to direct ad fetch
-          let adName = null;
-          if (adId && !adNameCache[adId]) {
-            // First, try to get ad name from cached ads list if available
-            // Otherwise, try Insights API or direct ad fetch
+          // Enrich ad name using this lead's ad_id (or request adId filter); cache by ad id
+          const effectiveAdId = lead.ad_id || adId || null;
+          let adName = effectiveAdId ? adNameCache[effectiveAdId] ?? null : null;
+          if (effectiveAdId && adName == null) {
             try {
-              // Try direct ad fetch first
               const adResponse = await axios.get(
-                `https://graph.facebook.com/${META_API_VERSION}/${adId}`,
+                `https://graph.facebook.com/${META_API_VERSION}/${effectiveAdId}`,
                 { params: { access_token: credentials.accessToken, fields: "name" } }
               );
-              adName = adResponse.data.name;
-              adNameCache[adId] = adName;
+              adName = adResponse.data.name || null;
+              adNameCache[effectiveAdId] = adName;
             } catch (err) {
-              // If direct fetch fails, try to get from Insights API (if we have account ID)
-              console.warn(`[Leads API] Could not fetch ad name directly for ${adId}, trying Insights API`);
               try {
                 let accountId = credentials.adAccountId;
                 if (accountId && accountId.startsWith('act_')) {
@@ -3005,7 +3014,7 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
                       access_token: credentials.accessToken,
                       level: "ad",
                       fields: "ad_id,ad_name",
-                      filtering: JSON.stringify([{ field: "ad.id", operator: "IN", value: [adId] }]),
+                      filtering: JSON.stringify([{ field: "ad.id", operator: "IN", value: [effectiveAdId] }]),
                       limit: 1
                     }
                   }
@@ -3013,31 +3022,28 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
                 const insightsData = insightsResponse.data.data || [];
                 if (insightsData.length > 0 && insightsData[0].ad_name) {
                   adName = insightsData[0].ad_name;
-                  adNameCache[adId] = adName;
+                  adNameCache[effectiveAdId] = adName;
                 }
               } catch (insightsErr) {
-                console.warn(`[Leads API] Could not fetch ad name for ${adId} from Insights API either`);
+                // leave adName null
               }
             }
-          } else if (adId) {
-            adName = adNameCache[adId];
           }
 
-          // Get campaign name if campaignId provided
-          let campaignName = null;
-          if (campaignId && !campaignNameCache[campaignId]) {
+          // Enrich campaign name using this lead's campaign_id (or request campaignId filter); cache by campaign id
+          const effectiveCampaignId = lead.campaign_id || campaignId || null;
+          let campaignName = effectiveCampaignId ? campaignNameCache[effectiveCampaignId] ?? null : null;
+          if (effectiveCampaignId && campaignName == null) {
             try {
               const campaignResponse = await axios.get(
-                `https://graph.facebook.com/${META_API_VERSION}/${campaignId}`,
+                `https://graph.facebook.com/${META_API_VERSION}/${effectiveCampaignId}`,
                 { params: { access_token: credentials.accessToken, fields: "name" } }
               );
-              campaignName = campaignResponse.data.name;
-              campaignNameCache[campaignId] = campaignName;
+              campaignName = campaignResponse.data.name || null;
+              campaignNameCache[effectiveCampaignId] = campaignName;
             } catch (err) {
-              console.warn(`[Leads API] Could not fetch campaign name for ${campaignId}`);
+              // leave campaignName null
             }
-          } else if (campaignId) {
-            campaignName = campaignNameCache[campaignId];
           }
 
           // Build lead object
@@ -3055,8 +3061,8 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
             campaign_name: campaignName || null,
             ad_name: adName || null,
             form_name: formName,
-            // Include ad_id if available in lead object
-            ad_id: lead.ad_id || (adId || null), // Use adId from filter if lead doesn't have it
+            ad_id: lead.ad_id || (adId || null),
+            campaign_id: lead.campaign_id || (campaignId || null),
             // Legacy fields
             Id: lead.id,
             Name: leadName,
@@ -3140,7 +3146,6 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
       return timeB - timeA;
     });
 
-    const leadLimit = Math.min(parseInt(limit, 10) || 500, 5000);
     if (filteredLeads.length > leadLimit) {
       filteredLeads = filteredLeads.slice(0, leadLimit);
     }

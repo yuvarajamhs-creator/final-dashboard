@@ -54,62 +54,6 @@ const formatPerc = (value) => {
     return `${value.toFixed(2)}%`;
 };
 
-// Fetch campaigns from Meta API
-const fetchCampaigns = async () => {
-    try {
-        const token = getAuthToken();
-        const headers = { "Content-Type": "application/json" };
-        if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-        }
-
-        const res = await fetch(`${API_BASE}/api/meta/active-campaigns`, { headers });
-        const data = await res.json();
-        console.log("Fetched campaigns:", data);
-        
-        // Return full objects or empty array
-        if (Array.isArray(data)) {
-            return data;
-        } else if (data && Array.isArray(data.data)) {
-            return data.data;
-        }
-        return [];
-    } catch (e) {
-        console.error("Error fetching campaigns:", e);
-        return [];
-    }
-};
-
-// Fetch ads from Meta API
-const fetchAds = async (campaignId) => {
-    try {
-        if (!campaignId || campaignId.trim() === "") {
-            return [];
-        }
-
-        const token = getAuthToken();
-        const headers = { "Content-Type": "application/json" };
-        if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-        }
-
-        const res = await fetch(`${API_BASE}/api/meta/ads?campaign_id=${campaignId}`, { headers });
-        const data = await res.json();
-        console.log("Fetched ads:", data);
-        
-        // Return full objects or empty array
-        if (Array.isArray(data)) {
-            return data;
-        } else if (data && Array.isArray(data.data)) {
-            return data.data;
-        }
-        return [];
-    } catch (e) {
-        console.error("Error fetching ads:", e);
-        return [];
-    }
-};
-
 // Fetch insights from Meta API
 const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', endDate = '' }) => {
     try {
@@ -212,61 +156,18 @@ export default function BestPerformingAd() {
     // --- FILTER STATE & LOGIC ---
     const [filters, setFilters] = useState({ startDate: '', endDate: '' });
     const [selectedDateRange, setSelectedDateRange] = useState('this_week');
-    const [selectedCampaign, setSelectedCampaign] = useState('');
-    const [_selectedAdSet, setSelectedAdSet] = useState('');
-    void _selectedAdSet;
-    const [selectedAd, setSelectedAd] = useState('');
-    const [campaigns, setCampaigns] = useState([]);
-    const [ads, setAds] = useState([]);
+    const [selectedProject, setSelectedProject] = useState('');
     const [insightsData, setInsightsData] = useState([]);
-    const [loading, setLoading] = useState(false);
     const [dataLoading, setDataLoading] = useState(false);
     const [error, setError] = useState(null);
-    
-    // Load campaigns from Meta API on component mount
-    useEffect(() => {
-        const loadCampaigns = async () => {
-            setLoading(true);
-            try {
-                const campaignData = await fetchCampaigns();
-                setCampaigns(campaignData);
-                if (campaignData.length === 0) {
-                    setError("No campaigns found. Please configure Meta credentials in server/.env file.");
-                }
-            } catch (e) {
-                console.error("Failed to load campaigns:", e);
-                setError("Failed to load campaigns. Please check your Meta credentials.");
-            } finally {
-                setLoading(false);
-            }
-        };
-        loadCampaigns();
-    }, []);
-    
-    // Fetch ads only on explicit campaign selection (not on page load or time range change).
-    // Backend /api/meta/ads uses cache (24h+) and returns cached data on rate limit.
-    useEffect(() => {
-        const loadAds = async () => {
-            if (selectedCampaign && selectedCampaign.trim() !== "") {
-                const adsData = await fetchAds(selectedCampaign);
-                setAds(adsData);
-            } else {
-                setAds([]);
-                setSelectedAd("");
-            }
-        };
-        loadAds();
-    }, [selectedCampaign]);
 
-    // Fetch insights data when filters change
+    // Fetch insights data when date range changes
     useEffect(() => {
         const loadInsights = async () => {
             setDataLoading(true);
             setError(null);
             try {
                 const data = await fetchInsightsData({
-                    campaignId: selectedCampaign || '',
-                    adId: selectedAd || '',
                     startDate: filters.startDate,
                     endDate: filters.endDate
                 });
@@ -279,7 +180,7 @@ export default function BestPerformingAd() {
             }
         };
         loadInsights();
-    }, [selectedCampaign, selectedAd, filters.startDate, filters.endDate]);
+    }, [filters.startDate, filters.endDate]);
 
     // Calculate totals from insights data
     const totals = useMemo(() => {
@@ -585,36 +486,18 @@ export default function BestPerformingAd() {
                     </ul>
                 </div>
                 <div className="custom-select-wrapper">
-                    <select 
+                    <select
                         className="filter-select"
-                        value={selectedCampaign}
-                        onChange={(e) => {
-                            setSelectedCampaign(e.target.value);
-                            setSelectedAd(""); // Reset ad selection when campaign changes
-                        }}
-                        disabled={loading}
+                        value={selectedProject}
+                        onChange={(e) => setSelectedProject(e.target.value)}
                     >
-                        <option value="">All Campaigns</option>
-                        {campaigns.map((c) => (
-                            <option key={c.id} value={c.id}>
-                                {c.name}
-                            </option>
-                        ))}
-                    </select>
-                </div>
-                <div className="custom-select-wrapper">
-                    <select 
-                        className="filter-select"
-                        value={selectedAd}
-                        onChange={(e) => setSelectedAd(e.target.value)}
-                        disabled={!selectedCampaign || ads.length === 0 || loading}
-                    >
-                        <option value="">All Ads</option>
-                        {ads.map((ad) => (
-                            <option key={ad.id} value={ad.id}>
-                                {ad.name}
-                            </option>
-                        ))}
+                        <option value="">All Projects</option>
+                        <option value="Free Webinar">Free Webinar</option>
+                        <option value="Paid Webinar">Paid Webinar</option>
+                        <option value="Dental Care">Dental Care</option>
+                        <option value="Physio Care">Physio Care</option>
+                        <option value="Direct Walkin">Direct Walkin</option>
+                        <option value="Youtube">Youtube</option>
                     </select>
                 </div>
             </div>

@@ -46,8 +46,30 @@ function buildWixQueryString(params) {
  * @param {{ from: string, to: string, diagnose?: boolean }} options - from/to as YYYY-MM-DD
  * @returns {Promise<{ rows: Array<object>, error?: string, raw?: object }>}
  */
+const WIX_MAX_DAYS = 62;
+
+function clampDateRange(from, to) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const maxStart = new Date(today);
+  maxStart.setDate(maxStart.getDate() - WIX_MAX_DAYS);
+  const fromDate = new Date(from + 'T00:00:00Z');
+  const toDate = new Date(to + 'T00:00:00Z');
+  let clampedFrom = from;
+  let clampedTo = to;
+  if (toDate > today) clampedTo = today.toISOString().slice(0, 10);
+  if (fromDate < maxStart) clampedFrom = maxStart.toISOString().slice(0, 10);
+  if (fromDate > toDate) clampedFrom = clampedTo;
+  return { from: clampedFrom, to: clampedTo };
+}
+
 async function fetchWixAnalytics({ from, to, diagnose = false }) {
   const { siteId, token } = getWixCredentials();
+
+  const { from: fromClamped, to: toClamped } = clampDateRange(from, to);
+  if (fromClamped !== from || toClamped !== to) {
+    console.warn('[Wix] Date range clamped to last 62 days:', { from, to, fromClamped, toClamped });
+  }
 
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -56,7 +78,7 @@ async function fetchWixAnalytics({ from, to, diagnose = false }) {
   };
 
   const doRequest = async (withMeasurementTypes) => {
-    const params = { startDate: from, endDate: to };
+    const params = { startDate: fromClamped, endDate: toClamped };
     if (withMeasurementTypes) params.measurementTypes = MEASUREMENT_TYPES;
     const queryString = buildWixQueryString(params);
     const url = `${WIX_ANALYTICS_BASE}/data?${queryString}`;
@@ -85,16 +107,31 @@ async function fetchWixAnalytics({ from, to, diagnose = false }) {
   }
 
   if (response.status === 400) {
-    console.warn('[Wix] 400 Bad Request with measurementTypes, trying fallback without...');
+    const wixDetails = response.data?.details || response.data?.message || JSON.stringify(response.data);
+    console.warn('[Wix] 400 Bad Request. Wix response:', wixDetails);
+    // Try fallback with only core measurement types (some Wix API versions reject TOTAL_UNIQUE_VISITORS or TOTAL_FORMS_SUBMITTED)
+    const coreTypes = ['TOTAL_SESSIONS', 'CLICKS_TO_CONTACT'];
+    const doRequestCore = async () => {
+      const params = { startDate: fromClamped, endDate: toClamped, measurementTypes: coreTypes };
+      const qs = buildWixQueryString(params);
+      const url = `${WIX_ANALYTICS_BASE}/data?${qs}`;
+      return axios.get(url, { headers, timeout: 15000, validateStatus: (s) => s < 500 });
+    };
     try {
-      response = await doRequest(false);
+      response = await doRequestCore();
     } catch (fallbackErr) {
-      console.error('[Wix] Fallback request failed:', fallbackErr.message);
-      return { rows: [], error: 'Wix API returned 400. Check server logs for details.' };
+      return { rows: [], error: `Wix API 400: ${wixDetails || 'Invalid request. Ensure date range is within last 62 days (YYYY-MM-DD).'}` };
+    }
+    if (response.status === 400) {
+      try {
+        response = await doRequest(false);
+      } catch (e) {
+        return { rows: [], error: `Wix API 400: ${wixDetails || 'Invalid date range or parameters. Wix stores analytics for 62 days only.'}` };
+      }
     }
     if (response.status !== 200) {
-      console.error('[Wix] Fallback also failed:', response.status, response.data);
-      return { rows: [], error: `Wix API error: ${response.status}` };
+      const fallbackDetails = response.data?.details || response.data?.message || '';
+      return { rows: [], error: `Wix API error: 400. ${fallbackDetails || 'Check date range (last 62 days).'}` };
     }
   } else if (response.status !== 200) {
     console.error('[Wix] API error:', response.status, JSON.stringify(response.data)?.slice(0, 500));
@@ -102,7 +139,7 @@ async function fetchWixAnalytics({ from, to, diagnose = false }) {
   }
 
   const data = response.data;
-  const rows = normalizeWixResponse(data, from, to);
+  const rows = normalizeWixResponse(data, fromClamped, toClamped);
   const result = { rows };
   if (diagnose) result.raw = data;
   return result;

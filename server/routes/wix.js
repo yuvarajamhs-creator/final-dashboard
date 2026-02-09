@@ -9,6 +9,23 @@ const { optionalAuthMiddleware } = require('../auth');
 const { fetchWixAnalytics, getWixCredentials } = require('../wix/wixService');
 
 /**
+ * GET /api/wix/status
+ * Returns whether Wix credentials are configured. Use for troubleshooting.
+ */
+router.get('/status', optionalAuthMiddleware, (req, res) => {
+  try {
+    getWixCredentials();
+    res.json({ configured: true, message: 'Wix credentials are set.' });
+  } catch (e) {
+    res.status(503).json({
+      configured: false,
+      message: 'Wix not configured',
+      details: 'Set WIX_SITE_ID and WIX_TOKEN in server/.env, then restart the server.',
+    });
+  }
+});
+
+/**
  * GET /api/wix/analytics
  * Query: from (YYYY-MM-DD), to (YYYY-MM-DD), diagnose (optional, set to 1 for raw response)
  * Returns { rows: [...], error?: string, raw?: object } for dashboard merge and error display.

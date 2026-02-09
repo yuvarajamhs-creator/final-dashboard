@@ -243,7 +243,7 @@ const fetchPerformanceInsights = async ({ pageId, from, to }) => {
 // Fetch insights from backend.
 // When "Select All" is chosen for campaigns/ads, we send is_all_campaigns/is_all_ads and omit ID arrays
 // so the backend does one aggregated call. Only send campaign_id/ad_id when user explicitly selected specific items.
-const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignIds = [], adIds = [], allCampaigns = false, allAds = false, adAccountId = null }) => {
+const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignIds = [], adIds = [], allCampaigns = false, allAds = false, adAccountId = null, useLive = false }) => {
   try {
     const token = getAuthToken();
     const headers = { "Content-Type": "application/json" };
@@ -256,6 +256,9 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
 
     if (from && to) {
       url += `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    }
+    if (useLive) {
+      url += '&live=1';
     }
     // #region agent log
     fetch('http://127.0.0.1:7244/ingest/a31de4bd-79e0-4784-8d49-20b7d56ddf12',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Dashboards.jsx:fetchDashboardData',message:'insights request params',data:{from,to,campaignIds:campaignIds.slice(0,3),adIds:adIds.slice(0,3),allCampaigns,allAds,adAccountId,tzOffsetMin:new Date().getTimezoneOffset()},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1,H5'})}).catch(()=>{});
@@ -336,31 +339,29 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       const cpl = leadCount > 0 ? spend / leadCount : 0;
       
       // Video metrics for Hook Rate and Hold Rate
-      // Use direct fields from Meta API if available (already percentages)
-      // Fallback to calculation from actions if direct fields not available
+      // Meta returns these in actions array; support all known action_type variants
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
-      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || 0;
+      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || 0;
       const videoThruPlays = aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
-      
-      // Hook Rate: Use Meta API direct field if available, otherwise calculate from actions
+
+      // Hook Rate: 3s views / impressions * 100 (or direct hook_rate from Meta if present)
       let hookRate = 0;
       if (d.hook_rate !== undefined && d.hook_rate !== null && d.hook_rate !== '') {
-        // Meta API returns hook_rate as a percentage (already calculated)
         hookRate = num(d.hook_rate);
       } else {
-        // Fallback: calculate from video3sViews / impressions
         hookRate = impressions > 0 ? (video3sViews / impressions) * 100 : 0;
       }
-      
-      // Hold Rate: Use Meta API direct field if available, otherwise calculate from actions
+
+      // Hold Rate: ThruPlays / video views * 100 (or ThruPlays / 3s views if video views missing; or direct hold_rate)
       let holdRate = 0;
       if ((d.Hold_rate !== undefined && d.Hold_rate !== null && d.Hold_rate !== '') ||
           (d.hold_rate !== undefined && d.hold_rate !== null && d.hold_rate !== '')) {
-        // Meta API returns Hold_rate or hold_rate as a percentage (already calculated)
         holdRate = num(d.Hold_rate || d.hold_rate);
-      } else {
-        // Fallback: calculate from videoThruPlays / videoViews
-        holdRate = videoViews > 0 ? (videoThruPlays / videoViews) * 100 : 0;
+      } else if (videoViews > 0) {
+        holdRate = (videoThruPlays / videoViews) * 100;
+      } else if (video3sViews > 0) {
+        // Ads Manager sometimes defines Hold as ThruPlays / 3s views
+        holdRate = (videoThruPlays / video3sViews) * 100;
       }
 
       return {
@@ -396,7 +397,7 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
 
 // Fetch insights from all ad accounts and combine into one dataset.
 // Used when "All Ad Accounts" is selected so KPI cards show aggregated totals.
-const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adIds, allCampaigns, allAds, accounts }) => {
+const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adIds, allCampaigns, allAds, accounts, useLive = false }) => {
   if (!accounts || accounts.length === 0) return [];
   try {
     const promises = accounts.map((account) =>
@@ -408,7 +409,8 @@ const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adId
         adIds,
         allCampaigns,
         allAds,
-        adAccountId: account.account_id || account.id
+        adAccountId: account.account_id || account.id,
+        useLive
       })
     );
     const results = await Promise.all(promises);
@@ -884,8 +886,8 @@ const fetchLeads = async ({ formId, from, to, adAccountId, campaignId, adId, pag
       params.append('end', to);
     }
     
-    // Default limit: fetch up to 1000 leads
-    params.append('limit', '1000');
+    // Default limit: fetch up to 10000 leads (server clamps to 25-10000)
+    params.append('limit', '10000');
     
     if (params.toString()) {
       url += `?${params.toString()}`;
@@ -1101,6 +1103,19 @@ export default function AdsDashboardBootstrap() {
       endDate: endDate.toISOString().slice(0, 10)
     };
   };
+
+  // Last 28 days (yesterday minus 27 days through yesterday) for Unfollows card only
+  const getLast28DaysRange = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 27); // 28 days inclusive
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10)
+    };
+  };
   
   const [contentFilters, setContentFilters] = useState(() => getContentDefaultDates());
   const [contentDateRange, setContentDateRange] = useState('last_7_days');
@@ -1124,6 +1139,9 @@ export default function AdsDashboardBootstrap() {
   const [performanceInsightsLoading, setPerformanceInsightsLoading] = useState(false);
   const [performanceInsightsData, setPerformanceInsightsData] = useState(null);
   const [performanceInsightsError, setPerformanceInsightsError] = useState(null);
+  const [unfollowsLast28Days, setUnfollowsLast28Days] = useState(null);
+  const [unfollowsLast28Loading, setUnfollowsLast28Loading] = useState(false);
+  const [unfollowsLast28Error, setUnfollowsLast28Error] = useState(null);
   
   // Platform-specific metrics (Content Marketing - shown when Platform filter is selected)
   const [contentPlatformMetricsLoading, setContentPlatformMetricsLoading] = useState(false);
@@ -1185,7 +1203,7 @@ export default function AdsDashboardBootstrap() {
     setCurrentTheme(newTheme);
   };
 
-  const load = async () => {
+  const load = async (useLive = false) => {
     setLoading(true);
     setCampaignsLoading(true);
     setError(null);
@@ -1261,7 +1279,8 @@ export default function AdsDashboardBootstrap() {
           adIds: adIdsToSend,
           allCampaigns: allCampaignsSelected,
           allAds: allAdsSelected,
-          accounts: accountsForFetch
+          accounts: accountsForFetch,
+          useLive
         });
         allAdsRows = await fetchAllAccountsDashboardData({
           days,
@@ -1271,7 +1290,8 @@ export default function AdsDashboardBootstrap() {
           adIds: [],
           allCampaigns: allCampaignsSelected,
           allAds: true,
-          accounts: accountsForFetch
+          accounts: accountsForFetch,
+          useLive
         });
       } else {
         rows = await fetchDashboardData({
@@ -1282,7 +1302,8 @@ export default function AdsDashboardBootstrap() {
           adIds: adIdsToSend,
           allCampaigns: allCampaignsSelected,
           allAds: allAdsSelected,
-          adAccountId: selectedAdAccount || null
+          adAccountId: selectedAdAccount || null,
+          useLive
         });
         allAdsRows = await fetchDashboardData({
           days,
@@ -1292,7 +1313,8 @@ export default function AdsDashboardBootstrap() {
           adIds: [],
           allCampaigns: allCampaignsSelected,
           allAds: true,
-          adAccountId: selectedAdAccount || null
+          adAccountId: selectedAdAccount || null,
+          useLive
         });
       }
 
@@ -1567,7 +1589,8 @@ export default function AdsDashboardBootstrap() {
       if (filteredLeadsPage) params.append('pageId', filteredLeadsPage);
       if (from) params.append('start', from);
       if (to) params.append('end', to);
-      
+      params.append('limit', '10000'); // request up to 10000 (server clamps 25-10000)
+
       // Fetch from live Meta API endpoint
       const token = getAuthToken();
       const headers = { "Content-Type": "application/json" };
@@ -1796,12 +1819,9 @@ export default function AdsDashboardBootstrap() {
       const idSet = new Set(selectedIds.map(String));
       const filtered = raw.filter(ad => idSet.has(String(ad.campaign_id || '')));
       const unique = Array.from(new Map(filtered.map(ad => [ad.id, ad])).values());
-      const active = unique.filter(ad => {
-        const s = ad.effective_status || ad.status;
-        return !s || s === 'ACTIVE';
-      });
-      active.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
-      setAds(active);
+      // Include all effective statuses (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.)
+      unique.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+      setAds(unique);
     } catch (e) {
       console.error("Error loading ads for campaigns:", e);
       setAds([]);
@@ -1998,6 +2018,59 @@ export default function AdsDashboardBootstrap() {
       setPerformanceInsightsError(null);
     }
   }, [contentMarketingPage, selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
+
+  // Fetch unfollows for last 28 days only (independent of date range filter)
+  useEffect(() => {
+    const pageIdToUse = contentMarketingPage || selectedPage || (pages.length > 0 ? pages[0]?.id : null);
+    const selectedPageObj = pages.find((p) => p.id === pageIdToUse);
+    const igAccountId = selectedPageObj?.instagram_business_account_id;
+
+    if (!pageIdToUse) {
+      setUnfollowsLast28Days(null);
+      setUnfollowsLast28Error(null);
+      return;
+    }
+
+    const { startDate, endDate } = getLast28DaysRange();
+    setUnfollowsLast28Loading(true);
+    setUnfollowsLast28Error(null);
+
+    fetchInstagramInsights({
+      pageIds: pageIdToUse,
+      from: startDate,
+      to: endDate,
+    })
+      .then((igData) => {
+        if (igData) {
+          setUnfollowsLast28Days({
+            total_unfollows: igData.total_unfollows ?? 0,
+            unfollowsChange: igData.unfollowsChange ?? 0,
+          });
+          return;
+        }
+        if (!igAccountId) {
+          return fetchPerformanceInsights({
+            pageId: pageIdToUse,
+            from: startDate,
+            to: endDate,
+          }).then((pageData) => {
+            setUnfollowsLast28Days({
+              total_unfollows: pageData?.total_unfollows ?? 0,
+              unfollowsChange: pageData?.unfollowsChange ?? 0,
+            });
+          });
+        }
+        setUnfollowsLast28Days(null);
+      })
+      .catch((error) => {
+        console.error("Error fetching unfollows (last 28 days):", error);
+        setUnfollowsLast28Error(error?.message || "Failed to fetch unfollows");
+        setUnfollowsLast28Days(null);
+      })
+      .finally(() => {
+        setUnfollowsLast28Loading(false);
+      });
+  }, [contentMarketingPage, selectedPage, pages]);
 
   // Fetch Content Marketing revenue when filters change
   useEffect(() => {
@@ -2385,7 +2458,8 @@ export default function AdsDashboardBootstrap() {
     t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight : 
                  (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
     t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                 (t.videoViews ? (t.videoThruPlays / t.videoViews) * 100 : 0);
+                 (t.videoViews > 0 ? (t.videoThruPlays / t.videoViews) * 100 :
+                  (t.video3sViews > 0 ? (t.videoThruPlays / t.video3sViews) * 100 : 0));
     
     t.roas = t.spend ? t.totalRevenue / t.spend : 0;
 
@@ -3863,6 +3937,7 @@ export default function AdsDashboardBootstrap() {
                 placeholder="All Campaigns"
                 getOptionLabel={(opt) => opt.name}
                 getOptionValue={(opt) => opt.id}
+                getOptionStatus={(opt) => opt.effective_status || opt.status || ''}
                 disabled={campaignsLoading}
                 loading={campaignsLoading}
               />
@@ -3880,18 +3955,28 @@ export default function AdsDashboardBootstrap() {
                 placeholder="All Ads"
                 getOptionLabel={(opt) => opt.name}
                 getOptionValue={(opt) => opt.id}
+                getOptionStatus={(opt) => opt.effective_status || opt.status || ''}
                 disabled={adsLoading || ads.length === 0}
                 loading={adsLoading}
               />
             </div>
-            <div className="col-12 col-md-auto ms-md-auto">
+            <div className="col-12 col-md-auto ms-md-auto d-flex gap-2">
               <button
                 className="refresh-btn"
-                onClick={load}
+                onClick={() => load(false)}
                 disabled={loading}
               >
                 <span className="refresh-emoji">{loading ? "⏳" : "🔄"}</span>
                 {loading ? "Refreshing..." : "Refresh Data"}
+              </button>
+              <button
+                className="refresh-btn btn-outline-primary"
+                onClick={() => load(true)}
+                disabled={loading}
+                title="Fetch latest from Meta (includes video metrics e.g. Hook/Hold rate)"
+              >
+                <span className="refresh-emoji">{loading ? "⏳" : "🔄"}</span>
+                {loading ? "Refreshing..." : "Refresh with live data"}
               </button>
             </div>
           </div>
@@ -3969,7 +4054,7 @@ export default function AdsDashboardBootstrap() {
               <div className="kpi-icon">🎣</div>
               <small className="kpi-label">Hook Rate</small>
               <div className="kpi-value">{formatPerc(totals.hookRate)}</div>
-              <small className="kpi-subtitle">3s Views</small>
+              <small className="kpi-subtitle">3s Views / Impressions</small>
             </div>
           </div>
         </div>
@@ -3981,7 +4066,7 @@ export default function AdsDashboardBootstrap() {
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
               <div className="kpi-value">{formatPerc(totals.holdRate)}</div>
-              <small className="kpi-subtitle">ThruPlays</small>
+              <small className="kpi-subtitle">ThruPlays / Video Views</small>
             </div>
           </div>
         </div>
@@ -5449,24 +5534,28 @@ export default function AdsDashboardBootstrap() {
             </div>
           </div>
 
-          {/* 8. Unfollows */}
+          {/* 8. Unfollows - always last 28 days (independent of date range filter); estimated from follower_count deltas on Instagram */}
           <div className="col-6 col-md-4 col-lg-3 col-xl">
-            <div className="kpi-card kpi-card-unfollowers">
+            <div className="kpi-card kpi-card-unfollowers" title="Unfollow count for the last 28 days only. Does not change with the date range filter. Estimated from daily follower count changes (Instagram).">
               <div className="kpi-card-body">
                 <div className="kpi-icon">👋</div>
                 <small className="kpi-label">Unfollows</small>
                 <div className="kpi-value">
-                  {performanceInsightsLoading ? (
+                  {unfollowsLast28Loading ? (
                     <span className="spinner-border spinner-border-sm" role="status"></span>
                   ) : (
-                    formatNum(performanceInsightsData?.total_unfollows || 0)
+                    formatNum(unfollowsLast28Days?.total_unfollows ?? 0)
                   )}
                 </div>
-                {performanceInsightsData && (
-                  <small className={`kpi-change ${performanceInsightsData.unfollowsChange >= 0 ? 'kpi-change-negative' : 'kpi-change-positive'}`}>
-                    {formatChange(performanceInsightsData.unfollowsChange)}
+                {unfollowsLast28Error && (
+                  <small className="text-muted" style={{ fontSize: '0.7rem' }}>{unfollowsLast28Error}</small>
+                )}
+                {unfollowsLast28Days != null && !unfollowsLast28Error && (
+                  <small className={`kpi-change ${unfollowsLast28Days.unfollowsChange >= 0 ? 'kpi-change-negative' : 'kpi-change-positive'}`}>
+                    {formatChange(unfollowsLast28Days.unfollowsChange)}
                   </small>
                 )}
+                <small className="kpi-subtitle">Last 28 days</small>
               </div>
             </div>
           </div>
@@ -5485,8 +5574,18 @@ export default function AdsDashboardBootstrap() {
               <div className="alert alert-warning mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
                 <small>
                   <i className="fas fa-exclamation-triangle me-1"></i>
-                  Unable to load Wix analytics: {contentPlatformMetricsError}. Check server logs for details.
+                  Unable to load Wix analytics: {contentPlatformMetricsError}
                 </small>
+                {(contentPlatformMetricsError || '').toLowerCase().includes('not configured') && (
+                  <div className="mt-2" style={{ fontSize: '0.8rem' }}>
+                    <strong>Steps:</strong> 1) Add WIX_SITE_ID and WIX_TOKEN to server/.env. 2) Select &quot;Wix&quot; in the Platform filter. 3) Set a Time Range (Last 7 days). 4) Restart the server.
+                  </div>
+                )}
+                {(contentPlatformMetricsError || '').includes('400') && (
+                  <div className="mt-2" style={{ fontSize: '0.8rem' }}>
+                    <strong>400 error:</strong> Wix stores analytics for 62 days only. Use Time Range within last 62 days. Check server logs for Wix API details.
+                  </div>
+                )}
               </div>
             )}
             {/* 3×3 Metric Cards */}

@@ -139,6 +139,38 @@ function extractMetricValue(m) {
 }
 
 /**
+ * Compute total_follows and total_unfollows from follower_count daily deltas.
+ * Unfollows are estimated using follower_count deltas because Instagram Graph API
+ * does not expose daily unfollow metrics.
+ *
+ * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} followerCountMetric
+ * @returns {{ total_follows: number, total_unfollows: number, net_followers: number, date_range_days: number }}
+ */
+function computeUnfollowsFromFollowerCountDeltas(followerCountMetric) {
+  const values = followerCountMetric?.values || [];
+  if (values.length < 2) {
+    return { total_follows: 0, total_unfollows: 0, net_followers: 0, date_range_days: values.length };
+  }
+  const sorted = [...values]
+    .filter((v) => v && (v.value != null) && v.end_time)
+    .map((v) => ({ value: Number(v.value) || 0, date: (v.end_time || "").split("T")[0] }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  let totalFollows = 0;
+  let totalUnfollows = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const dailyChange = sorted[i].value - sorted[i - 1].value;
+    if (dailyChange > 0) totalFollows += dailyChange;
+    else if (dailyChange < 0) totalUnfollows += Math.abs(dailyChange);
+  }
+  return {
+    total_follows: totalFollows,
+    total_unfollows: totalUnfollows,
+    net_followers: totalFollows - totalUnfollows,
+    date_range_days: sorted.length,
+  };
+}
+
+/**
  * Normalize a single account's Meta API response into our format.
  * Handles both values (time_series) and total_value response shapes.
  *
@@ -154,6 +186,10 @@ function normalizeAccountResponse(accountId, data, date) {
     follows: 0,
     views: 0,
     interactions: 0,
+    total_follows_delta: 0,
+    total_unfollows: 0,
+    net_followers_delta: 0,
+    date_range_days: 0,
     date: date || new Date().toISOString().slice(0, 10),
   };
 
@@ -167,6 +203,11 @@ function normalizeAccountResponse(accountId, data, date) {
     if (name === "follower_count") {
       const latest = values.length > 0 ? values[values.length - 1] : null;
       out.follows = latest ? Number(latest.value) || 0 : totalValue != null ? Number(totalValue) : 0;
+      const deltaResult = computeUnfollowsFromFollowerCountDeltas(m);
+      out.total_follows_delta = deltaResult.total_follows;
+      out.total_unfollows = deltaResult.total_unfollows;
+      out.net_followers_delta = deltaResult.net_followers;
+      out.date_range_days = deltaResult.date_range_days;
       continue;
     }
 
@@ -318,18 +359,29 @@ function aggregateAccounts(accounts) {
   const totalFollows = valid.reduce((s, a) => s + (a.follows || 0), 0);
   const totalViews = valid.reduce((s, a) => s + (a.views || 0), 0);
   const totalInteractions = valid.reduce((s, a) => s + (a.interactions || 0), 0);
+  const totalUnfollows = valid.reduce((s, a) => s + (a.total_unfollows || 0), 0);
+  const totalFollowsDelta = valid.reduce((s, a) => s + (a.total_follows_delta || 0), 0);
+  const netFollowersDelta = totalFollowsDelta - totalUnfollows;
+  const dateRangeDaysArr = valid.map((a) => a.date_range_days || 0);
+  const maxDateRangeDays = dateRangeDaysArr.length > 0 ? Math.max(0, ...dateRangeDaysArr) : 0;
 
   return {
     totalReached,
     totalFollows,
     totalViews,
     totalInteractions,
+    totalUnfollows,
+    totalFollowsDelta,
+    netFollowersDelta,
+    date_range_days: maxDateRangeDays,
     accounts: valid.map((a) => ({
       accountId: a.accountId,
       reached: a.reached || 0,
       follows: a.follows || 0,
       views: a.views || 0,
       interactions: a.interactions || 0,
+      total_unfollows: a.total_unfollows || 0,
+      total_follows_delta: a.total_follows_delta || 0,
     })),
   };
 }
@@ -453,6 +505,7 @@ async function fetchInstagramInsights(opts = {}) {
 
   const response = {
     ...aggregated,
+    total_unfollows: aggregated.totalUnfollows,
     date,
     since,
     until,
@@ -461,10 +514,13 @@ async function fetchInstagramInsights(opts = {}) {
       total_interactions: aggregated.totalInteractions,
       total_follows: aggregated.totalFollows,
       total_reached: aggregated.totalReached,
+      total_unfollows: aggregated.totalUnfollows,
       viewsChange: 0,
       interactionsChange: 0,
       followsChange: 0,
       reachChange: 0,
+      unfollowsChange: 0,
+      date_range_days: aggregated.date_range_days,
       period: `${since} to ${until}`,
     },
     error: null,
@@ -475,6 +531,7 @@ async function fetchInstagramInsights(opts = {}) {
     totalFollows: response.totalFollows,
     totalViews: response.totalViews,
     totalInteractions: response.totalInteractions,
+    totalUnfollows: response.totalUnfollows,
   });
   return response;
 }
@@ -486,4 +543,5 @@ module.exports = {
   normalizeAccountResponse,
   aggregateAccounts,
   getDateRangeFromPeriod,
+  computeUnfollowsFromFollowerCountDeltas,
 };

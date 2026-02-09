@@ -154,6 +154,20 @@ async function fetchInsightsFromMetaLive(opts) {
       }
     } while (true);
 
+    // Debug: log first row's actions so we can verify Meta's action_type keys for Hook/Hold rate
+    if (allRows.length > 0) {
+      const first = allRows[0];
+      if (first && (first.actions || first.action_values)) {
+        const actionTypes = Array.isArray(first.actions) ? first.actions.map((a) => a.action_type) : [];
+        console.log('[InsightsService] Sample row actions (first row):', {
+          ad_id: first.ad_id,
+          actionTypes,
+          actionsSample: Array.isArray(first.actions) ? first.actions.slice(0, 15) : first.actions,
+          hasActionValues: Array.isArray(first.action_values) && first.action_values.length > 0,
+        });
+      }
+    }
+
     cache.set(key, { data: allRows, expires: now + CACHE_TTL_MS });
     return allRows;
   };
