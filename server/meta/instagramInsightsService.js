@@ -536,8 +536,78 @@ async function fetchInstagramInsights(opts = {}) {
   return response;
 }
 
+/**
+ * Fetch Instagram audience demographics (city and country) for Top towns/cities and Top countries.
+ * Uses metric=engaged_audience_demographics with breakdown=country and breakdown=city.
+ * Requires period=lifetime and timeframe (this_week, this_month, etc.); does not support since/until.
+ *
+ * @param {string} igAccountId - Instagram Business Account ID
+ * @param {string} accessToken - Page or Instagram access token (instagram_manage_insights)
+ * @param {string} [timeframe] - this_week (7d), this_month (30d), or last_90_days
+ * @returns {Promise<{ city_breakdown: Array<{city:string,value:number}>, country_breakdown: Array<{country:string,value:number}> }>}
+ */
+async function fetchInstagramAudienceDemographics(igAccountId, accessToken, timeframe = "this_month") {
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/insights`;
+  const baseParams = {
+    metric: "engaged_audience_demographics",
+    period: "lifetime",
+    timeframe,
+    metric_type: "total_value",
+    access_token: accessToken,
+  };
+
+  const parseBreakdownResults = (data, breakdownKey) => {
+    const out = [];
+    const items = data?.data || [];
+    for (const metric of items) {
+      const breakdowns = metric.total_value?.breakdowns || [];
+      for (const bd of breakdowns) {
+        const keys = bd.dimension_keys || [];
+        const keyIndex = keys.indexOf(breakdownKey);
+        if (keyIndex === -1) continue;
+        const results = bd.results || [];
+        for (const r of results) {
+          const vals = r.dimension_values || [];
+          const name = vals[keyIndex];
+          const value = parseInt(r.value, 10) || 0;
+          if (name != null && name !== "") out.push({ [breakdownKey]: name, value });
+        }
+      }
+    }
+    return out;
+  };
+
+  try {
+    const [countryRes, cityRes] = await Promise.all([
+      rateLimiter.schedule(() =>
+        axios.get(url, {
+          params: { ...baseParams, breakdown: "country" },
+          timeout: 20000,
+        })
+      ),
+      rateLimiter.schedule(() =>
+        axios.get(url, {
+          params: { ...baseParams, breakdown: "city" },
+          timeout: 20000,
+        })
+      ),
+    ]);
+
+    const country_breakdown = parseBreakdownResults(countryRes.data, "country");
+    const city_breakdown = parseBreakdownResults(cityRes.data, "city");
+
+    return { city_breakdown, country_breakdown };
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.warn("[Instagram Audience Demographics] Error:", code, msg);
+    throw err;
+  }
+}
+
 module.exports = {
   fetchInstagramInsights,
+  fetchInstagramAudienceDemographics,
   resolveIgAccountsFromPages,
   resolveIgAccountsViaInstagramAccountsEdge,
   normalizeAccountResponse,

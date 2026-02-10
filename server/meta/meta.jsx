@@ -12,8 +12,9 @@ const { getInsights, upsertInsights } = require("../repositories/insightsReposit
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
 const { fetchInsightsFromMetaLive } = require("./insightsService");
+const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
-const { fetchInstagramInsights, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { fetchInstagramInsights, fetchInstagramAudienceDemographics, resolveIgAccountsFromPages } = require("./instagramInsightsService");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
 const campaignsServiceMeta = require("../services/meta/campaignsService");
@@ -555,6 +556,153 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     res.status(500).json({
       error: "Failed to fetch insights",
       details: err?.message || String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// INSIGHTS DEMOGRAPHICS — Auto-split by valid breakdown combinations (age+gender, country).
+// Due to Meta Ads Insights API restrictions, demographic breakdowns are fetched using multiple
+// API calls and merged internally, replicating Ads Manager behavior.
+// GET /api/meta/insights/demographics?from=YYYY-MM-DD&to=YYYY-MM-DD&breakdowns=age,gender,country&ad_account_id=...
+// ---------------------------------------------------------------------
+router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) => {
+  try {
+    let credentials;
+    try {
+      credentials = getCredentials();
+    } catch (e) {
+      return res.status(400).json({
+        error: "Meta credentials required",
+        details: e.message,
+      });
+    }
+
+    const { from, to, breakdowns, ad_account_id, is_all_campaigns, is_all_ads, campaign_id, ad_id } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from;
+    let toDate = to;
+    if (!fromDate || !toDate || !dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+      const today = new Date().toISOString().slice(0, 10);
+      const fromD = new Date();
+      fromD.setDate(fromD.getDate() - 7);
+      fromDate = fromD.toISOString().slice(0, 10);
+      toDate = today;
+    }
+
+    const adAccountId = (ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId || !/^\d+$/.test(adAccountId)) {
+      return res.status(400).json({
+        error: "Valid Ad Account ID is required",
+        details: "Provide ad_account_id or set META_AD_ACCOUNT_ID in server/.env",
+      });
+    }
+
+    const requestedBreakdowns = (breakdowns || 'age,gender,country,region').toString().split(',').map((s) => s.trim()).filter(Boolean);
+    const isAllCampaigns = is_all_campaigns === '1' || is_all_campaigns === 'true';
+    const isAllAds = is_all_ads === '1' || is_all_ads === 'true';
+    const campaignIds = (campaign_id || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const adIds = (ad_id || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+    const payload = await fetchDemographicInsightsSplit({
+      accessToken: credentials.accessToken,
+      adAccountId,
+      from: fromDate,
+      to: toDate,
+      breakdowns: requestedBreakdowns,
+      isAllCampaigns,
+      isAllAds,
+      campaignIds,
+      adIds,
+    });
+
+    return res.json(payload);
+  } catch (err) {
+    console.error("Insights demographics error:", err?.message || err);
+    return res.status(500).json({
+      error: "Failed to fetch demographic insights",
+      details: err?.message || String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// INSIGHTS DAILY — Ad account daily time series (impressions, reach, clicks) for Page performance chart.
+// GET /api/meta/insights/daily?from=YYYY-MM-DD&to=YYYY-MM-DD&ad_account_id=...
+// Returns same shape as page insights: { data: { reach: [{date, value}], impressions: [{date, value}], clicks: [{date, value}] } }
+// ---------------------------------------------------------------------
+const DAILY_INSIGHTS_STATUS_FILTER = [
+  { field: 'campaign.effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED', 'ARCHIVED', 'IN_REVIEW', 'REJECTED', 'PENDING_REVIEW', 'LEARNING', 'ENDED'] },
+  { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED', 'ARCHIVED', 'IN_REVIEW', 'REJECTED', 'PENDING_REVIEW', 'LEARNING', 'ENDED'] },
+];
+router.get("/insights/daily", optionalAuthMiddleware, async (req, res) => {
+  try {
+    let credentials;
+    try {
+      credentials = getCredentials();
+    } catch (e) {
+      return res.status(400).json({
+        error: "Meta credentials required",
+        details: e.message,
+      });
+    }
+    const { from, to, ad_account_id } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from;
+    let toDate = to;
+    if (!fromDate || !toDate || !dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+      const today = new Date().toISOString().slice(0, 10);
+      const fromD = new Date();
+      fromD.setDate(fromD.getDate() - 7);
+      fromDate = fromD.toISOString().slice(0, 10);
+      toDate = today;
+    }
+    const adAccountId = (ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId || !/^\d+$/.test(adAccountId)) {
+      return res.status(400).json({
+        error: "Valid Ad Account ID is required",
+        details: "Provide ad_account_id or set META_AD_ACCOUNT_ID in server/.env",
+      });
+    }
+    const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
+    const timeRange = JSON.stringify({ since: fromDate, until: toDate });
+    const params = {
+      access_token: credentials.accessToken,
+      level: 'ad',
+      time_increment: 1,
+      time_range: timeRange,
+      fields: 'date_start,impressions,reach,clicks',
+      limit: 1000,
+      filtering: JSON.stringify(DAILY_INSIGHTS_STATUS_FILTER),
+    };
+    const { data } = await axios.get(insightsUrl, { params, timeout: 60000 });
+    const rows = Array.isArray(data.data) ? data.data : [];
+    const byDate = new Map();
+    rows.forEach((row) => {
+      const date = row.date_start || null;
+      if (!date) return;
+      if (!byDate.has(date)) byDate.set(date, { reach: 0, impressions: 0, clicks: 0 });
+      const agg = byDate.get(date);
+      agg.reach += parseInt(row.reach || 0, 10);
+      agg.impressions += parseInt(row.impressions || 0, 10);
+      agg.clicks += parseInt(row.clicks || 0, 10);
+    });
+    const sortedDates = [...byDate.keys()].sort();
+    const reach = sortedDates.map((date) => ({ date, value: byDate.get(date).reach }));
+    const impressions = sortedDates.map((date) => ({ date, value: byDate.get(date).impressions }));
+    const clicks = sortedDates.map((date) => ({ date, value: byDate.get(date).clicks }));
+    return res.json({
+      data: {
+        reach,
+        impressions,
+        clicks,
+      },
+    });
+  } catch (err) {
+    console.error("Insights daily error:", err?.message || err);
+    return res.status(500).json({
+      error: "Failed to fetch daily insights",
+      details: err?.response?.data?.error?.message || err?.message || String(err),
     });
   }
 });
@@ -1246,6 +1394,73 @@ router.get("/page-name", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// Instagram audience demographics (city + country) for Top towns/cities and Top countries
+// GET /api/meta/instagram-audience-demographics?page_id=...&timeframe=this_month
+// Returns city_breakdown and country_breakdown from Instagram engaged_audience_demographics
+// ---------------------------------------------------------------------
+router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { page_id, timeframe } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID that has a linked Instagram Business account.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const tf = (timeframe || "this_month").toLowerCase();
+    const allowedTimeframes = ["this_week", "this_month", "last_90_days"];
+    const actualTimeframe = allowedTimeframes.includes(tf) ? tf : "this_month";
+
+    const systemToken = getSystemToken();
+    const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
+    const pageRes = await axios.get(pageUrl, {
+      params: {
+        access_token: systemToken,
+        fields: "instagram_business_account{id}",
+      },
+      timeout: 10000,
+    });
+    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      return res.status(400).json({
+        error: "No Instagram account linked",
+        details: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
+      });
+    }
+
+    const pageToken = await getPageAccessToken(pageId);
+    const { city_breakdown, country_breakdown } = await fetchInstagramAudienceDemographics(
+      igAccountId,
+      pageToken,
+      actualTimeframe
+    );
+
+    return res.json({
+      data: {
+        city_breakdown,
+        country_breakdown,
+        source: "instagram_audience",
+      },
+    });
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.error("[Instagram Audience Demographics] Error:", code || err.message, msg);
+    if (err.response?.status === 400) {
+      return res.status(400).json({
+        error: "Bad request",
+        details: msg,
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram audience demographics",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
 // 5.2) FORMS API - Fetch leadgen forms for a page
 //    GET /api/meta/pages/:pageId/forms
 //    Uses Page Access Token (required by Meta's leadgen_forms API)
@@ -1683,8 +1898,14 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
 
     const accessToken = await getPageAccessToken(pageId);
     
-    // Default metrics: valid in v24.0+ (page_reach not in current docs; page_follows, page_media_view are replacements for deprecated metrics; page_fan_removes for unfollows)
-    const metrics = metric || "page_follows,page_media_view,page_fan_removes";
+    // Page Insights API: request impressions, reach, and engagement so the chart shows all three.
+    // First try full set; if Meta returns #100, try alternatives then last-resort impressions only.
+    // Page engagement metrics (page_consumptions, page_engaged_users) were deprecated Sept 2024 and trigger #100.
+    const metricsToTry = metric ? [metric] : [
+      "page_media_view,page_impressions_unique,page_follows",
+      "page_impressions,page_impressions_unique,page_follows",
+      "page_impressions"
+    ];
     
     // Date range handling
     let since = null;
@@ -1708,14 +1929,6 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
     }
     
     const insightsUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}/insights`;
-    
-    const params = {
-      access_token: accessToken,
-      metric: metrics,
-      period: "day",
-      since: since,
-      until: until,
-    };
     
     // Helper to process insights response into totals
     const processInsights = (insightsData, periodLabel) => {
@@ -1840,14 +2053,38 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
       return processedData;
     };
     
-    // Fetch current period insights
-   
-    const { data } = await axios.get(insightsUrl, { params });
-    
-    // Meta API returns insights as an array of metric objects
-    // Each metric has a name and values array with date/value pairs
-    const insightsData = data.data || [];
-    const processedData = processInsights(insightsData, `${since} to ${until}`);
+    // Fetch current period insights. Try multiple metric sets; Page Insights API (#100) can reject some metrics per Page.
+    let lastError = null;
+    let processedData = null;
+    for (const metrics of metricsToTry) {
+      try {
+        const params = {
+          access_token: accessToken,
+          metric: metrics,
+          period: "day",
+          since: since,
+          until: until,
+        };
+        const { data } = await axios.get(insightsUrl, { params });
+        const insightsData = data.data || [];
+        processedData = processInsights(insightsData, `${since} to ${until}`);
+        lastError = null;
+        break;
+      } catch (err) {
+        const code = err?.response?.data?.error?.code;
+        lastError = err;
+        if (code === 100 && metricsToTry.indexOf(metrics) < metricsToTry.length - 1) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (lastError && !processedData) {
+      throw lastError;
+    }
+    if (!processedData) {
+      processedData = processInsights([], `${since} to ${until}`);
+    }
 
     // Fetch previous period for change calculations
     const startDate = new Date(since);
@@ -1899,9 +2136,9 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
     if (metaError?.code === 100) {
       return res.status(400).json({
         error: "Invalid insights metric",
-        details: metaError.message || "Some requested metrics are deprecated or invalid. Check Meta Page Insights documentation.",
+        details: metaError.message || "Some requested metrics are deprecated or invalid for this Page.",
         isPermissionError: false,
-        instruction: "Use valid metrics: page_follows, page_media_view (and Page Insights API v24.0+)"
+        instruction: "This error is from the Page Insights API (for the selected PAGE), not Ad Account. Ad Account insights (act_XXX/insights with impressions, reach, spend, breakdowns) use a different endpoint and are used for Age & Gender / Top Countries. For Page performance we try page_follows, page_media_view, then page_impressions. If all fail, the Page may not support these metrics or token may need pages_read_engagement."
       });
     }
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
     BarChart,
     Bar,
@@ -9,13 +9,111 @@ import {
     ResponsiveContainer,
     AreaChart,
     Area,
-    Legend,
-    LineChart,
-    Line,
-    ComposedChart
+    Legend
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
+import MultiSelectFilter from '../components/MultiSelectFilter';
+import DateRangeFilter from '../components/DateRangeFilter';
 import './Audience.css';
+
+const getAuthToken = () => {
+    try {
+        const STORAGE_KEY = process.env.REACT_APP_STORAGE_KEY || 'app_auth';
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+            const data = JSON.parse(stored);
+            return data.token;
+        }
+    } catch (e) {
+        console.error('Error getting token:', e);
+    }
+    return null;
+};
+
+const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
+
+const fetchPages = async () => {
+    try {
+        const token = getAuthToken();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${API_BASE}/api/meta/pages`, { headers });
+        if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            console.error('API error fetching pages:', errorData);
+            return [];
+        }
+        const data = await res.json();
+        return data.data || [];
+    } catch (e) {
+        console.error('Error fetching pages:', e);
+        return [];
+    }
+};
+
+const fetchPageInsights = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    // Use server default metrics (page_follows, page_media_view, page_fan_removes) to avoid Meta #100 invalid metric
+    const res = await fetch(`${API_BASE}/api/meta/pages/${pageId}/insights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
+const fetchDemographicInsights = async (from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country,region`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    return await res.json();
+};
+
+const fetchDailyInsights = async (from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE}/api/meta/insights/daily?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
+const fetchInstagramAudienceDemographics = async (pageId, timeframe) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE}/api/meta/instagram-audience-demographics?page_id=${encodeURIComponent(pageId)}&timeframe=${encodeURIComponent(timeframe)}`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
+const getContentDefaultDates = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6);
+    return {
+        startDate: startDate.toISOString().slice(0, 10),
+        endDate: endDate.toISOString().slice(0, 10)
+    };
+};
 
 export default function Audience() {
     const [activeTab, setActiveTab] = useState('Demographics');
@@ -25,14 +123,138 @@ export default function Audience() {
     const [platformMetric1, setPlatformMetric1] = useState('Reach');
     const [platformMetric2, setPlatformMetric2] = useState('Results');
 
-    // New Filters
-    const [platformSource, setPlatformSource] = useState('Facebook');
-    const [dateFilters, setDateFilters] = useState({ startDate: '', endDate: '' });
-    const [selectedDateRange, setSelectedDateRange] = useState('this_week');
+    // Time Range filter (Content Marketing style)
+    const [contentFilters, setContentFilters] = useState(() => getContentDefaultDates());
+    const [contentDateRange, setContentDateRange] = useState('last_7_days');
+    const [showContentDateRangeFilter, setShowContentDateRangeFilter] = useState(false);
+    const [contentDateRangeFilterValue, setContentDateRangeFilterValue] = useState(null);
 
-    // --- MOCK DATA ---
+    // PAGE filter (Content Marketing style)
+    const [pages, setPages] = useState([]);
+    const [audiencePage, setAudiencePage] = useState(null);
+
+    // Live data from Meta (Page Insights + Daily Ad Insights + Demographics)
+    const [pageInsightsData, setPageInsightsData] = useState(null);
+    const [pageInsightsLoading, setPageInsightsLoading] = useState(false);
+    const [pageInsightsError, setPageInsightsError] = useState(null);
+    const [dailyInsightsData, setDailyInsightsData] = useState(null);
+    const [dailyInsightsLoading, setDailyInsightsLoading] = useState(false);
+    const [dailyInsightsError, setDailyInsightsError] = useState(null);
+    const [demographicsData, setDemographicsData] = useState(null);
+    const [demographicsLoading, setDemographicsLoading] = useState(false);
+    const [demographicsError, setDemographicsError] = useState(null);
+    const [igAudienceData, setIgAudienceData] = useState(null);
+    const [igAudienceLoading, setIgAudienceLoading] = useState(false);
+    const [igAudienceError, setIgAudienceError] = useState(null);
+
+    useEffect(() => {
+        const loadPages = async () => {
+            const pagesData = await fetchPages();
+            setPages(pagesData || []);
+        };
+        loadPages();
+    }, []);
+
+    // Fetch page insights when PAGE and time range are set
+    useEffect(() => {
+        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+            setPageInsightsData(null);
+            setPageInsightsError(null);
+            return;
+        }
+        let cancelled = false;
+        setPageInsightsLoading(true);
+        setPageInsightsError(null);
+        fetchPageInsights(audiencePage, contentFilters.startDate, contentFilters.endDate)
+            .then((data) => {
+                if (!cancelled) setPageInsightsData(data);
+            })
+            .catch((err) => {
+                if (!cancelled) setPageInsightsError(err?.message || 'Failed to load page insights');
+            })
+            .finally(() => {
+                if (!cancelled) setPageInsightsLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch daily ad account insights (impressions, reach, clicks) for Page performance chart
+    useEffect(() => {
+        if (!contentFilters.startDate || !contentFilters.endDate) {
+            setDailyInsightsData(null);
+            setDailyInsightsError(null);
+            return;
+        }
+        let cancelled = false;
+        setDailyInsightsLoading(true);
+        setDailyInsightsError(null);
+        fetchDailyInsights(contentFilters.startDate, contentFilters.endDate)
+            .then((data) => { if (!cancelled) setDailyInsightsData(data); })
+            .catch((err) => {
+                if (!cancelled) setDailyInsightsError(err?.message || 'Failed to load daily insights');
+            })
+            .finally(() => {
+                if (!cancelled) setDailyInsightsLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Instagram audience demographics (city + country) when PAGE is selected
+    useEffect(() => {
+        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+            setIgAudienceData(null);
+            setIgAudienceError(null);
+            return;
+        }
+        const start = new Date(contentFilters.startDate);
+        const end = new Date(contentFilters.endDate);
+        const days = Math.round((end - start) / (1000 * 60 * 60 * 24));
+        const timeframe = days <= 8 ? 'this_week' : 'this_month';
+        let cancelled = false;
+        setIgAudienceLoading(true);
+        setIgAudienceError(null);
+        fetchInstagramAudienceDemographics(audiencePage, timeframe)
+            .then((data) => { if (!cancelled) setIgAudienceData(data); })
+            .catch((err) => {
+                if (!cancelled) setIgAudienceError(err?.message || 'Failed to load Instagram audience');
+            })
+            .finally(() => {
+                if (!cancelled) setIgAudienceLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch demographic insights (age/gender, country) when time range is set
+    useEffect(() => {
+        if (!contentFilters.startDate || !contentFilters.endDate) {
+            setDemographicsData(null);
+            setDemographicsError(null);
+            return;
+        }
+        let cancelled = false;
+        setDemographicsLoading(true);
+        setDemographicsError(null);
+        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate)
+            .then((payload) => {
+                if (!cancelled) {
+                    setDemographicsData({
+                        age_gender_breakdown: payload.age_gender_breakdown || [],
+                        country_breakdown: payload.country_breakdown || [],
+                        region_breakdown: payload.region_breakdown || [],
+                    });
+                }
+            })
+            .catch((err) => {
+                if (!cancelled) setDemographicsError(err?.message || 'Failed to load demographics');
+            })
+            .finally(() => {
+                if (!cancelled) setDemographicsLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [contentFilters.startDate, contentFilters.endDate]);
+
+    // --- MOCK DATA (fallbacks when API has no data) ---
     const initialData = [
-        { age: '13-17', men: 0, women: 0 },
         { age: '18-24', men: 9, women: 4 },
         { age: '25-34', men: 31, women: 18 },
         { age: '35-44', men: 17, women: 9 },
@@ -78,96 +300,172 @@ export default function Audience() {
         { name: 'WhatsApp Bus', reach: 0, results: 0 },
     ];
 
-    // Sample data for each Platform Source
-    const getPlatformSourceData = (source) => {
-        const baseData = [
-            { date: '01 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '05 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '10 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '15 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '20 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '25 Nov', reach: 0, engagement: 0, impressions: 0 },
-            { date: '30 Nov', reach: 0, engagement: 0, impressions: 0 },
-        ];
+    // Page performance chart: prefer Ad Account daily insights (impressions, reach, clicks); fallback to Page insights (impressions, reach, clicks: 0)
+    const pagePerformanceChartData = (() => {
+        const reachArr = (dailyInsightsData || pageInsightsData)?.reach || [];
+        const impressionsArr = (dailyInsightsData || pageInsightsData)?.impressions || [];
+        const clicksArr = (dailyInsightsData || pageInsightsData)?.clicks || [];
+        if (!reachArr.length && !impressionsArr.length && !clicksArr.length) return null;
+        const byDate = new Map();
+        const add = (arr, key) => {
+            (arr || []).forEach(({ date, value }) => {
+                if (!date) return;
+                if (!byDate.has(date)) byDate.set(date, { date, reach: 0, impressions: 0, clicks: 0 });
+                const v = byDate.get(date);
+                if (key === 'reach') v.reach += Number(value) || 0;
+                else if (key === 'impressions') v.impressions += Number(value) || 0;
+                else if (key === 'clicks') v.clicks += Number(value) || 0;
+            });
+        };
+        add(reachArr, 'reach');
+        add(impressionsArr, 'impressions');
+        add(clicksArr, 'clicks');
+        const sorted = [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([, row]) => ({
+            date: row.date ? new Date(row.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).replace(/ /g, ' ') : '',
+            reach: row.reach,
+            impressions: row.impressions,
+            clicks: row.clicks,
+        }));
+        return sorted.length ? sorted : null;
+    })();
 
-        switch (source) {
-            case 'Facebook':
-                return [
-                    { date: '01 Nov', reach: 12500, engagement: 3200, impressions: 18500 },
-                    { date: '05 Nov', reach: 13200, engagement: 3400, impressions: 19200 },
-                    { date: '10 Nov', reach: 14000, engagement: 3600, impressions: 20000 },
-                    { date: '15 Nov', reach: 14800, engagement: 3800, impressions: 21000 },
-                    { date: '20 Nov', reach: 15500, engagement: 4000, impressions: 22000 },
-                    { date: '25 Nov', reach: 16200, engagement: 4200, impressions: 23000 },
-                    { date: '30 Nov', reach: 17000, engagement: 4400, impressions: 24000 },
-                ];
-            case 'Instagram':
-                return [
-                    { date: '01 Nov', reach: 8500, engagement: 2100, impressions: 12000 },
-                    { date: '05 Nov', reach: 9000, engagement: 2250, impressions: 12800 },
-                    { date: '10 Nov', reach: 9500, engagement: 2400, impressions: 13500 },
-                    { date: '15 Nov', reach: 10000, engagement: 2550, impressions: 14200 },
-                    { date: '20 Nov', reach: 10500, engagement: 2700, impressions: 15000 },
-                    { date: '25 Nov', reach: 11000, engagement: 2850, impressions: 15800 },
-                    { date: '30 Nov', reach: 11500, engagement: 3000, impressions: 16500 },
-                ];
-            case 'My Health School Page':
-                return [
-                    { date: '01 Nov', reach: 3200, engagement: 850, impressions: 4800 },
-                    { date: '05 Nov', reach: 3400, engagement: 920, impressions: 5100 },
-                    { date: '10 Nov', reach: 3600, engagement: 990, impressions: 5400 },
-                    { date: '15 Nov', reach: 3800, engagement: 1060, impressions: 5700 },
-                    { date: '20 Nov', reach: 4000, engagement: 1130, impressions: 6000 },
-                    { date: '25 Nov', reach: 4200, engagement: 1200, impressions: 6300 },
-                    { date: '30 Nov', reach: 4400, engagement: 1270, impressions: 6600 },
-                ];
-            case 'Doctor Farmer Page':
-                return [
-                    { date: '01 Nov', reach: 2100, engagement: 580, impressions: 3100 },
-                    { date: '05 Nov', reach: 2250, engagement: 620, impressions: 3300 },
-                    { date: '10 Nov', reach: 2400, engagement: 660, impressions: 3500 },
-                    { date: '15 Nov', reach: 2550, engagement: 700, impressions: 3700 },
-                    { date: '20 Nov', reach: 2700, engagement: 740, impressions: 3900 },
-                    { date: '25 Nov', reach: 2850, engagement: 780, impressions: 4100 },
-                    { date: '30 Nov', reach: 3000, engagement: 820, impressions: 4300 },
-                ];
-            default:
-                return baseData;
-        }
-    };
-
-    // Date filter handlers
-    const handleDateFilterChange = (e) => {
-        const { name, value } = e.target;
-        setDateFilters(prev => ({ ...prev, [name]: value }));
-    };
-
-    const applyDatePreset = (type) => {
-        const today = new Date();
-        const day = today.getDay();
-        const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(today.setDate(diff));
-        const sunday = new Date(today.setDate(diff + 6));
-
-        let start = new Date(monday);
-        let end = new Date(sunday);
-
-        if (type === 'last_week') {
-            start.setDate(start.getDate() - 7);
-            end.setDate(end.getDate() - 7);
-            setSelectedDateRange('Last Week');
-        } else if (type === 'next_week') {
-            start.setDate(start.getDate() + 7);
-            end.setDate(end.getDate() + 7);
-            setSelectedDateRange('Next Week');
-        } else {
-            setSelectedDateRange('This Week');
-        }
-
-        setDateFilters({
-            startDate: start.toISOString().split('T')[0],
-            endDate: end.toISOString().split('T')[0]
+    // Age & Gender chart: build from demographics age_gender_breakdown (aggregate by age bucket, male/female)
+    // Match Meta Audience: 18-24 through 65+ (Meta does not show 13-17 in Instagram Audience)
+    const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const ageGenderChartData = (() => {
+        const rows = demographicsData?.age_gender_breakdown || [];
+        if (!rows.length) return null;
+        const byAge = {};
+        AGE_BUCKETS.forEach((b) => { byAge[b] = { age: b, men: 0, women: 0 }; });
+        rows.forEach((r) => {
+            const age = (r.age || '').trim() || 'unknown';
+            const bucket = AGE_BUCKETS.find((b) => b === age) || (AGE_BUCKETS.includes(age) ? age : null);
+            if (!bucket) return;
+            const val = Number(r.reach) || Number(r.impressions) || 0;
+            const g = (r.gender || '').toLowerCase();
+            if (g === 'male' || g === 'm') byAge[bucket].men += val;
+            else if (g === 'female' || g === 'f') byAge[bucket].women += val;
         });
+        return AGE_BUCKETS.map((b) => byAge[b]);
+    })();
+
+    // Age & Gender chart data with "All Ages" total as last column (one chart: 18-24 … 65+ then All Ages)
+    const ageGenderChartDataWithTotal = (() => {
+        if (!ageGenderChartData || !ageGenderChartData.length) return null;
+        const totalMen = ageGenderChartData.reduce((s, row) => s + (Number(row.men) || 0), 0);
+        const totalWomen = ageGenderChartData.reduce((s, row) => s + (Number(row.women) || 0), 0);
+        return [...ageGenderChartData, { age: 'All Ages', men: totalMen, women: totalWomen }];
+    })();
+
+    // Top towns/cities from Instagram audience (city-level) when available
+    const topCitiesFromIg = (() => {
+        const rows = igAudienceData?.city_breakdown || [];
+        if (!rows.length) return null;
+        const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
+        if (total === 0) return null;
+        return rows
+            .map((r) => ({
+                name: r.city || 'Unknown',
+                val: Math.round(((Number(r.value) || 0) / total) * 1000) / 10,
+            }))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+    })();
+
+    // Top Regions (towns/cities): build from demographics region_breakdown (percentage of reach) — region-level from Meta Ads Insights (fallback)
+    const topRegionsChartData = (() => {
+        const rows = demographicsData?.region_breakdown || [];
+        if (!rows.length) return null;
+        const total = rows.reduce((s, r) => s + (Number(r.reach) || Number(r.impressions) || 0), 0);
+        if (total === 0) return null;
+        return rows
+            .map((r) => ({
+                name: r.region || 'Unknown',
+                val: Math.round(((Number(r.reach) || Number(r.impressions) || 0) / total) * 1000) / 10,
+            }))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+    })();
+
+    // Top Countries: build from demographics country_breakdown (percentage of reach); optional code-to-name for display
+    const countryFlagMap = {
+        IN: '\uD83C\uDDEE\uD83C\uDDF3', LK: '\uD83C\uDDF1\uD83C\uDDF0', MY: '\uD83C\uDDF2\uD83C\uDDFE',
+        AE: '\uD83C\uDDE6\uD83C\uDDEA', SG: '\uD83C\uDDF8\uD83C\uDDEC', SA: '\uD83C\uDDF8\uD83C\uDDE6',
+        GB: '\uD83C\uDDEC\uD83C\uDDE7', US: '\uD83C\uDDFA\uD83C\uDDF8', QA: '\uD83C\uDDF6\uD83C\uDDE6',
+        KW: '\uD83C\uDDF0\uD83C\uDDFC',
+    };
+    const countryCodeToName = {
+        IN: 'India', LK: 'Sri Lanka', MY: 'Malaysia', AE: 'United Arab Emirates', SG: 'Singapore',
+        SA: 'Saudi Arabia', GB: 'United Kingdom', US: 'United States', QA: 'Qatar', KW: 'Kuwait',
+    };
+    const globe = '\uD83C\uDF0D';
+    const formatCountryRow = (raw, val) => {
+        const code = (raw || '').trim().length === 2 ? (raw || '').trim().toUpperCase() : null;
+        const name = code && countryCodeToName[code] ? countryCodeToName[code] : ((raw || '').trim() || 'Unknown');
+        return {
+            name,
+            val,
+            flag: countryFlagMap[code || (raw || '').slice(0, 2).toUpperCase()] || globe,
+        };
+    };
+    // Top countries from Instagram audience when available
+    const topCountriesFromIg = (() => {
+        const rows = igAudienceData?.country_breakdown || [];
+        if (!rows.length) return null;
+        const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
+        if (total === 0) return null;
+        return rows
+            .map((r) => formatCountryRow(r.country, Math.round(((Number(r.value) || 0) / total) * 1000) / 10))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+    })();
+    const topCountriesChartData = (() => {
+        const rows = demographicsData?.country_breakdown || [];
+        if (!rows.length) return null;
+        const total = rows.reduce((s, r) => s + (Number(r.reach) || Number(r.impressions) || 0), 0);
+        if (total === 0) return null;
+        return rows
+            .map((r) => formatCountryRow(r.country, Math.round(((Number(r.reach) || Number(r.impressions) || 0) / total) * 1000) / 10))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+    })();
+
+    const handleContentDateRangeApply = (payload) => {
+        if (!payload.start_date || !payload.end_date) {
+            console.error('[Audience DateRangeFilter] Invalid dates received:', payload);
+            return;
+        }
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+            console.error('[Audience DateRangeFilter] Invalid date format:', payload);
+            return;
+        }
+        setContentDateRangeFilterValue(payload);
+        setContentDateRange(payload.range_type || 'custom');
+        setContentFilters({ startDate: payload.start_date, endDate: payload.end_date });
+        setShowContentDateRangeFilter(false);
+    };
+
+    const getContentDateRangeDisplay = () => {
+        if (contentDateRangeFilterValue) {
+            if (contentDateRangeFilterValue.range_type === 'custom') {
+                const start = new Date(contentDateRangeFilterValue.start_date);
+                const end = new Date(contentDateRangeFilterValue.end_date);
+                return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+            }
+            const presetLabels = {
+                today: 'Today', yesterday: 'Yesterday', today_yesterday: 'Today & Yesterday',
+                last_7_days: 'Last 7 days', last_14_days: 'Last 14 days', last_28_days: 'Last 28 days',
+                last_30_days: 'Last 30 days', this_week: 'This week', last_week: 'Last week',
+                this_month: 'This month', last_month: 'Last month', maximum: 'Maximum'
+            };
+            return presetLabels[contentDateRangeFilterValue.range_type] || contentDateRange;
+        }
+        const presetLabels = {
+            last_7_days: 'Last 7 days', last_14_days: 'Last 14 days', last_30_days: 'Last 30 days',
+            this_week: 'This week', last_week: 'Last week', this_month: 'This month', last_month: 'Last month'
+        };
+        return presetLabels[contentDateRange] || 'Last 7 days';
     };
 
     // --- ANIMATION VARIANTS ---
@@ -185,135 +483,57 @@ export default function Audience() {
         visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 50 } }
     };
 
-    const currentPlatformData = getPlatformSourceData(platformSource);
-
-    // Reusable Filters Component
+    // Reusable Filters Component (Time Range + PAGE, same as Content Marketing)
     const FiltersRow = () => (
         <motion.div
-            className="d-flex align-items-center mb-4 gap-3 flex-wrap"
+            className="filter-card mb-4"
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
         >
-            {/* Platform Source Filter */}
-            <div className="dropdown">
-                <label className="form-label small fw-bold text-muted mb-2 d-block">Platform Source</label>
-                <button
-                    className="btn audience-dropdown-btn dropdown-toggle d-flex align-items-center gap-2"
-                    type="button"
-                    data-bs-toggle="dropdown"
-                    style={{ minWidth: '220px', justifyContent: 'space-between' }}
-                >
-                    <span className="fw-bold">{platformSource}</span>
-                </button>
-                <ul className="dropdown-menu shadow-lg border-0 rounded-3 p-2" style={{ minWidth: '220px' }}>
-                    <li>
-                        <button 
-                            className="dropdown-item rounded-2 fw-medium" 
-                            onClick={() => setPlatformSource('Facebook')}
+            <div className="filter-card-body">
+                <div className="row g-3 align-items-center">
+                    <div className="col-12 col-md-auto">
+                        <label className="filter-label">
+                            <span className="filter-emoji">📅</span> Time Range
+                        </label>
+                        <button
+                            type="button"
+                            className="d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
+                            onClick={() => setShowContentDateRangeFilter(true)}
+                            style={{
+                                borderRadius: '5px',
+                                color: 'var(--text, #64748b)',
+                                borderColor: 'rgba(0, 0, 0, 0.1)',
+                                transition: 'all 0.2s ease',
+                                height: '36px',
+                                minWidth: '180px',
+                                border: '1px solid rgba(0, 0, 0, 0.1)',
+                                background: 'var(--card, #ffffff)',
+                                width: '100%'
+                            }}
                         >
-                            Facebook
+                            <i className="far fa-calendar-alt text-secondary opacity-75"></i>
+                            <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.8rem' }}>
+                                {getContentDateRangeDisplay()}
+                            </span>
+                            <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
                         </button>
-                    </li>
-                    <li>
-                        <button 
-                            className="dropdown-item rounded-2 fw-medium" 
-                            onClick={() => setPlatformSource('Instagram')}
-                        >
-                            Instagram
-                        </button>
-                    </li>
-                    <li>
-                        <button 
-                            className="dropdown-item rounded-2 fw-medium" 
-                            onClick={() => setPlatformSource('My Health School Page')}
-                        >
-                            My Health School Page
-                        </button>
-                    </li>
-                    <li>
-                        <button 
-                            className="dropdown-item rounded-2 fw-medium" 
-                            onClick={() => setPlatformSource('Doctor Farmer Page')}
-                        >
-                            Doctor Farmer Page
-                        </button>
-                    </li>
-                </ul>
-            </div>
-
-            {/* Date Filter (like BestPerformingAd) */}
-            <div className="dropdown">
-                <label className="form-label small fw-bold text-muted mb-2 d-block">Date</label>
-                <div
-                    className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm dropdown-toggle cursor-pointer"
-                    role="button"
-                    data-bs-toggle="dropdown"
-                    aria-expanded="false"
-                    style={{
-                        borderRadius: '6px',
-                        color: '#64748b',
-                        borderColor: '#cbd5e1',
-                        transition: 'all 0.2s ease',
-                        height: '42px',
-                        minWidth: '200px'
-                    }}
-                >
-                    <i className="far fa-calendar-alt text-secondary opacity-75"></i>
-                    <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.9rem' }}>
-                        {selectedDateRange.includes('Week') ? selectedDateRange : `${dateFilters.startDate ? 'Custom' : 'Select Date'}: ${selectedDateRange}`}
-                    </span>
-                    <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                    </div>
+                    <div className="col-12 col-md-auto">
+                        <MultiSelectFilter
+                            label="PAGE"
+                            emoji="📄"
+                            options={pages}
+                            selectedValues={audiencePage ? [audiencePage] : []}
+                            onChange={(values) => setAudiencePage(values?.length ? values[0] : null)}
+                            placeholder="Select a Page"
+                            getOptionLabel={(opt) => opt.name}
+                            getOptionValue={(opt) => opt.id}
+                            singleSelect
+                        />
+                    </div>
                 </div>
-                <ul className="dropdown-menu shadow-lg border-0 rounded-3 p-3 mt-2" style={{ minWidth: '340px', backgroundColor: '#ffffff' }}>
-                    <div className="mb-3">
-                        <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Quick Select</h6>
-                        <div className="d-flex gap-2">
-                            <button onClick={() => applyDatePreset('last_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Last Week</button>
-                            <button onClick={() => applyDatePreset('this_week')} className="btn btn-sm btn-outline-primary bg-primary-subtle text-primary border-primary flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>This Week</button>
-                            <button onClick={() => applyDatePreset('next_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Next Week</button>
-                        </div>
-                    </div>
-                    <div className="dropdown-divider my-3 opacity-10"></div>
-                    <div>
-                        <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Custom Range</h6>
-                        <div className="d-flex flex-column gap-2">
-                            <div className="d-flex align-items-center gap-2">
-                                <div className="flex-fill">
-                                    <label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>From</label>
-                                    <input
-                                        type="date"
-                                        className="form-control form-control-sm border-light bg-light text-secondary fw-medium"
-                                        name="startDate"
-                                        value={dateFilters.startDate}
-                                        onChange={handleDateFilterChange}
-                                    />
-                                </div>
-                                <div className="pt-3 text-muted opacity-50"><i className="fas fa-arrow-right small"></i></div>
-                                <div className="flex-fill">
-                                    <label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>To</label>
-                                    <input
-                                        type="date"
-                                        className="form-control form-control-sm border-light bg-light text-secondary fw-medium"
-                                        name="endDate"
-                                        value={dateFilters.endDate}
-                                        onChange={handleDateFilterChange}
-                                    />
-                                </div>
-                            </div>
-                            <button
-                                className="btn btn-primary w-100 btn-sm rounded-2 fw-bold mt-2 shadow-sm"
-                                onClick={() => {
-                                    const startDisplay = dateFilters.startDate ? new Date(dateFilters.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '...';
-                                    const endDisplay = dateFilters.endDate ? new Date(dateFilters.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '...';
-                                    setSelectedDateRange(`${startDisplay} - ${endDisplay}`);
-                                }}
-                            >
-                                Apply Range
-                            </button>
-                        </div>
-                    </div>
-                </ul>
             </div>
         </motion.div>
     );
@@ -345,422 +565,86 @@ export default function Audience() {
                 </motion.button>
             </motion.div>
 
-            {/* Filters Above Platform Source Chart */}
+            {/* Filters - Time Range + PAGE (Content Marketing style) */}
             <FiltersRow />
 
-            {/* Platform Source Chart - High-Five Style */}
+            {/* Page performance chart - driven by PAGE filter */}
             <motion.div
                 className="card border-0 shadow-sm rounded-4 bg-white p-4 mb-4"
                 initial={{ opacity: 0, y: 20, scale: 0.95 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ 
-                    duration: 0.6, 
-                    ease: [0.16, 1, 0.3, 1],
-                    type: "spring",
-                    stiffness: 100,
-                    damping: 15
-                }}
-                whileHover={{ 
-                    scale: 1.01, 
-                    y: -5,
-                    transition: { 
-                        type: "spring", 
-                        stiffness: 300,
-                        damping: 20
-                    } 
-                }}
+                transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1], type: 'spring', stiffness: 100, damping: 15 }}
+                whileHover={{ scale: 1.01, y: -5, transition: { type: 'spring', stiffness: 300, damping: 20 } }}
             >
-                <motion.div
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.2, duration: 0.5 }}
-                >
+                <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2, duration: 0.5 }}>
                     <h5 className="fw-bold mb-1 text-dark d-flex align-items-center gap-2">
-                        📊 {platformSource} Performance
+                        📊 Page performance
                     </h5>
-                    <small className="text-secondary text-muted">Audience insights for {platformSource}</small>
+                    <small className="text-secondary text-muted">
+                        {audiencePage ? `Audience insights for selected page (${getContentDateRangeDisplay()})` : 'Select a page and time range to view performance'}
+                    </small>
                 </motion.div>
-                <motion.div 
-                    className="mt-4"
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ delay: 0.3, duration: 0.6, ease: "easeOut" }}
-                >
+                <motion.div className="mt-4" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.3, duration: 0.6, ease: 'easeOut' }}>
                     <div style={{ width: '100%', height: 400 }}>
-                        <AnimatePresence mode="wait">
-                            {platformSource === 'Facebook' && (
-                                <motion.div
-                                    key="facebook"
-                                    initial={{ opacity: 0, x: -20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: 20 }}
-                                    transition={{ duration: 0.5 }}
-                                    style={{ width: '100%', height: '100%' }}
-                                >
-                                    <ResponsiveContainer>
-                                        <AreaChart data={currentPlatformData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
-                                            <defs>
-                                                <linearGradient id={`colorReach-${platformSource}`} x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#1877F2" stopOpacity={0.5} />
-                                                    <stop offset="95%" stopColor="#1877F2" stopOpacity={0} />
-                                                </linearGradient>
-                                                <linearGradient id={`colorEngagement-${platformSource}`} x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#00bcd4" stopOpacity={0.5} />
-                                                    <stop offset="95%" stopColor="#00bcd4" stopOpacity={0} />
-                                                </linearGradient>
-                                                <linearGradient id={`colorImpressions-${platformSource}`} x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
-                                                    <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
-                                                </linearGradient>
-                                            </defs>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis 
-                                                dataKey="date" 
-                                                tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="left"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="right"
-                                                orientation="right"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <Tooltip
-                                                cursor={{ fill: 'rgba(0,0,0,0.02)' }}
-                                                contentStyle={{ 
-                                                    borderRadius: '12px', 
-                                                    border: 'none', 
-                                                    boxShadow: '0 8px 24px rgba(0,0,0,0.15)', 
-                                                    padding: '12px',
-                                                    backgroundColor: 'white'
-                                                }}
-                                                animationDuration={200}
-                                            />
-                                            <Legend 
-                                                wrapperStyle={{ paddingTop: '20px' }}
-                                                iconType="circle"
-                                            />
-                                            <Area
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="reach"
-                                                stroke="#1877F2"
-                                                strokeWidth={3}
-                                                fill={`url(#colorReach-${platformSource})`}
-                                                name="Reach"
-                                                animationBegin={0}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 5, fill: '#1877F2', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 8, fill: '#1877F2', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Area
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="engagement"
-                                                stroke="#00bcd4"
-                                                strokeWidth={3}
-                                                fill={`url(#colorEngagement-${platformSource})`}
-                                                name="Engagement"
-                                                animationBegin={200}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 5, fill: '#00bcd4', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 8, fill: '#00bcd4', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Area
-                                                yAxisId="right"
-                                                type="monotone"
-                                                dataKey="impressions"
-                                                stroke="#10B981"
-                                                strokeWidth={3}
-                                                fill={`url(#colorImpressions-${platformSource})`}
-                                                name="Impressions"
-                                                animationBegin={400}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 5, fill: '#10B981', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 8, fill: '#10B981', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                        </AreaChart>
-                                    </ResponsiveContainer>
-                                </motion.div>
-                            )}
-                            {platformSource === 'Instagram' && (
-                                <motion.div
-                                    key="instagram"
-                                    initial={{ opacity: 0, x: -20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: 20 }}
-                                    transition={{ duration: 0.5 }}
-                                    style={{ width: '100%', height: '100%' }}
-                                >
-                                    <ResponsiveContainer>
-                                        <ComposedChart data={currentPlatformData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
-                                            <defs>
-                                                <linearGradient id={`colorReach-${platformSource}`} x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#E4405F" stopOpacity={0.5} />
-                                                    <stop offset="95%" stopColor="#E4405F" stopOpacity={0} />
-                                                </linearGradient>
-                                                <linearGradient id={`colorEngagement-${platformSource}`} x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#F56040" stopOpacity={0.4} />
-                                                    <stop offset="95%" stopColor="#F56040" stopOpacity={0} />
-                                                </linearGradient>
-                                            </defs>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis 
-                                                dataKey="date" 
-                                                tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="left"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="right"
-                                                orientation="right"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <Tooltip
-                                                cursor={{ fill: 'rgba(0,0,0,0.02)' }}
-                                                contentStyle={{ 
-                                                    borderRadius: '12px', 
-                                                    border: 'none', 
-                                                    boxShadow: '0 8px 24px rgba(0,0,0,0.15)', 
-                                                    padding: '12px',
-                                                    backgroundColor: 'white'
-                                                }}
-                                                animationDuration={200}
-                                            />
-                                            <Legend 
-                                                wrapperStyle={{ paddingTop: '20px' }}
-                                                iconType="circle"
-                                            />
-                                            <Area
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="reach"
-                                                stroke="#E4405F"
-                                                strokeWidth={3}
-                                                fill={`url(#colorReach-${platformSource})`}
-                                                name="Reach"
-                                                animationBegin={0}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 5, fill: '#E4405F', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 8, fill: '#E4405F', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Line
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="engagement"
-                                                stroke="#F56040"
-                                                strokeWidth={3}
-                                                name="Engagement"
-                                                animationBegin={200}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 5, fill: '#F56040', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 8, fill: '#F56040', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Bar
-                                                yAxisId="right"
-                                                dataKey="impressions"
-                                                fill="#10B981"
-                                                name="Impressions"
-                                                radius={[6, 6, 0, 0]}
-                                                animationBegin={400}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                            />
-                                        </ComposedChart>
-                                    </ResponsiveContainer>
-                                </motion.div>
-                            )}
-                            {platformSource === 'My Health School Page' && (
-                                <motion.div
-                                    key="health"
-                                    initial={{ opacity: 0, x: -20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: 20 }}
-                                    transition={{ duration: 0.5 }}
-                                    style={{ width: '100%', height: '100%' }}
-                                >
-                                    <ResponsiveContainer>
-                                        <BarChart data={currentPlatformData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }} barSize={40} barGap={8}>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis 
-                                                dataKey="date" 
-                                                tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="left"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="right"
-                                                orientation="right"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <Tooltip
-                                                cursor={{ fill: 'rgba(0,0,0,0.02)' }}
-                                                contentStyle={{ 
-                                                    borderRadius: '12px', 
-                                                    border: 'none', 
-                                                    boxShadow: '0 8px 24px rgba(0,0,0,0.15)', 
-                                                    padding: '12px',
-                                                    backgroundColor: 'white'
-                                                }}
-                                                animationDuration={200}
-                                            />
-                                            <Legend 
-                                                wrapperStyle={{ paddingTop: '20px' }}
-                                                iconType="circle"
-                                            />
-                                            <Bar
-                                                yAxisId="left"
-                                                dataKey="reach"
-                                                fill="#5b45b0"
-                                                name="Reach"
-                                                radius={[6, 6, 0, 0]}
-                                                animationBegin={0}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                            />
-                                            <Bar
-                                                yAxisId="left"
-                                                dataKey="engagement"
-                                                fill="#00bcd4"
-                                                name="Engagement"
-                                                radius={[6, 6, 0, 0]}
-                                                animationBegin={200}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                            />
-                                            <Bar
-                                                yAxisId="right"
-                                                dataKey="impressions"
-                                                fill="#10B981"
-                                                name="Impressions"
-                                                radius={[6, 6, 0, 0]}
-                                                animationBegin={400}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                            />
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                </motion.div>
-                            )}
-                            {platformSource === 'Doctor Farmer Page' && (
-                                <motion.div
-                                    key="doctor"
-                                    initial={{ opacity: 0, x: -20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: 20 }}
-                                    transition={{ duration: 0.5 }}
-                                    style={{ width: '100%', height: '100%' }}
-                                >
-                                    <ResponsiveContainer>
-                                        <LineChart data={currentPlatformData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis 
-                                                dataKey="date" 
-                                                tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="left"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <YAxis 
-                                                yAxisId="right"
-                                                orientation="right"
-                                                tick={{ fill: '#64748b', fontSize: 12 }} 
-                                                axisLine={false}
-                                                tickLine={false}
-                                            />
-                                            <Tooltip
-                                                cursor={{ fill: 'rgba(0,0,0,0.02)' }}
-                                                contentStyle={{ 
-                                                    borderRadius: '12px', 
-                                                    border: 'none', 
-                                                    boxShadow: '0 8px 24px rgba(0,0,0,0.15)', 
-                                                    padding: '12px',
-                                                    backgroundColor: 'white'
-                                                }}
-                                                animationDuration={200}
-                                            />
-                                            <Legend 
-                                                wrapperStyle={{ paddingTop: '20px' }}
-                                                iconType="circle"
-                                            />
-                                            <Line
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="reach"
-                                                stroke="#5b45b0"
-                                                strokeWidth={4}
-                                                name="Reach"
-                                                animationBegin={0}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 6, fill: '#5b45b0', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 10, fill: '#5b45b0', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Line
-                                                yAxisId="left"
-                                                type="monotone"
-                                                dataKey="engagement"
-                                                stroke="#00bcd4"
-                                                strokeWidth={4}
-                                                name="Engagement"
-                                                animationBegin={200}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 6, fill: '#00bcd4', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 10, fill: '#00bcd4', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                            <Line
-                                                yAxisId="right"
-                                                type="monotone"
-                                                dataKey="impressions"
-                                                stroke="#10B981"
-                                                strokeWidth={4}
-                                                name="Impressions"
-                                                animationBegin={400}
-                                                animationDuration={1500}
-                                                animationEasing="ease-out"
-                                                dot={{ r: 6, fill: '#10B981', strokeWidth: 2, stroke: '#fff' }}
-                                                activeDot={{ r: 10, fill: '#10B981', strokeWidth: 3, stroke: '#fff' }}
-                                            />
-                                        </LineChart>
-                                    </ResponsiveContainer>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
+                        {(pageInsightsError || dailyInsightsError) && (
+                            <div className="alert alert-warning mb-2 py-2 small" role="alert">
+                                {pageInsightsError || dailyInsightsError}
+                            </div>
+                        )}
+                        {audiencePage ? (
+                            (pageInsightsLoading || dailyInsightsLoading) ? (
+                                <div className="d-flex align-items-center justify-content-center h-100" style={{ minHeight: 320 }}>
+                                    <div className="text-center text-muted">
+                                        <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
+                                        <p className="mb-0 small">Loading performance data...</p>
+                                    </div>
+                                </div>
+                            ) : (pagePerformanceChartData && pagePerformanceChartData.length > 0) ? (
+                            <ResponsiveContainer>
+                                <AreaChart data={pagePerformanceChartData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
+                                    <defs>
+                                        <linearGradient id="colorReach-audience" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#1877F2" stopOpacity={0.5} />
+                                            <stop offset="95%" stopColor="#1877F2" stopOpacity={0} />
+                                        </linearGradient>
+                                        <linearGradient id="colorClicks-audience" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#00bcd4" stopOpacity={0.5} />
+                                            <stop offset="95%" stopColor="#00bcd4" stopOpacity={0} />
+                                        </linearGradient>
+                                        <linearGradient id="colorImpressions-audience" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
+                                            <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                                        </linearGradient>
+                                    </defs>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                    <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} axisLine={false} tickLine={false} />
+                                    <YAxis yAxisId="left" tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
+                                    <YAxis yAxisId="right" orientation="right" tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
+                                    <Tooltip cursor={{ fill: 'rgba(0,0,0,0.02)' }} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', padding: '12px', backgroundColor: 'white' }} animationDuration={200} />
+                                    <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="circle" />
+                                    <Area yAxisId="left" type="monotone" dataKey="reach" stroke="#1877F2" strokeWidth={3} fill="url(#colorReach-audience)" name="Reach" animationBegin={0} animationDuration={1500} animationEasing="ease-out" dot={{ r: 5, fill: '#1877F2', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 8, fill: '#1877F2', strokeWidth: 3, stroke: '#fff' }} />
+                                    <Area yAxisId="left" type="monotone" dataKey="clicks" stroke="#00bcd4" strokeWidth={3} fill="url(#colorClicks-audience)" name="Clicks" animationBegin={200} animationDuration={1500} animationEasing="ease-out" dot={{ r: 5, fill: '#00bcd4', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 8, fill: '#00bcd4', strokeWidth: 3, stroke: '#fff' }} />
+                                    <Area yAxisId="right" type="monotone" dataKey="impressions" stroke="#10B981" strokeWidth={3} fill="url(#colorImpressions-audience)" name="Impressions" animationBegin={400} animationDuration={1500} animationEasing="ease-out" dot={{ r: 5, fill: '#10B981', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 8, fill: '#10B981', strokeWidth: 3, stroke: '#fff' }} />
+                                </AreaChart>
+                            </ResponsiveContainer>
+                            ) : (
+                                <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
+                                    <div className="text-center">
+                                        <span className="d-block mb-2" style={{ fontSize: '2.5rem' }}>📊</span>
+                                        <p className="fw-medium mb-0">No data for this period</p>
+                                        <small>Try another time range or check page permissions</small>
+                                    </div>
+                                </div>
+                            )
+                        ) : (
+                            <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
+                                <div className="text-center">
+                                    <span className="d-block mb-2" style={{ fontSize: '2.5rem' }}>📄</span>
+                                    <p className="fw-medium mb-0">Select a page to view performance</p>
+                                    <small>Use the PAGE filter above to choose a page</small>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </motion.div>
             </motion.div>
@@ -778,9 +662,6 @@ export default function Audience() {
                     {activeTab === 'Demographics' ? (
                         /* ================= DEMOGRAPHICS VIEW ================= */
                         <>
-                            {/* Filters Above Age & Gender Distribution Chart */}
-                            <FiltersRow />
-
                             {/* 1. Demographics Chart Section (TOP) */}
                             <motion.div variants={itemVariants} className="mb-5">
                                 <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
@@ -788,7 +669,7 @@ export default function Audience() {
                                         <h5 className="fw-bold mb-1 text-dark d-flex align-items-center gap-2">
                                             📊 Age & Gender Distribution
                                         </h5>
-                                        <small className="text-secondary text-muted">Audience breakdown by demographics</small>
+                                        <small className="text-secondary text-muted">Audience breakdown by demographics (Meta Ads Insights)</small>
                                     </div>
 
                                     <div className="d-flex gap-2">
@@ -811,35 +692,61 @@ export default function Audience() {
                                     </div>
                                 </div>
 
+                                {demographicsError && (
+                                    <div className="alert alert-warning py-2 small mb-3" role="alert">{demographicsError}</div>
+                                )}
+                                {demographicsLoading && (
+                                    <div className="d-flex align-items-center gap-2 text-muted small mb-3">
+                                        <div className="spinner-border spinner-border-sm" role="status" /><span>Loading demographics...</span>
+                                    </div>
+                                )}
                                 <div style={{ width: '100%', height: 350 }}>
-                                    <ResponsiveContainer>
-                                        <BarChart data={initialData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }} barSize={32} barGap={8}>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis dataKey="age" tick={{ fill: '#64748b', fontSize: 13, fontWeight: 500 }} axisLine={false} tickLine={false} dy={10} />
-                                            <YAxis tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
-                                            <Tooltip
-                                                cursor={{ fill: 'rgba(0,0,0,0.02)' }}
-                                                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.1)', padding: '12px' }}
-                                            />
-                                            {(genderFilter === 'All' || genderFilter === 'Men') && (
-                                                <Bar dataKey="men" name="Men" fill="#5b45b0" radius={[6, 6, 0, 0]} animationDuration={1500} />
-                                            )}
-                                            {(genderFilter === 'All' || genderFilter === 'Women') && (
-                                                <Bar dataKey="women" name="Women" fill="#00bcd4" radius={[6, 6, 0, 0]} animationDuration={1500} />
-                                            )}
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                </div>
-
-                                <div className="d-flex justify-content-center gap-4 mt-4">
-                                    <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
-                                        <div className="rounded-circle" style={{ width: 12, height: 12, background: '#5b45b0' }}></div>
-                                        <span className="fw-bold text-dark small">Men</span>
-                                    </div>
-                                    <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
-                                        <div className="rounded-circle" style={{ width: 12, height: 12, background: '#00bcd4' }}></div>
-                                        <span className="fw-bold text-dark small">Women</span>
-                                    </div>
+                                    {ageGenderChartDataWithTotal && ageGenderChartDataWithTotal.length > 0 ? (
+                                        <>
+                                            <ResponsiveContainer>
+                                                <BarChart data={ageGenderChartDataWithTotal} margin={{ top: 20, right: 30, left: 0, bottom: 5 }} barSize={32} barGap={8}>
+                                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                                    <XAxis dataKey="age" tick={{ fill: '#64748b', fontSize: 13, fontWeight: 500 }} axisLine={false} tickLine={false} dy={10} />
+                                                    <YAxis tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
+                                                    <Tooltip
+                                                        cursor={{ fill: 'rgba(0,0,0,0.02)' }}
+                                                        contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.1)', padding: '12px' }}
+                                                    />
+                                                    {(genderFilter === 'All' || genderFilter === 'Men') && (
+                                                        <Bar dataKey="men" name="Men" fill="#5b45b0" radius={[6, 6, 0, 0]} animationDuration={1500} />
+                                                    )}
+                                                    {(genderFilter === 'All' || genderFilter === 'Women') && (
+                                                        <Bar dataKey="women" name="Women" fill="#00bcd4" radius={[6, 6, 0, 0]} animationDuration={1500} />
+                                                    )}
+                                                </BarChart>
+                                            </ResponsiveContainer>
+                                            <div className="d-flex justify-content-center gap-4 mt-4">
+                                                <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
+                                                    <div className="rounded-circle" style={{ width: 12, height: 12, background: '#5b45b0' }}></div>
+                                                    <span className="fw-bold text-dark small">Men</span>
+                                                </div>
+                                                <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
+                                                    <div className="rounded-circle" style={{ width: 12, height: 12, background: '#00bcd4' }}></div>
+                                                    <span className="fw-bold text-dark small">Women</span>
+                                                </div>
+                                            </div>
+                                        </>
+                                    ) : demographicsLoading ? (
+                                        <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
+                                            <div className="text-center">
+                                                <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
+                                                <p className="mb-0 small">Loading demographics...</p>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
+                                            <div className="text-center">
+                                                <span className="d-block mb-2" style={{ fontSize: '2.5rem' }}>📊</span>
+                                                <p className="fw-medium mb-0">No demographic data for this period</p>
+                                                <small>Ensure META_AD_ACCOUNT_ID and token are set in server/.env and the ad account has activity in the selected time range.</small>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </motion.div>
 
@@ -847,45 +754,65 @@ export default function Audience() {
 
                             {/* 2. Top Listed Locations (BOTTOM) */}
                             <motion.div variants={itemVariants} className="row g-5">
-                                {/* Cities */}
+                                {/* Top towns/cities — Instagram audience (city-level) when page has IG, else Ads API region-level */}
                                 <div className="col-lg-6">
                                     <h6 className="fw-bold mb-4 text-dark d-flex align-items-center gap-2">
-                                        🏙️ Top Cities
+                                        🏙️ Top towns/cities
                                     </h6>
+                                    <small className="text-muted d-block mb-2">
+                                        {topCitiesFromIg ? 'From Instagram audience (city-level)' : 'Region-level data from Meta Ads Insights'}
+                                    </small>
+                                    {(igAudienceLoading && audiencePage) || demographicsLoading ? (
+                                        <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
+                                    ) : igAudienceError && audiencePage ? (
+                                        <div className="text-muted small mb-2">{igAudienceError}</div>
+                                    ) : null}
                                     <div className="d-flex flex-column gap-4">
-                                        {citiesData.map((city, idx) => (
-                                            <motion.div
-                                                key={idx}
-                                                initial={{ width: 0 }}
-                                                whileInView={{ width: '100%' }}
-                                                viewport={{ once: true }}
-                                            >
-                                                <div className="d-flex justify-content-between mb-2">
-                                                    <span className="text-dark fw-bold small d-flex align-items-center gap-2">{city.flag} {city.name}</span>
-                                                    <span className="text-muted small fw-bold">{city.val}%</span>
-                                                </div>
-                                                <div className="progress" style={{ height: '8px', backgroundColor: '#f3f4f6', borderRadius: '10px', overflow: 'hidden' }}>
-                                                    <motion.div
-                                                        className="progress-bar"
-                                                        role="progressbar"
-                                                        style={{ backgroundColor: '#00bcd4', borderRadius: '10px' }}
-                                                        initial={{ width: 0 }}
-                                                        whileInView={{ width: `${city.val}%` }}
-                                                        transition={{ duration: 1.5, delay: idx * 0.1, ease: "easeOut" }}
-                                                    ></motion.div>
-                                                </div>
-                                            </motion.div>
-                                        ))}
+                                        {((topCitiesFromIg || topRegionsChartData) && (topCitiesFromIg || topRegionsChartData).length > 0) ? (
+                                            (topCitiesFromIg || topRegionsChartData).map((item, idx) => (
+                                                <motion.div
+                                                    key={idx}
+                                                    initial={{ width: 0 }}
+                                                    whileInView={{ width: '100%' }}
+                                                    viewport={{ once: true }}
+                                                >
+                                                    <div className="d-flex justify-content-between mb-2">
+                                                        <span className="text-dark fw-bold small d-flex align-items-center gap-2">{item.name}</span>
+                                                        <span className="text-muted small fw-bold">{item.val}%</span>
+                                                    </div>
+                                                    <div className="progress" style={{ height: '8px', backgroundColor: '#f3f4f6', borderRadius: '10px', overflow: 'hidden' }}>
+                                                        <motion.div
+                                                            className="progress-bar"
+                                                            role="progressbar"
+                                                            style={{ backgroundColor: '#00bcd4', borderRadius: '10px' }}
+                                                            initial={{ width: 0 }}
+                                                            whileInView={{ width: `${item.val}%` }}
+                                                            transition={{ duration: 1.5, delay: idx * 0.1, ease: "easeOut" }}
+                                                        ></motion.div>
+                                                    </div>
+                                                </motion.div>
+                                            ))
+                                        ) : !igAudienceLoading && !demographicsLoading ? (
+                                            <div className="text-muted small py-3">
+                                                {audiencePage ? 'No city or region data for this period. Ensure the page has a linked Instagram account with 100+ engagements.' : 'Select a page to see city/region data.'}
+                                            </div>
+                                        ) : null}
                                     </div>
                                 </div>
 
-                                {/* Countries */}
+                                {/* Top Countries — Instagram audience when available, else Ads API demographics */}
                                 <div className="col-lg-6">
                                     <h6 className="fw-bold mb-4 text-dark d-flex align-items-center gap-2">
                                         🌍 Top Countries
                                     </h6>
+                                    {topCountriesFromIg ? (
+                                        <small className="text-muted d-block mb-2">From Instagram audience</small>
+                                    ) : null}
+                                    {(igAudienceLoading && audiencePage) || demographicsLoading ? (
+                                        <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
+                                    ) : null}
                                     <div className="d-flex flex-column gap-4">
-                                        {countriesData.map((country, idx) => (
+                                        {(topCountriesFromIg || topCountriesChartData || countriesData).map((country, idx) => (
                                             <motion.div
                                                 key={idx}
                                                 initial={{ width: 0 }}
@@ -982,6 +909,19 @@ export default function Audience() {
                     )}
                 </motion.div>
             </AnimatePresence>
+
+            <DateRangeFilter
+                isOpen={showContentDateRangeFilter}
+                onClose={() => setShowContentDateRangeFilter(false)}
+                onApply={handleContentDateRangeApply}
+                initialValue={contentDateRangeFilterValue || {
+                    range_type: contentDateRange,
+                    start_date: contentFilters.startDate || null,
+                    end_date: contentFilters.endDate || null,
+                    timezone: 'Asia/Kolkata',
+                    compare: { enabled: false }
+                }}
+            />
         </div>
     );
 }

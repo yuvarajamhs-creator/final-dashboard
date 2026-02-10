@@ -51,6 +51,36 @@
     --border-light: #334155;
 }
 
+/* ===== FILTER SECTION (Content Marketing style) ===== */
+.filter-card {
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    padding: 0.85rem;
+    margin-bottom: 1.5rem;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--border-light);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    box-sizing: border-box;
+    max-width: 100%;
+}
+
+.filter-card .row {
+    flex-wrap: wrap;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.filter-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    margin-bottom: 0.2rem;
+    opacity: 0.8;
+}
+
 /* ===== LAYOUT (Main Page Container) ===== */
 .audience-container {
     background: var(--bg-primary) !important;
