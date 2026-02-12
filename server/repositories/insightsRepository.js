@@ -68,7 +68,7 @@ async function getInsights(opts) {
   const { ad_account_id, from, to, campaign_id, ad_id } = opts || {};
   let q = supabase
     .from('meta_insights')
-    .select('payload');
+    .select('payload, ad_account_id, ad_account_name');
 
   if (ad_account_id) {
     q = q.eq('ad_account_id', String(ad_account_id).replace(/^act_/, ''));
@@ -102,7 +102,11 @@ async function getInsights(opts) {
     throw error;
   }
 
-  const rows = (data || []).map((r) => r.payload);
+  const rows = (data || []).map((r) => ({
+    ...(r.payload || {}),
+    ad_account_id: r.ad_account_id || '',
+    ad_account_name: r.ad_account_name || '',
+  }));
   // #region agent log
   const dates = rows.map((r) => r.date_start || r.date_stop).filter(Boolean);
   const sorted = [...dates].sort();

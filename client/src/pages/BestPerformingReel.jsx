@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import MultiSelectFilter from '../components/MultiSelectFilter';
+import DateRangeFilter from '../components/DateRangeFilter';
 import './BestPerformingReel.css';
 import {
     ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell
@@ -22,95 +24,99 @@ const getAuthToken = () => {
 
 const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
 
-// Fetch campaigns from Meta API (same as Dashboards.jsx)
-const fetchCampaigns = async () => {
+const fetchPages = async () => {
     try {
         const token = getAuthToken();
-        const headers = { "Content-Type": "application/json" };
-        if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${API_BASE}/api/meta/pages`, { headers });
+        if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            console.error('API error fetching pages:', errorData);
+            return [];
         }
-
-        const res = await fetch(`${API_BASE}/api/meta/active-campaigns`, { headers });
         const data = await res.json();
-        console.log("Fetched campaigns:", data);
-        
-        // Return full objects or empty array
-        if (Array.isArray(data)) {
-            return data;
-        } else if (data && Array.isArray(data.data)) {
-            return data.data;
-        }
-        return [];
+        return data.data || [];
     } catch (e) {
-        console.error("Error fetching campaigns:", e);
+        console.error('Error fetching pages:', e);
         return [];
     }
 };
 
-export default function BestPerformingReel() {
-    // --- FILTER STATE & LOGIC ---
-    const [filters, setFilters] = useState({ startDate: '', endDate: '' });
-    const [selectedDateRange, setSelectedDateRange] = useState('27/10/2025 - 28/11/2025');
-    const [activeTab, setActiveTab] = useState('all'); // 'all', 'posts', 'stories'
-    const [selectedPlatform, setSelectedPlatform] = useState('');
-    const [selectedCampaign, setSelectedCampaign] = useState('');
-    const [campaigns, setCampaigns] = useState([]);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
-    const [activeChart, setActiveChart] = useState(null); // 'contentType', 'watchTime', 'age', 'gender', 'location'
+const getContentDefaultDates = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6);
+    return {
+        startDate: startDate.toISOString().slice(0, 10),
+        endDate: endDate.toISOString().slice(0, 10)
+    };
+};
 
-    // Load campaigns from Meta API on component mount
+export default function BestPerformingReel() {
+    // --- FILTER STATE (same as Audience: Time Range, Platform, Page) ---
+    const [contentFilters, setContentFilters] = useState(() => getContentDefaultDates());
+    const [contentDateRange, setContentDateRange] = useState('last_7_days');
+    const [showContentDateRangeFilter, setShowContentDateRangeFilter] = useState(false);
+    const [contentDateRangeFilterValue, setContentDateRangeFilterValue] = useState(null);
+
+    const platformFilterOptions = [
+        { id: 'all', name: 'All Platforms' },
+        { id: 'facebook', name: 'Facebook' },
+        { id: 'instagram', name: 'Instagram' },
+        { id: 'audience_network', name: 'Audience Network' },
+        { id: 'messenger', name: 'Messenger' },
+        { id: 'threads', name: 'Threads' },
+        { id: 'whatsapp', name: 'WhatsApp' },
+    ];
+    const [platformFilters, setPlatformFilters] = useState([]); // multi-select: array of selected platform objects
+    const [pages, setPages] = useState([]);
+    const [reelPages, setReelPages] = useState([]); // multi-select: array of selected page objects
+
+    const [activeTab, setActiveTab] = useState('all'); // 'all', 'posts', 'stories', 'reels'
+    const [error, setError] = useState(null);
+    const [activeChart, setActiveChart] = useState(null); // 'watchTime', 'age', 'gender', 'location'
+
     useEffect(() => {
-        const loadCampaigns = async () => {
-            setLoading(true);
-            try {
-                const campaignData = await fetchCampaigns();
-                setCampaigns(campaignData);
-                if (campaignData.length === 0) {
-                    setError("No campaigns found. Please configure Meta credentials in server/.env file.");
-                }
-            } catch (e) {
-                console.error("Failed to load campaigns:", e);
-                setError("Failed to load campaigns. Please check your Meta credentials.");
-            } finally {
-                setLoading(false);
-            }
+        const loadPages = async () => {
+            const pagesData = await fetchPages();
+            setPages(pagesData || []);
         };
-        loadCampaigns();
+        loadPages();
     }, []);
 
-    const handleFilterChange = (e) => {
-        const { name, value } = e.target;
-        setFilters(prev => ({ ...prev, [name]: value }));
+    const handleContentDateRangeApply = (payload) => {
+        if (!payload.start_date || !payload.end_date) return;
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) return;
+        setContentDateRangeFilterValue(payload);
+        setContentDateRange(payload.range_type || 'custom');
+        setContentFilters({ startDate: payload.start_date, endDate: payload.end_date });
+        setShowContentDateRangeFilter(false);
     };
 
-    const applyPreset = (type) => {
-        const today = new Date();
-        const day = today.getDay();
-        const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(today.setDate(diff));
-        const sunday = new Date(today.setDate(diff + 6));
-
-        let start = new Date(monday);
-        let end = new Date(sunday);
-
-        if (type === 'last_week') {
-            start.setDate(start.getDate() - 7);
-            end.setDate(end.getDate() - 7);
-            setSelectedDateRange('Last Week');
-        } else if (type === 'next_week') {
-            start.setDate(start.getDate() + 7);
-            end.setDate(end.getDate() + 7);
-            setSelectedDateRange('Next Week');
-        } else {
-            setSelectedDateRange('This Week');
+    const getContentDateRangeDisplay = () => {
+        if (contentDateRangeFilterValue) {
+            if (contentDateRangeFilterValue.range_type === 'custom') {
+                const start = new Date(contentDateRangeFilterValue.start_date);
+                const end = new Date(contentDateRangeFilterValue.end_date);
+                return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+            }
+            const presetLabels = {
+                today: 'Today', yesterday: 'Yesterday', today_yesterday: 'Today & Yesterday',
+                last_7_days: 'Last 7 days', last_14_days: 'Last 14 days', last_28_days: 'Last 28 days',
+                last_30_days: 'Last 30 days', this_week: 'This week', last_week: 'Last week',
+                this_month: 'This month', last_month: 'Last month', maximum: 'Maximum'
+            };
+            return presetLabels[contentDateRangeFilterValue.range_type] || contentDateRange;
         }
-
-        setFilters({
-            startDate: start.toISOString().split('T')[0],
-            endDate: end.toISOString().split('T')[0]
-        });
+        const presetLabels = {
+            last_7_days: 'Last 7 days', last_14_days: 'Last 14 days', last_30_days: 'Last 30 days',
+            this_week: 'This week', last_week: 'Last week', this_month: 'This month', last_month: 'Last month'
+        };
+        return presetLabels[contentDateRange] || 'Last 7 days';
     };
 
     // --- MOCK DATA ---
@@ -172,13 +178,6 @@ export default function BestPerformingReel() {
     ];
 
     // Chart Data for new KPIs
-    const contentTypeData = [
-        { name: 'Video', value: 45, color: '#0369a1' },
-        { name: 'Post', value: 30, color: '#38bdf8' },
-        { name: 'Story', value: 15, color: '#0ea5e9' },
-        { name: 'Reel', value: 10, color: '#60a5fa' },
-    ];
-
     const watchTimeData = [
         { time: '0-30s', value: 1200 },
         { time: '30-60s', value: 2800 },
@@ -235,6 +234,13 @@ export default function BestPerformingReel() {
         { id: 3, url: 'https://example.com/story_503', title: 'Quick Tip #4', type: 'Story', views: 6200, watch: 3100, likes: 150, shares: 25, comments: 5, rate: '2.9%', avgView: '90.1', subChange: 15, imgColor: '#8b5cf6' },
     ];
 
+    const reelsList = [
+        { id: 1, url: 'https://example.com/reel_201', title: 'Best Reel Highlights 2024', type: 'Reel', views: 18500, watch: 42000, likes: 620, shares: 95, comments: 42, rate: '5.2%', avgView: '135.2', subChange: 128, imgColor: '#ec4899' },
+        { id: 2, url: 'https://example.com/reel_202', title: 'Tutorial Reel - Quick Tips', type: 'Reel', views: 12200, watch: 28800, likes: 380, shares: 58, comments: 28, rate: '3.8%', avgView: '142.0', subChange: 76, imgColor: '#f472b6' },
+        { id: 3, url: 'https://example.com/reel_203', title: 'Behind the Scenes Reel', type: 'Reel', views: 9600, watch: 19200, likes: 290, shares: 44, comments: 15, rate: '3.1%', avgView: '98.5', subChange: 52, imgColor: '#fb7185' },
+        { id: 4, url: 'https://example.com/reel_204', title: 'Product Launch Reel', type: 'Reel', views: 21400, watch: 51200, likes: 890, shares: 132, comments: 68, rate: '6.4%', avgView: '168.3', subChange: 195, imgColor: '#db2777' },
+    ];
+
     // Totals for the table footer (Dynamic based on selected data)
     const calculateTotals = (data) => {
         return data.reduce((acc, curr) => ({
@@ -262,9 +268,36 @@ export default function BestPerformingReel() {
         currentList = storiesList;
         tableTitle = 'Stories Performance';
         animClass = 'anim-zoom-in';
+    } else if (activeTab === 'reels') {
+        currentList = reelsList;
+        tableTitle = 'Reels Performance';
+        animClass = 'anim-fade-in';
     }
 
     const totals = calculateTotals(currentList);
+
+    // Format large numbers for card display (e.g. 606100 -> "606.1K", 7000 -> "7K")
+    const formatCount = (n) => {
+        if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+        if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+        return String(n);
+    };
+
+    // Mock publish date for card (e.g. "1 February 17:00")
+    const getPublishDate = (item) => {
+        const day = (item.id % 28) || 1;
+        const month = ['January', 'February', 'March', 'April', 'May', 'June'][item.id % 6];
+        const hour = 17;
+        const min = (item.id * 17) % 60;
+        return `${day} ${month} ${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+    };
+
+    const topContentScrollRef = useRef(null);
+    const scrollTopContent = () => {
+        if (topContentScrollRef.current) {
+            topContentScrollRef.current.scrollBy({ left: 280, behavior: 'smooth' });
+        }
+    };
 
     return (
         <div className="best-reel-container">
@@ -274,7 +307,7 @@ export default function BestPerformingReel() {
                     <strong>⚠️ {error}</strong>
                     <br />
                     <small>
-                        Please configure your Meta API credentials (META_ACCESS_TOKEN, META_AD_ACCOUNT_ID) in server/.env file to view your campaign data.
+                        Please configure your Meta API credentials in server/.env to view page and reel data.
                     </small>
                     <button
                         type="button"
@@ -285,102 +318,65 @@ export default function BestPerformingReel() {
                 </div>
             )}
 
-            {/* --- TOP FILTERS --- */}
-            <div className="filters-row">
-                <div className="filter-box">
-                    <label className="filter-label">Platform</label>
-                    <select 
-                        className="filter-select"
-                        value={selectedPlatform}
-                        onChange={(e) => setSelectedPlatform(e.target.value)}
-                        style={{ 
-                            border: 'none', 
-                            background: 'transparent', 
-                            width: '100%',
-                            fontWeight: '500',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        <option value="">All</option>
-                        <option value="facebook">Facebook</option>
-                        <option value="instagram">Instagram</option>
-                        <option value="youtube">YouTube</option>
-                        <option value="tiktok">TikTok</option>
-                        <option value="twitter">Twitter</option>
-                        <option value="linkedin">LinkedIn</option>
-                    </select>
-                </div>
-                <div className="filter-box">
-                    <label className="filter-label">Campaign</label>
-                    <select 
-                        className="filter-select"
-                        value={selectedCampaign}
-                        onChange={(e) => setSelectedCampaign(e.target.value)}
-                        disabled={loading}
-                        style={{ 
-                            border: 'none', 
-                            background: 'transparent', 
-                            width: '100%',
-                            fontWeight: '500',
-                            cursor: loading ? 'not-allowed' : 'pointer',
-                            opacity: loading ? 0.6 : 1
-                        }}
-                    >
-                        <option value="">All Campaigns</option>
-                        {campaigns.map((campaign) => (
-                            <option key={campaign.id} value={campaign.id}>
-                                {campaign.name}
-                            </option>
-                        ))}
-                    </select>
-                </div>
-                <div className="filter-box">
-                    <label className="filter-label">Content type</label>
-                    <div className="d-flex justify-content-between align-items-center">
-                        <span className="fw-medium">All</span>
-                        <i className="fas fa-chevron-down text-secondary small"></i>
-                    </div>
-                </div>
-                {/* DATE DROPDOWN FILTER */}
-                <div style={{ flex: 1.5, minWidth: '300px' }}>
-                    <label className="filter-label" style={{ marginBottom: '0.5rem', display: 'block' }}>Report date</label>
-                    <div className="dropdown">
-                        <div className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm dropdown-toggle cursor-pointer" role="button" data-bs-toggle="dropdown" aria-expanded="false" style={{ borderRadius: '8px', color: '#64748b', borderColor: '#cbd5e1', transition: 'all 0.2s ease', width: '100%', backgroundColor: 'white' }} onMouseEnter={(e) => e.currentTarget.style.borderColor = '#94a3b8'} onMouseLeave={(e) => e.currentTarget.style.borderColor = '#cbd5e1'}>
-                            <i className="far fa-calendar-alt text-secondary opacity-75"></i>
-                            <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.9rem' }}>{selectedDateRange.includes(':') ? selectedDateRange : `${filters.startDate ? 'Custom' : ''} ${selectedDateRange}`}</span>
-                            <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+            {/* --- TOP FILTERS (Time Range, Platform, Page — same as Audience) --- */}
+            <motion.div
+                className="filter-card best-reel-filters mb-4"
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+            >
+                <div className="filter-card-body">
+                    <div className="row g-3 align-items-center">
+                        <div className="col-12 col-md-auto">
+                            <label className="filter-label">
+                                <span className="filter-emoji">📅</span> TIME RANGE
+                            </label>
+                            <button
+                                type="button"
+                                className="best-reel-filter-input d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
+                                onClick={() => setShowContentDateRangeFilter(true)}
+                            >
+                                <i className="far fa-calendar-alt text-secondary opacity-75"></i>
+                                <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.8rem' }}>
+                                    {getContentDateRangeDisplay()}
+                                </span>
+                                <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                            </button>
                         </div>
-                        <ul className="dropdown-menu dropdown-menu-end shadow-lg border-0 rounded-3 p-3 mt-2" style={{ minWidth: '340px', backgroundColor: '#ffffff' }}>
-                            <div className="mb-3">
-                                <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Quick Select</h6>
-                                <div className="d-flex gap-2">
-                                    <button onClick={() => applyPreset('last_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Last Week</button>
-                                    <button onClick={() => applyPreset('this_week')} className="btn btn-sm btn-outline-primary bg-primary-subtle text-primary border-primary flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>This Week</button>
-                                    <button onClick={() => applyPreset('next_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Next Week</button>
-                                </div>
-                            </div>
-                            <div className="dropdown-divider my-3 opacity-10"></div>
-                            <div>
-                                <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Custom Range</h6>
-                                <div className="d-flex flex-column gap-2">
-                                    <div className="d-flex align-items-center gap-2">
-                                        <div className="flex-fill"><label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>From</label><input type="date" className="form-control form-control-sm border-light bg-light text-secondary fw-medium" name="startDate" value={filters.startDate} onChange={handleFilterChange} /></div>
-                                        <div className="pt-3 text-muted opacity-50"><i className="fas fa-arrow-right small"></i></div>
-                                        <div className="flex-fill"><label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>To</label><input type="date" className="form-control form-control-sm border-light bg-light text-secondary fw-medium" name="endDate" value={filters.endDate} onChange={handleFilterChange} /></div>
-                                    </div>
-                                    <button className="btn btn-primary w-100 btn-sm rounded-2 fw-bold mt-2 shadow-sm" onClick={() => { const startDisplay = filters.startDate ? new Date(filters.startDate).toLocaleDateString('en-GB') : '...'; const endDisplay = filters.endDate ? new Date(filters.endDate).toLocaleDateString('en-GB') : '...'; setSelectedDateRange(`Custom: ${startDisplay} - ${endDisplay}`); }}>Apply Range</button>
-                                </div>
-                            </div>
-                        </ul>
+                        <div className="col-12 col-md-auto">
+                            <MultiSelectFilter
+                                label="PLATFORM"
+                                emoji="🌐"
+                                options={platformFilterOptions}
+                                selectedValues={platformFilters.map((p) => p.id)}
+                                onChange={(selectedIds) => setPlatformFilters(platformFilterOptions.filter((p) => selectedIds.includes(p.id)))}
+                                placeholder="Select platform"
+                                getOptionLabel={(opt) => opt.name}
+                                getOptionValue={(opt) => opt.id}
+                            />
+                        </div>
+                        <div className="col-12 col-md-auto">
+                            <MultiSelectFilter
+                                label="PAGE"
+                                emoji="📄"
+                                options={pages}
+                                selectedValues={reelPages.map((p) => p.id)}
+                                onChange={(selectedIds) => setReelPages(pages.filter((p) => selectedIds.includes(p.id)))}
+                                placeholder="Select a Page"
+                                getOptionLabel={(opt) => opt.name}
+                                getOptionValue={(opt) => opt.id}
+                            />
+                        </div>
                     </div>
                 </div>
-            </div>
+            </motion.div>
 
             {/* --- NAVIGATION TABS --- */}
             <div className="nav-tabs-custom">
                 <button className={`nav-tab-btn ${activeTab === 'all' ? 'active' : ''}`} onClick={() => setActiveTab('all')}>All</button>
                 <button className={`nav-tab-btn ${activeTab === 'posts' ? 'active' : ''}`} onClick={() => setActiveTab('posts')}>Posts</button>
                 <button className={`nav-tab-btn ${activeTab === 'stories' ? 'active' : ''}`} onClick={() => setActiveTab('stories')}>Stories</button>
+                <button className={`nav-tab-btn ${activeTab === 'reels' ? 'active' : ''}`} onClick={() => setActiveTab('reels')}>Reels</button>
             </div>
 
             {/* --- WRAPPER FOR ANIMATED CONTENT --- */}
@@ -400,20 +396,18 @@ export default function BestPerformingReel() {
                         <div className="summary-label">Content interactions <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">{(totals.shares + totals.likes + totals.comments)} <span className="summary-trend trend-down"><i className="fas fa-arrow-down"></i> 29.2%</span></div>
                     </div>
+                    <div className="summary-metric-item">
+                        <div className="summary-label">Hook Rate <i className="fas fa-info-circle text-muted small"></i></div>
+                        <div className="summary-value">42.5% <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 5.1%</span></div>
+                    </div>
+                    <div className="summary-metric-item">
+                        <div className="summary-label">Content Win Rate <i className="fas fa-info-circle text-muted small"></i></div>
+                        <div className="summary-value">68% <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 8.2%</span></div>
+                    </div>
                 </div>
 
                 {/* --- KPI CARDS ROW (Clickable Buttons) --- */}
                 <div className="kpi-row">
-                    <motion.button
-                        className={`kpi-card-reel bg-teal ${activeChart === 'contentType' ? 'active-chart' : ''}`}
-                        onClick={() => setActiveChart(activeChart === 'contentType' ? null : 'contentType')}
-                        whileHover={{ scale: 1.05, y: -5 }}
-                        whileTap={{ scale: 0.95 }}
-                        transition={{ type: "spring", stiffness: 300 }}
-                    >
-                        <div className="label">Content Type</div>
-                        <div className="value">4<span className="val-suffix">Types</span></div>
-                    </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-blue-dark ${activeChart === 'watchTime' ? 'active-chart' : ''}`}
                         onClick={() => setActiveChart(activeChart === 'watchTime' ? null : 'watchTime')}
@@ -473,43 +467,6 @@ export default function BestPerformingReel() {
                             className="chart-panel"
                             style={{ marginTop: '24px', marginBottom: '24px' }}
                         >
-                            {activeChart === 'contentType' && (
-                                <motion.div
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    transition={{ delay: 0.2 }}
-                                >
-                                    <div className="chart-header-row">
-                                        <div className="chart-legend-custom">
-                                            <div className="fw-bold">Content Type Distribution</div>
-                                        </div>
-                                    </div>
-                                    <div style={{ width: '100%', height: 300 }}>
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <PieChart>
-                                                <Pie
-                                                    data={contentTypeData}
-                                                    cx="50%"
-                                                    cy="50%"
-                                                    labelLine={false}
-                                                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                                                    outerRadius={100}
-                                                    fill="#8884d8"
-                                                    dataKey="value"
-                                                    animationBegin={0}
-                                                    animationDuration={800}
-                                                >
-                                                    {contentTypeData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color} />
-                                                    ))}
-                                                </Pie>
-                                                <Tooltip />
-                                            </PieChart>
-                                        </ResponsiveContainer>
-                                    </div>
-                                </motion.div>
-                            )}
-
                             {activeChart === 'watchTime' && (
                                 <motion.div
                                     initial={{ opacity: 0 }}
@@ -677,62 +634,77 @@ export default function BestPerformingReel() {
                     </div>
                 </div>
 
-                {/* --- FULL WIDTH TABLE --- */}
-                <div className="video-list-panel">
-                    <div className="d-flex justify-content-between align-items-center mb-3">
-                        <div className="fw-bold" style={{ fontSize: '0.9rem' }}>{tableTitle}</div>
-                        <i className="fas fa-expand text-muted small"></i>
+                {/* --- TOP CONTENT BY VIEWS (card carousel) --- */}
+                <div className="top-content-by-views">
+                    <div className="top-content-by-views-header">
+                        <span className="top-content-by-views-icon">
+                            <i className="fab fa-instagram" aria-hidden></i>
+                        </span>
+                        <h3 className="top-content-by-views-title">Top content by views</h3>
                     </div>
-                    <table className="video-table">
-                        <thead>
-                            <tr>
-                                <th>Media</th>{/* Generic Label */}
-                                <th>URL</th>
-                                <th>Title</th>
-                                <th>Type</th>
-                                <th>Views</th>
-                                <th>Watch time</th>
-                                <th>Likes</th>
-                                <th>Shares</th>
-                                <th>Comments</th>
-                                <th>Engagement rate</th>
-                                <th>Avg view %</th>
-                                <th>Sub Change</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {currentList.map(item => (
-                                <tr key={item.id}>
-                                    <td><div className="video-thumb" style={{ backgroundColor: item.imgColor }}></div></td>
-                                    <td><a href={item.url} className="video-link" target="_blank" rel="noopener noreferrer">{item.url}</a></td>
-                                    <td><div className="video-title">{item.title}</div></td>
-                                    <td>{item.type}</td>
-                                    <td className="col-bg-views">{item.views}</td>
-                                    <td className="col-bg-watch">{item.watch}</td>
-                                    <td className="col-bg-likes">{item.likes}</td>
-                                    <td className="col-bg-shares">{item.shares}</td>
-                                    <td className="col-bg-comments">{item.comments}</td>
-                                    <td>{item.rate}</td>
-                                    <td>{item.avgView}</td>
-                                    <td className="col-bg-subs">{item.subChange}</td>
-                                </tr>
+                    <div className="top-content-by-views-carousel-wrap">
+                        <div
+                            className="top-content-cards-scroll"
+                            ref={topContentScrollRef}
+                            role="list"
+                        >
+                            {currentList.map((item) => (
+                                <article key={item.id} className="top-content-card" role="listitem">
+                                    <div className="top-content-card-thumb" style={{ backgroundColor: item.imgColor }}>
+                                        <span className="top-content-card-play" aria-hidden>
+                                            <i className="fas fa-play"></i>
+                                        </span>
+                                    </div>
+                                    <h4 className="top-content-card-title" title={item.title}>
+                                        {item.title.length > 35 ? `${item.title.slice(0, 35)}...` : item.title}
+                                    </h4>
+                                    <p className="top-content-card-date">{getPublishDate(item)}</p>
+                                    <div className="top-content-card-metrics">
+                                        <div className="top-content-metric">
+                                            <i className="far fa-eye" aria-hidden></i>
+                                            <span>{formatCount(item.views)}</span>
+                                        </div>
+                                        <div className="top-content-metric">
+                                            <i className="far fa-comment" aria-hidden></i>
+                                            <span>{formatCount(item.comments)}</span>
+                                        </div>
+                                        <div className="top-content-metric">
+                                            <i className="far fa-heart" aria-hidden></i>
+                                            <span>{formatCount(item.likes)}</span>
+                                        </div>
+                                        <div className="top-content-metric">
+                                            <i className="fas fa-share-alt" aria-hidden></i>
+                                            <span>{formatCount(item.shares)}</span>
+                                        </div>
+                                    </div>
+                                </article>
                             ))}
-                            <tr className="total-row">
-                                <td colSpan="4">Total</td>
-                                <td>{totals.views}</td>
-                                <td>{totals.watch}</td>
-                                <td>{totals.likes}</td>
-                                <td>{totals.shares}</td>
-                                <td>{totals.comments}</td>
-                                <td>-</td>
-                                <td>-</td>
-                                <td>{totals.subChange}</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                        </div>
+                        <button
+                            type="button"
+                            className="top-content-scroll-btn"
+                            onClick={scrollTopContent}
+                            aria-label="Scroll to see more content"
+                        >
+                            <i className="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
 
             </div>
+
+            <DateRangeFilter
+                isOpen={showContentDateRangeFilter}
+                onClose={() => setShowContentDateRangeFilter(false)}
+                onApply={handleContentDateRangeApply}
+                initialValue={contentDateRangeFilterValue || {
+                    range_type: contentDateRange,
+                    start_date: contentFilters.startDate || null,
+                    end_date: contentFilters.endDate || null,
+                    timezone: 'Asia/Kolkata',
+                    compare: { enabled: false }
+                }}
+            />
         </div>
     );
 }

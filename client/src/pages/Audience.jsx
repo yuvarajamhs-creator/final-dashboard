@@ -129,6 +129,18 @@ export default function Audience() {
     const [showContentDateRangeFilter, setShowContentDateRangeFilter] = useState(false);
     const [contentDateRangeFilterValue, setContentDateRangeFilterValue] = useState(null);
 
+    // Platform filter (between Time Range and PAGE)
+    const platformFilterOptions = [
+        { id: 'all', name: 'All Platforms' },
+        { id: 'facebook', name: 'Facebook' },
+        { id: 'instagram', name: 'Instagram' },
+        { id: 'audience_network', name: 'Audience Network' },
+        { id: 'messenger', name: 'Messenger' },
+        { id: 'threads', name: 'Threads' },
+        { id: 'whatsapp', name: 'WhatsApp' },
+    ];
+    const [platformFilter, setPlatformFilter] = useState(() => platformFilterOptions[0]);
+
     // PAGE filter (Content Marketing style)
     const [pages, setPages] = useState([]);
     const [audiencePage, setAudiencePage] = useState(null);
@@ -146,6 +158,7 @@ export default function Audience() {
     const [igAudienceData, setIgAudienceData] = useState(null);
     const [igAudienceLoading, setIgAudienceLoading] = useState(false);
     const [igAudienceError, setIgAudienceError] = useState(null);
+    const [heatmapTooltip, setHeatmapTooltip] = useState(null); // { dayIndex, hour, x, y }
 
     useEffect(() => {
         const loadPages = async () => {
@@ -289,6 +302,9 @@ export default function Audience() {
         { name: "Kuwait", val: 0.4, flag: "🇰🇼" },
     ];
 
+    // Followers and Non-Followers (for right-side chart; mock data — can hook to API later)
+    const followersNonFollowersData = { followers: 23, nonFollowers: 77 };
+
     const platformData = [
         { name: 'Facebook', reach: 480, results: 0 },
         { name: 'Instagram', reach: 30, results: 0 },
@@ -299,6 +315,34 @@ export default function Audience() {
         { name: 'WhatsApp', reach: 0, results: 0 },
         { name: 'WhatsApp Bus', reach: 0, results: 0 },
     ];
+
+    // When your viewers are on Instagram — mock 7×24 grid (Mon–Sun × 0–23). Higher in evening and weekends.
+    const HEATMAP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const heatmapGrid = React.useMemo(() => {
+        const grid = [];
+        for (let d = 0; d < 7; d++) {
+            const row = [];
+            for (let h = 0; h < 24; h++) {
+                let v = 0.2 + 0.3 * Math.random();
+                if (h >= 16 && h <= 22) v += 0.35;
+                else if (h >= 10 && h <= 14) v += 0.15;
+                if (d === 5 || d === 6) v += 0.2;
+                row.push(Math.min(1, v));
+            }
+            grid.push(row);
+        }
+        return grid;
+    }, []);
+
+    const getHeatmapTooltipLabel = (value) => (value >= 0.6 ? 'Many' : value >= 0.35 ? 'Some' : 'Few');
+    const getLocalTimezoneLabel = () => {
+        const offset = -new Date().getTimezoneOffset();
+        const sign = offset >= 0 ? '+' : '-';
+        const abs = Math.abs(offset);
+        const h = Math.floor(abs / 60);
+        const m = abs % 60;
+        return `GMT ${sign}${String(h).padStart(2, '0')}${m ? String(m).padStart(2, '0') : ''}`;
+    };
 
     // Page performance chart: prefer Ad Account daily insights (impressions, reach, clicks); fallback to Page insights (impressions, reach, clicks: 0)
     const pagePerformanceChartData = (() => {
@@ -430,6 +474,32 @@ export default function Audience() {
             .slice(0, 10);
     })();
 
+    // Always show up to 10 rows: merge API data with fallback when API returns fewer than 10
+    const TOP_N = 10;
+    const citiesFallback = citiesData.map((c) => ({ name: c.name, val: c.val }));
+    const topTownsCitiesDisplay = (() => {
+        const base = (topCitiesFromIg || topRegionsChartData) || [];
+        if (base.length >= TOP_N) return base.slice(0, TOP_N);
+        const byName = new Map(base.map((r) => [r.name, r]));
+        for (const c of citiesFallback) {
+            if (byName.size >= TOP_N) break;
+            if (!byName.has(c.name)) byName.set(c.name, { name: c.name, val: c.val });
+        }
+        return [...byName.values()].sort((a, b) => b.val - a.val).slice(0, TOP_N);
+    })();
+
+    const topCountriesDisplay = (() => {
+        const base = (topCountriesFromIg || topCountriesChartData) || [];
+        const fallback = countriesData;
+        if (base.length >= TOP_N) return base.slice(0, TOP_N);
+        const byName = new Map(base.map((r) => [r.name, r]));
+        for (const c of fallback) {
+            if (byName.size >= TOP_N) break;
+            if (!byName.has(c.name)) byName.set(c.name, { name: c.name, val: c.val, flag: c.flag });
+        }
+        return [...byName.values()].sort((a, b) => b.val - a.val).slice(0, TOP_N);
+    })();
+
     const handleContentDateRangeApply = (payload) => {
         if (!payload.start_date || !payload.end_date) {
             console.error('[Audience DateRangeFilter] Invalid dates received:', payload);
@@ -522,6 +592,19 @@ export default function Audience() {
                     </div>
                     <div className="col-12 col-md-auto">
                         <MultiSelectFilter
+                            label="Platform"
+                            emoji="🌐"
+                            options={platformFilterOptions}
+                            selectedValues={platformFilter ? [platformFilter] : []}
+                            onChange={(values) => setPlatformFilter(values?.length ? values[0] : platformFilterOptions[0])}
+                            placeholder="Select platform"
+                            getOptionLabel={(opt) => opt.name}
+                            getOptionValue={(opt) => opt.id}
+                            singleSelect
+                        />
+                    </div>
+                    <div className="col-12 col-md-auto">
+                        <MultiSelectFilter
                             label="PAGE"
                             emoji="📄"
                             options={pages}
@@ -565,8 +648,52 @@ export default function Audience() {
                 </motion.button>
             </motion.div>
 
-            {/* Filters - Time Range + PAGE (Content Marketing style) */}
-            <FiltersRow />
+            {/* Filters (left) + Followers and Non-Followers (right) — same row, uniform padding */}
+            <div className="row g-3 align-items-stretch audience-top-row">
+                <div className="col-12 col-lg-6">
+                    <FiltersRow />
+                </div>
+                <div className="col-12 col-lg-6">
+                    <motion.div
+                        className="filter-card audience-followers-card h-100"
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.5, delay: 0.1 }}
+                    >
+                        <div className="filter-card-body">
+                            <label className="filter-label d-block audience-followers-label">
+                                <span className="filter-emoji">👥</span> Followers and Non-Followers
+                            </label>
+                            <div className="audience-followers-chart">
+                                <div className="audience-followers-row">
+                                    <span className="audience-followers-label">From followers</span>
+                                    <div className="audience-followers-bar-wrap">
+                                        <motion.div
+                                            className="audience-followers-bar"
+                                            initial={{ width: 0 }}
+                                            animate={{ width: `${followersNonFollowersData.followers}%` }}
+                                            transition={{ duration: 0.6, ease: 'easeOut' }}
+                                        />
+                                    </div>
+                                    <span className="audience-followers-pct">{followersNonFollowersData.followers}%</span>
+                                </div>
+                                <div className="audience-followers-row">
+                                    <span className="audience-followers-label">From non-followers</span>
+                                    <div className="audience-followers-bar-wrap">
+                                        <motion.div
+                                            className="audience-followers-bar"
+                                            initial={{ width: 0 }}
+                                            animate={{ width: `${followersNonFollowersData.nonFollowers}%` }}
+                                            transition={{ duration: 0.6, delay: 0.1, ease: 'easeOut' }}
+                                        />
+                                    </div>
+                                    <span className="audience-followers-pct">{followersNonFollowersData.nonFollowers}%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </motion.div>
+                </div>
+            </div>
 
             {/* Page performance chart - driven by PAGE filter */}
             <motion.div
@@ -768,8 +895,8 @@ export default function Audience() {
                                         <div className="text-muted small mb-2">{igAudienceError}</div>
                                     ) : null}
                                     <div className="d-flex flex-column gap-4">
-                                        {((topCitiesFromIg || topRegionsChartData) && (topCitiesFromIg || topRegionsChartData).length > 0) ? (
-                                            (topCitiesFromIg || topRegionsChartData).map((item, idx) => (
+                                        {topTownsCitiesDisplay.length > 0 ? (
+                                            topTownsCitiesDisplay.map((item, idx) => (
                                                 <motion.div
                                                     key={idx}
                                                     initial={{ width: 0 }}
@@ -812,7 +939,7 @@ export default function Audience() {
                                         <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
                                     ) : null}
                                     <div className="d-flex flex-column gap-4">
-                                        {(topCountriesFromIg || topCountriesChartData || countriesData).map((country, idx) => (
+                                        {topCountriesDisplay.map((country, idx) => (
                                             <motion.div
                                                 key={idx}
                                                 initial={{ width: 0 }}
@@ -837,6 +964,111 @@ export default function Audience() {
                                         ))}
                                     </div>
                                 </div>
+                            </motion.div>
+
+                            {/* 3. When your viewers are on Instagram — heatmap (mock data) */}
+                            <motion.div
+                                variants={itemVariants}
+                                className="mt-5 audience-heatmap-section"
+                                initial={{ opacity: 0, y: 12 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                            >
+                                <motion.h6
+                                    className="fw-bold mb-1 text-dark d-flex align-items-center gap-2 audience-heatmap-title"
+                                    initial={{ opacity: 0, x: -8 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    transition={{ duration: 0.35, delay: 0.05 }}
+                                >
+                                    When your viewers are on Instagram
+                                </motion.h6>
+                                <motion.small
+                                    className="text-muted d-block mb-3 audience-heatmap-subtitle"
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    transition={{ duration: 0.35, delay: 0.1 }}
+                                >
+                                    Your local time ({getLocalTimezoneLabel()}) · {getContentDateRangeDisplay()}
+                                </motion.small>
+                                <motion.div
+                                    className="audience-heatmap-wrapper"
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    transition={{ duration: 0.45, delay: 0.15 }}
+                                >
+                                    <div className="audience-heatmap-y-labels">
+                                        <span>00:00</span>
+                                        <span>06:00</span>
+                                        <span>12:00</span>
+                                        <span>18:00</span>
+                                    </div>
+                                    <motion.div
+                                        className="audience-heatmap-grid"
+                                        initial="hidden"
+                                        animate="visible"
+                                        variants={{
+                                            hidden: {},
+                                            visible: {
+                                                transition: { staggerChildren: 0.012, staggerDirection: 1 }
+                                            }
+                                        }}
+                                    >
+                                        {HEATMAP_DAYS.map((day, dayIndex) => (
+                                            <motion.div
+                                                key={day}
+                                                className="audience-heatmap-day-col"
+                                                variants={{ hidden: { opacity: 0 }, visible: { opacity: 1 } }}
+                                            >
+                                                <div className="audience-heatmap-day-label">{day}</div>
+                                                <div className="audience-heatmap-cells">
+                                                    {Array.from({ length: 24 }, (_, hour) => {
+                                                        const value = heatmapGrid[dayIndex][hour];
+                                                        return (
+                                                            <motion.div
+                                                                key={hour}
+                                                                className="audience-heatmap-cell"
+                                                                style={{ '--intensity': value }}
+                                                                variants={{ hidden: { opacity: 0, scale: 0.92 }, visible: { opacity: 1, scale: 1 } }}
+                                                                transition={{ duration: 0.25, ease: 'easeOut' }}
+                                                                whileHover={{ scale: 1.08, transition: { duration: 0.2 } }}
+                                                                onMouseEnter={(e) => {
+                                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                                    setHeatmapTooltip({
+                                                                        dayIndex,
+                                                                        hour,
+                                                                        dayLabel: day,
+                                                                        value,
+                                                                        x: rect.left + rect.width / 2,
+                                                                        y: rect.top,
+                                                                    });
+                                                                }}
+                                                                onMouseLeave={() => setHeatmapTooltip(null)}
+                                                            />
+                                                        );
+                                                    })}
+                                                </div>
+                                            </motion.div>
+                                        ))}
+                                    </motion.div>
+                                </motion.div>
+                                {heatmapTooltip && (
+                                    <motion.div
+                                        className="audience-heatmap-tooltip"
+                                        initial={{ opacity: 0, scale: 0.96 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        exit={{ opacity: 0, scale: 0.96 }}
+                                        transition={{ duration: 0.15 }}
+                                        style={{
+                                            left: heatmapTooltip.x,
+                                            top: heatmapTooltip.y - 8,
+                                            transform: 'translate(-50%, -100%)',
+                                        }}
+                                    >
+                                        <strong>{heatmapTooltip.dayLabel} {String(heatmapTooltip.hour).padStart(2, '0')}:00</strong>
+                                        <br />
+                                        {getHeatmapTooltipLabel(heatmapTooltip.value)} of your viewers are on Instagram
+                                    </motion.div>
+                                )}
                             </motion.div>
                         </>
                     ) : (

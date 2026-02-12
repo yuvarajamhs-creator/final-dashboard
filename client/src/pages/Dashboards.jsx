@@ -22,10 +22,28 @@ import { getCurrentTheme, setTheme } from "../utils/theme";
 import MultiSelectFilter from "../components/MultiSelectFilter";
 import DateRangeFilter from "../components/DateRangeFilter";
 import { downloadCSV } from "../utils/csvExport";
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import './Dashboards.css';
 
 const COLORS = ["#4F46E5", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
+
+/** Download an Excel file from headers and rows (array of arrays). columnWidths: array of numbers. */
+async function downloadExcelFromRows(headers, rows, sheetName, filename, columnWidths) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
+  worksheet.addRows([headers, ...rows]);
+  if (columnWidths?.length) {
+    worksheet.columns = columnWidths.map((w) => ({ width: w }));
+  }
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // Helper to transform Meta "actions" array -> object map
 const transformActions = (actions = []) => {
@@ -3046,29 +3064,10 @@ export default function AdsDashboardBootstrap() {
         ];
       });
       
-      // Create workbook and worksheet
-      const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-      
-      // Set column widths
-      ws['!cols'] = [
-        { wch: 25 }, // Lead Name
-        { wch: 15 }, // Phone Number
-        { wch: 20 }, // Date & Time
-        { wch: 30 }, // Street
-        { wch: 20 }, // City
-        { wch: 30 }, // Campaign
-        { wch: 30 }  // Ad Name
-      ];
-      
-      XLSX.utils.book_append_sheet(wb, ws, 'Leads');
-      
-      // Generate filename with date
       const dateStr = new Date().toISOString().slice(0, 10);
       const filename = `leads_${dateStr}.xlsx`;
-      
-      // Download file
-      XLSX.writeFile(wb, filename);
+      const columnWidths = [25, 15, 20, 30, 20, 25, 30, 30, 25]; // 9 columns
+      await downloadExcelFromRows(headers, rows, 'Leads', filename, columnWidths);
       
       setToast({
         type: 'success',
@@ -3189,30 +3188,10 @@ export default function AdsDashboardBootstrap() {
         ];
       });
       
-      // Create workbook and worksheet
-      const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-      
-      // Set column widths
-      ws['!cols'] = [
-        { wch: 25 }, // Lead Name
-        { wch: 15 }, // Phone Number
-        { wch: 20 }, // Date & Time
-        { wch: 30 }, // Street
-        { wch: 20 }, // City
-        { wch: 30 }, // Campaign
-        { wch: 30 }, // Ad Name
-        { wch: 30 }  // Form Name
-      ];
-      
-      XLSX.utils.book_append_sheet(wb, ws, 'Filtered Leads');
-      
-      // Generate filename with date
       const dateStr = new Date().toISOString().slice(0, 10);
       const filename = `filtered_leads_${dateStr}.xlsx`;
-      
-      // Download file
-      XLSX.writeFile(wb, filename);
+      const columnWidths = [25, 15, 20, 30, 20, 30, 30, 30];
+      await downloadExcelFromRows(headers, rows, 'Filtered Leads', filename, columnWidths);
       
       setToast({
         type: 'success',

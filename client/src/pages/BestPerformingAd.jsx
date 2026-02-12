@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import './BestPerformingAd.css';
+import DateRangeFilter from '../components/DateRangeFilter';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    Bar, Line, ComposedChart, Legend,
-    FunnelChart, Funnel, LabelList
+    Bar, Line, ComposedChart, Legend
 } from 'recharts';
 
 // Helper to get auth token
@@ -26,22 +26,43 @@ const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
 // USD to INR conversion rate (update as needed)
 const USD_TO_INR = 83;
 
-// Helper to transform Meta "actions" array -> object map
+// Helper to transform Meta "actions" array -> object map (same as Dashboard)
 const transformActions = (actions = []) => {
     if (!Array.isArray(actions)) return {};
     const map = {};
     actions.forEach((a) => {
-        map[a.action_type] = Number(a.value);
+        const key = a.action_type;
+        const val = a.value != null ? Number(a.value) : (a.values ? Number(a.values[0]) : 0);
+        if (key) map[key] = val;
     });
     return map;
+};
+
+// Extract conversions from actions (same keys as Dashboard + extra Meta variants)
+const getConversionsFromAggs = (aggs) => {
+    return aggs['purchase'] || aggs['complete_registration'] || aggs['offsite_conversion.fb_pixel_purchase']
+        || aggs['website_purchase'] || aggs['omni_purchase'] || aggs['offsite_conversion.purchase']
+        || 0;
+};
+
+// Extract revenue from action_values for ROAS (Meta: purchase, offsite_conversion.fb_pixel_purchase, etc.)
+const getRevenueFromActionValues = (values) => {
+    if (!values || typeof values !== 'object') return 0;
+    const keys = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'website_purchase', 'omni_purchase', 'offsite_conversion.purchase'];
+    let sum = 0;
+    keys.forEach((k) => { sum += Number(values[k]) || 0; });
+    return sum;
 };
 
 // Helper: safe number
 const num = (v) => Number(v) || 0;
 
-// Format currency in INR
+// Format currency (same as Ads Analytics Dashboard: raw API value with ₹)
+const formatMoney = (v) => `₹${(v || 0).toFixed(2)}`;
+
+// Format currency in INR (for tables/charts that explicitly convert)
 const formatINR = (value) => {
-    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `₹${(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
 // Format number with Indian locale
@@ -54,8 +75,27 @@ const formatPerc = (value) => {
     return `${value.toFixed(2)}%`;
 };
 
-// Fetch insights from Meta API
-const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', endDate = '' }) => {
+// Format ROAS (e.g. 2.5x or —)
+const formatROAS = (value) => {
+    if (value == null || value <= 0) return '—';
+    return `${Number(value).toFixed(2)}x`;
+};
+
+// Default date range: same as Ads Analytics Dashboard (last 7 complete days, excluding today)
+const getDefaultDates = () => {
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1); // Yesterday (exclude today, matching Meta)
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6); // 7 days before yesterday
+    return {
+        startDate: startDate.toISOString().slice(0, 10),
+        endDate: endDate.toISOString().slice(0, 10)
+    };
+};
+
+// Fetch ad accounts from Meta API (same as Dashboards)
+const fetchAdAccounts = async () => {
     try {
         const token = getAuthToken();
         const headers = { "Content-Type": "application/json" };
@@ -63,22 +103,49 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
             headers["Authorization"] = `Bearer ${token}`;
         }
 
-        // Calculate days from date range or use default
-        let days = 30;
-        if (startDate && endDate) {
-            const start = new Date(startDate);
-            const end = new Date(endDate);
-            const diffTime = Math.abs(end - start);
-            days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+        const res = await fetch(`${API_BASE}/api/meta/ad-accounts`, { headers });
+        if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            console.error("[fetchAdAccounts] API error:", errorData);
+            return [];
         }
 
-        let url = `${API_BASE}/api/meta/insights?time_increment=1&days=${days}`;
-        if (campaignId) {
-            url += `&campaign_id=${campaignId}`;
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+        if (data && Array.isArray(data.data)) return data.data;
+        return [];
+    } catch (e) {
+        console.error("[fetchAdAccounts] Exception:", e);
+        return [];
+    }
+};
+
+// Fetch insights from Meta API (same params as Ads Analytics Dashboard for same data)
+const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', endDate = '', adAccountId = null }) => {
+    try {
+        const token = getAuthToken();
+        const headers = { "Content-Type": "application/json" };
+        if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
         }
-        if (adId) {
-            url += `&ad_id=${adId}`;
+
+        // Build URL like Dashboard: from/to for exact date range so values match Ads Analytics Dashboard
+        let url = `${API_BASE}/api/meta/insights?time_increment=1`;
+        if (startDate && endDate) {
+            url += `&from=${encodeURIComponent(startDate)}&to=${encodeURIComponent(endDate)}`;
+        } else {
+            // No date range selected: use days so backend can default (e.g. last 7 days)
+            const days = 7;
+            url += `&days=${days}`;
         }
+
+        if (adAccountId) {
+            url += `&ad_account_id=${encodeURIComponent(adAccountId)}`;
+        }
+        // Same as Dashboard when "All Campaigns" / "All Ads": one aggregated call, same card values
+        url += '&is_all_campaigns=1&is_all_ads=1';
+        // Fetch live data from Meta so conversions/actions match Ads Analytics Dashboard
+        url += '&live=1';
 
         const res = await fetch(url, { headers });
 
@@ -100,16 +167,17 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
             return [];
         }
 
-        // Normalize data
+        // Normalize data (conversions same logic as Dashboard + extra action_type fallbacks)
         return data.map((d) => {
             const aggs = transformActions(d.actions || []);
             const values = transformActions(d.action_values || []);
             const leadCount = aggs['lead'] || aggs['on_facebook_lead'] || aggs['onsite_conversion.lead_grouped'] || 0;
-            const conversions = aggs['purchase'] || aggs['complete_registration'] || aggs['offsite_conversion.fb_pixel_purchase'] || 0;
+            const conversions = getConversionsFromAggs(aggs);
             
             const impressions = num(d.impressions);
             const clicks = num(d.clicks);
             const spend = num(d.spend);
+            const revenue = getRevenueFromActionValues(values);
             const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
             const cpl = leadCount > 0 ? spend / leadCount : 0;
             const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
@@ -121,7 +189,10 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
                 ad_id: d.ad_id || null,
                 ad_name: d.ad_name || "Unnamed Ad",
                 date: d.date_start || d.date,
+                ad_account_id: d.ad_account_id || null,
+                ad_account_name: d.ad_account_name || '',
                 spend: spend,
+                revenue: revenue,
                 impressions: impressions,
                 clicks: clicks,
                 leads: leadCount,
@@ -153,15 +224,33 @@ export default function BestPerformingAd() {
         return '';
     };
 
-    // --- FILTER STATE & LOGIC ---
-    const [filters, setFilters] = useState({ startDate: '', endDate: '' });
-    const [selectedDateRange, setSelectedDateRange] = useState('this_week');
+    // --- FILTER STATE & LOGIC (default same as Ads Analytics Dashboard: last 7 days) ---
+    const [filters, setFilters] = useState(() => getDefaultDates());
+    const [showDateRangeFilter, setShowDateRangeFilter] = useState(false);
+    const [dateRangeFilterValue, setDateRangeFilterValue] = useState(null);
     const [selectedProject, setSelectedProject] = useState('');
+    const [adAccounts, setAdAccounts] = useState([]);
+    const [adAccountsLoading, setAdAccountsLoading] = useState(true);
+    const [selectedAdAccount, setSelectedAdAccount] = useState(null);
     const [insightsData, setInsightsData] = useState([]);
     const [dataLoading, setDataLoading] = useState(false);
     const [error, setError] = useState(null);
 
-    // Fetch insights data when date range changes
+    // Load ad accounts on mount
+    useEffect(() => {
+        let cancelled = false;
+        setAdAccountsLoading(true);
+        fetchAdAccounts().then((accounts) => {
+            if (!cancelled) {
+                setAdAccounts(accounts || []);
+            }
+        }).finally(() => {
+            if (!cancelled) setAdAccountsLoading(false);
+        });
+        return () => { cancelled = true; };
+    }, []);
+
+    // Fetch insights data when date range or ad account changes
     useEffect(() => {
         const loadInsights = async () => {
             setDataLoading(true);
@@ -169,7 +258,8 @@ export default function BestPerformingAd() {
             try {
                 const data = await fetchInsightsData({
                     startDate: filters.startDate,
-                    endDate: filters.endDate
+                    endDate: filters.endDate,
+                    adAccountId: selectedAdAccount || undefined
                 });
                 setInsightsData(data);
             } catch (e) {
@@ -180,7 +270,7 @@ export default function BestPerformingAd() {
             }
         };
         loadInsights();
-    }, [filters.startDate, filters.endDate]);
+    }, [filters.startDate, filters.endDate, selectedAdAccount]);
 
     // Calculate totals from insights data
     const totals = useMemo(() => {
@@ -248,20 +338,20 @@ export default function BestPerformingAd() {
         return Object.values(dateMap).sort((a, b) => new Date(a.date) - new Date(b.date));
     }, [insightsData]);
 
-    // Dynamics Data (Amount Spend vs Lead Generated from Ad)
+    // Dynamics Data (Amount Spend vs Lead Generated from Ad) - use raw spend to match Ad Spend card
     const dynamicsData = useMemo(() => {
         return aggregateByDate.map((d) => {
             const date = new Date(d.date);
             const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             return {
                 date: formattedDate,
-                spend: d.spend * USD_TO_INR, // Convert to INR
+                spend: d.spend,
                 leadGenerated: d.leads
             };
         });
     }, [aggregateByDate]);
 
-    // Impressions & CPM Data
+    // Impressions & CPM Data - use raw CPM to match CPM card
     const impressionsData = useMemo(() => {
         return aggregateByDate.map((d) => {
             const date = new Date(d.date);
@@ -270,7 +360,7 @@ export default function BestPerformingAd() {
             return {
                 day: formattedDate,
                 imp: d.impressions,
-                cpm: cpm * USD_TO_INR // Convert to INR
+                cpm: cpm
             };
         });
     }, [aggregateByDate]);
@@ -289,7 +379,7 @@ export default function BestPerformingAd() {
         });
     }, [aggregateByDate]);
 
-    // Leads & CPL Data
+    // Leads & CPL Data - use raw CPL to match CPL card
     const leadsData = useMemo(() => {
         return aggregateByDate.map((d) => {
             const date = new Date(d.date);
@@ -298,17 +388,24 @@ export default function BestPerformingAd() {
             return {
                 day: formattedDate,
                 leads: d.leads,
-                cpl: cpl * USD_TO_INR // Convert to INR
+                cpl: cpl
             };
         });
     }, [aggregateByDate]);
 
-    // Aggregate data by campaign and ad for table
+    // Resolve ad account display name from id or API-provided name
+    const getAdAccountDisplay = (adAccountId, adAccountNameFromApi) => {
+        if (adAccountNameFromApi && String(adAccountNameFromApi).trim()) return String(adAccountNameFromApi).trim();
+        if (!adAccountId) return 'All Ad Accounts';
+        const acc = adAccounts.find((a) => (a.account_id || a.id) === String(adAccountId).replace(/^act_/, ''));
+        return acc ? (acc.account_name || acc.name || adAccountId) : adAccountId;
+    };
+
+    // Aggregate data by campaign and ad for table (live Meta API data; ad account per row from API)
     const campaignData = useMemo(() => {
         const campaignMap = {};
         
         insightsData.forEach((r) => {
-            // Use campaign_id and ad_id as key, or campaign name and ad name
             const key = `${r.campaign_id || r.campaign}_${r.ad_id || r.ad_name || 'no_ad'}`;
             
             if (!campaignMap[key]) {
@@ -317,8 +414,11 @@ export default function BestPerformingAd() {
                     campaign_id: r.campaign_id,
                     ad_id: r.ad_id,
                     name: r.campaign || 'Unknown Campaign',
-                    adset: r.ad_name || 'Unnamed Ad',
+                    ad_name: r.ad_name || 'Unnamed Ad',
+                    ad_account_id: r.ad_account_id || null,
+                    ad_account_name: r.ad_account_name || '',
                     spend: 0,
+                    revenue: 0,
                     impressions: 0,
                     clicks: 0,
                     leads: 0,
@@ -327,62 +427,79 @@ export default function BestPerformingAd() {
             }
             
             campaignMap[key].spend += r.spend || 0;
+            campaignMap[key].revenue += r.revenue || 0;
             campaignMap[key].impressions += r.impressions || 0;
             campaignMap[key].clicks += r.clicks || 0;
             campaignMap[key].leads += r.leads || 0;
             campaignMap[key].conversions += r.conversions || 0;
         });
         
-        // Calculate derived metrics and convert to INR
         return Object.values(campaignMap).map((item) => {
             const ctr = item.impressions > 0 ? (item.clicks / item.impressions) * 100 : 0;
             const cpm = item.impressions > 0 ? (item.spend / item.impressions) * 1000 : 0;
             const cpl = item.leads > 0 ? item.spend / item.leads : 0;
             const conversionRate = item.clicks > 0 ? (item.conversions / item.clicks) * 100 : 0;
-            
+            const roas = item.spend > 0 && item.revenue > 0 ? item.revenue / item.spend : null;
+            const ad_account_display = getAdAccountDisplay(item.ad_account_id, item.ad_account_name);
             return {
                 ...item,
-                ctr: ctr,
-                cpm: cpm * USD_TO_INR, // Convert to INR
-                cpl: cpl * USD_TO_INR, // Convert to INR
-                conversionRate: conversionRate
+                ad_account_display,
+                ctr,
+                cpm: cpm * USD_TO_INR,
+                cpl: cpl * USD_TO_INR,
+                conversionRate,
+                roas,
+                hookRate: null,
+                holdRate: null
             };
-        }).sort((a, b) => b.spend - a.spend); // Sort by spend descending
-    }, [insightsData]);
+        }).sort((a, b) => b.spend - a.spend);
+    }, [insightsData, adAccounts]);
 
-    const handleFilterChange = (e) => {
-        const { name, value } = e.target;
-        setFilters(prev => ({ ...prev, [name]: value }));
+    // Date range filter handler (same as Ads Analytics Dashboard)
+    const handleDateRangeApply = (payload) => {
+        if (!payload.start_date || !payload.end_date) {
+            console.error('[DateRangeFilter] Invalid dates received:', payload);
+            alert('Invalid date range selected. Please try again.');
+            return;
+        }
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(payload.start_date) || !dateRegex.test(payload.end_date)) {
+            console.error('[DateRangeFilter] Invalid date format:', payload);
+            alert('Invalid date format. Please try again.');
+            return;
+        }
+        setDateRangeFilterValue(payload);
+        setFilters({
+            startDate: payload.start_date,
+            endDate: payload.end_date
+        });
+        setShowDateRangeFilter(false);
     };
 
-    const applyPreset = (type) => {
-        const today = new Date();
-        // Simple logic for demo:
-        // This Week: Monday to Sunday
-        const day = today.getDay();
-        const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(today.setDate(diff));
-        const sunday = new Date(today.setDate(diff + 6));
-
-        let start = new Date(monday);
-        let end = new Date(sunday);
-
-        if (type === 'last_week') {
-            start.setDate(start.getDate() - 7);
-            end.setDate(end.getDate() - 7);
-            setSelectedDateRange('Last Week');
-        } else if (type === 'next_week') {
-            start.setDate(start.getDate() + 7);
-            end.setDate(end.getDate() + 7);
-            setSelectedDateRange('Next Week');
-        } else {
-            setSelectedDateRange('This Week');
+    const getDateRangeDisplay = () => {
+        if (!dateRangeFilterValue) return 'Last 7 days';
+        if (dateRangeFilterValue.range_type === 'custom') {
+            const start = new Date(dateRangeFilterValue.start_date);
+            const end = new Date(dateRangeFilterValue.end_date);
+            const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            return `${startDisplay} - ${endDisplay}`;
         }
-
-        setFilters({
-            startDate: start.toISOString().split('T')[0],
-            endDate: end.toISOString().split('T')[0]
-        });
+        const presetLabels = {
+            today: 'Today',
+            yesterday: 'Yesterday',
+            today_yesterday: 'Today & Yesterday',
+            last_7_days: 'Last 7 days',
+            last_14_days: 'Last 14 days',
+            last_28_days: 'Last 28 days',
+            last_30_days: 'Last 30 days',
+            this_week: 'This week',
+            last_week: 'Last week',
+            this_month: 'This month',
+            last_month: 'Last month',
+            maximum: 'Maximum'
+        };
+        return presetLabels[dateRangeFilterValue.range_type] || dateRangeFilterValue.range_type;
     };
 
     return (
@@ -404,92 +521,41 @@ export default function BestPerformingAd() {
                 </div>
             )}
 
-            {/* --- FILTERS ROW --- */}
+            {/* --- FILTERS ROW: 1. Time Range, 2. All Projects, 3. Ad Account --- */}
             <div className="filters-bar">
-                {/* REPLACED DATE FILTER */}
-                <div className="dropdown" style={{ flex: 1 }}>
-                    <div
-                        className="d-flex align-items-center gap-2 px-3 py-2 bg-white border shadow-sm dropdown-toggle cursor-pointer"
-                        role="button"
-                        data-bs-toggle="dropdown"
-                        aria-expanded="false"
+                {/* 1. Time Range (same as Ads Analytics Dashboard) */}
+                <div className="filter-block">
+                    <label className="filter-label"><span className="filter-emoji">📅</span> Time Range</label>
+                    <button
+                        type="button"
+                        className="filter-time-range-btn d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
+                        onClick={() => setShowDateRangeFilter(true)}
                         style={{
-                            borderRadius: '6px',
-                            color: '#64748b',
-                            borderColor: '#cbd5e1',
-                            transition: 'all 0.2s ease',
-                            height: '42px'
+                            borderRadius: '5px',
+                            color: 'var(--text, #64748b)',
+                            borderColor: 'rgba(0, 0, 0, 0.1)',
+                            minWidth: '180px',
+                            border: '1px solid rgba(0, 0, 0, 0.1)',
+                            background: 'var(--card, #ffffff)',
+                            width: '100%'
                         }}
                     >
                         <i className="far fa-calendar-alt text-secondary opacity-75"></i>
-                        <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.9rem' }}>
-                            {selectedDateRange.includes('Week') ? selectedDateRange : `${filters.startDate ? 'Custom' : 'Select Date'}: ${selectedDateRange}`}
+                        <span className="fw-medium small text-dark flex-grow-1 text-center filter-time-range-text" style={{ fontSize: '0.8rem' }}>
+                            {getDateRangeDisplay()}
                         </span>
                         <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
-                    </div>
-
-                    {/* Dropdown Content */}
-                    <ul className="dropdown-menu shadow-lg border-0 rounded-3 p-3 mt-2" style={{ minWidth: '340px', backgroundColor: '#ffffff' }}>
-
-                        {/* Presets Section */}
-                        <div className="mb-3">
-                            <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Quick Select</h6>
-                            <div className="d-flex gap-2">
-                                <button onClick={() => applyPreset('last_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Last Week</button>
-                                <button onClick={() => applyPreset('this_week')} className="btn btn-sm btn-outline-primary bg-primary-subtle text-primary border-primary flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>This Week</button>
-                                <button onClick={() => applyPreset('next_week')} className="btn btn-sm btn-outline-light text-dark border shadow-sm flex-fill rounded-2 fw-medium" style={{ fontSize: '0.8rem' }}>Next Week</button>
-                            </div>
-                        </div>
-
-                        <div className="dropdown-divider my-3 opacity-10"></div>
-
-                        {/* Custom Range Section */}
-                        <div>
-                            <h6 className="dropdown-header text-uppercase x-small fw-bold text-muted ls-1 ps-0 mb-2" style={{ fontSize: '0.7rem' }}>Custom Range</h6>
-                            <div className="d-flex flex-column gap-2">
-                                <div className="d-flex align-items-center gap-2">
-                                    <div className="flex-fill">
-                                        <label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>From</label>
-                                        <input
-                                            type="date"
-                                            className="form-control form-control-sm border-light bg-light text-secondary fw-medium"
-                                            name="startDate"
-                                            value={filters.startDate}
-                                            onChange={handleFilterChange}
-                                        />
-                                    </div>
-                                    <div className="pt-3 text-muted opacity-50"><i className="fas fa-arrow-right small"></i></div>
-                                    <div className="flex-fill">
-                                        <label className="form-label x-small text-muted mb-1" style={{ fontSize: '0.7rem' }}>To</label>
-                                        <input
-                                            type="date"
-                                            className="form-control form-control-sm border-light bg-light text-secondary fw-medium"
-                                            name="endDate"
-                                            value={filters.endDate}
-                                            onChange={handleFilterChange}
-                                        />
-                                    </div>
-                                </div>
-
-                                <button
-                                    className="btn btn-primary w-100 btn-sm rounded-2 fw-bold mt-2 shadow-sm"
-                                    onClick={() => {
-                                        const startDisplay = filters.startDate ? new Date(filters.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '...';
-                                        const endDisplay = filters.endDate ? new Date(filters.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '...';
-                                        setSelectedDateRange(`${startDisplay} - ${endDisplay}`);
-                                    }}
-                                >
-                                    Apply Range
-                                </button>
-                            </div>
-                        </div>
-                    </ul>
+                    </button>
                 </div>
-                <div className="custom-select-wrapper">
+
+                {/* 2. All Projects */}
+                <div className="filter-block custom-select-wrapper">
+                    <label className="filter-label"><span className="filter-emoji">📁</span> All Projects</label>
                     <select
                         className="filter-select"
                         value={selectedProject}
                         onChange={(e) => setSelectedProject(e.target.value)}
+                        style={{ borderRadius: '5px' }}
                     >
                         <option value="">All Projects</option>
                         <option value="Free Webinar">Free Webinar</option>
@@ -500,70 +566,114 @@ export default function BestPerformingAd() {
                         <option value="Youtube">Youtube</option>
                     </select>
                 </div>
+
+                {/* 3. Ad Account */}
+                <div className="filter-block custom-select-wrapper">
+                    <label className="filter-label"><span className="filter-emoji">🏢</span> Ad Account</label>
+                    <select
+                        className="filter-select"
+                        value={selectedAdAccount || ''}
+                        onChange={(e) => setSelectedAdAccount(e.target.value || null)}
+                        style={{
+                            borderRadius: '5px',
+                            border: '1px solid rgba(0,0,0,0.1)',
+                            background: 'var(--card, #ffffff)',
+                            fontSize: '0.875rem'
+                        }}
+                    >
+                        <option value="">All Ad Accounts</option>
+                        {adAccountsLoading ? (
+                            <option value="" disabled>Loading ad accounts...</option>
+                        ) : !adAccounts || adAccounts.length === 0 ? (
+                            <option value="" disabled>No ad accounts available</option>
+                        ) : (
+                            adAccounts
+                                .filter((account) => {
+                                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                                    return !displayName.toLowerCase().includes('read-only');
+                                })
+                                .map((account) => {
+                                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                                    const value = account.account_id || account.id;
+                                    return (
+                                        <option key={value} value={value}>
+                                            {displayName}
+                                        </option>
+                                    );
+                                })
+                        )}
+                    </select>
+                </div>
             </div>
 
-            {/* --- KPI CARDS ROW --- */}
-            <div className="kpi-grid">
-                {/* 1. Amount Spent (White with Purple Border) */}
-                <div className="kpi-card-new kpi-white">
-                    <div className="kpi-title">Amount spent</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatINR(totals.spendINR)}
+            {/* --- KPI CARDS ROW (same structure as Ads Analytics Dashboard) --- */}
+            <div className="row g-3 mb-4">
+                {/* 1. Ad Spend */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-primary">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">💰</div>
+                            <small className="kpi-label">Ad Spend</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatMoney(totals.spend)}</div>
+                        </div>
                     </div>
                 </div>
 
-                {/* 2. CPM (Dark Blue) */}
-                <div className="kpi-card-new kpi-blue-dark">
-                    <div className="kpi-title">CPM</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatINR(totals.cpmINR)}
-                    </div>
-                    <div className="kpi-trend">
-                        <i className="fas fa-arrow-up"></i> {dataLoading ? '...' : '38.7%'}
-                    </div>
-                </div>
-
-                {/* 3. Conversion Count (Light Blue) */}
-                <div className="kpi-card-new kpi-blue-light">
-                    <div className="kpi-title">Conversion Count</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatNum(totals.conversions)}
-                    </div>
-                    <div className="kpi-trend">
-                        <i className="fas fa-arrow-up"></i> {dataLoading ? '...' : '18.5%'}
+                {/* 2. Total Leads */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-success">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">👥</div>
+                            <small className="kpi-label">Total Leads</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatNum(totals.leads)}</div>
+                            <small className="kpi-subtitle">Volume</small>
+                        </div>
                     </div>
                 </div>
 
-                {/* 4. Lead Generated from Ad (Teal Green) */}
-                <div className="kpi-card-new kpi-green">
-                    <div className="kpi-title">Lead Generated from Ad</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatNum(totals.leads)}
-                    </div>
-                    <div className="kpi-trend">
-                        <i className="fas fa-arrow-up"></i> {dataLoading ? '...' : '12.3%'}
-                    </div>
-                </div>
-
-                {/* 5. CPL (Red) */}
-                <div className="kpi-card-new kpi-red">
-                    <div className="kpi-title">CPL</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatINR(totals.cplINR)}
-                    </div>
-                    <div className="kpi-trend">
-                        <i className="fas fa-arrow-down"></i> {dataLoading ? '...' : '-7.0%'}
+                {/* 3. CPL */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-warning">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">💵</div>
+                            <small className="kpi-label">Cost Per Lead</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatMoney(totals.cpl)}</div>
+                        </div>
                     </div>
                 </div>
 
-                {/* 6. Conversion Rate (Purple) */}
-                <div className="kpi-card-new kpi-purple">
-                    <div className="kpi-title">Conversion Rate</div>
-                    <div className="kpi-value-lg">
-                        {dataLoading ? 'Loading...' : formatPerc(totals.conversionRate)}
+                {/* 4. Conversion Rate */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-purple">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">📊</div>
+                            <small className="kpi-label">Conversion Rate</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatPerc(totals.clicks > 0 ? (totals.conversions / totals.clicks) * 100 : 0)}</div>
+                            <small className="kpi-subtitle">Clicks to Conversions</small>
+                        </div>
                     </div>
-                    <div className="kpi-trend">
-                        <i className="fas fa-arrow-up"></i> {dataLoading ? '...' : '5.2%'}
+                </div>
+
+                {/* 5. CPM */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-info">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">👁️</div>
+                            <small className="kpi-label">CPM</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatMoney(totals.cpm)}</div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* 6. Conversion Count */}
+                <div className="col-6 col-md-4 col-lg-2">
+                    <div className="kpi-card kpi-card-teal">
+                        <div className="kpi-card-body">
+                            <div className="kpi-icon">✅</div>
+                            <small className="kpi-label">Conversion Count</small>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatNum(totals.conversions)}</div>
+                            <small className="kpi-subtitle">Total Conversions</small>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -571,26 +681,30 @@ export default function BestPerformingAd() {
             {/* --- MIDDLE SECTION: FUNNEL & LINE CHART --- */}
             <div className="middle-section">
 
-                {/* FUNNEL CHART */}
+                {/* PERFORMANCE FUNNEL - custom layout (no overlapping, clear shape) */}
                 <div className="chart-box">
                     <div className="chart-header">
                         <div className="chart-title-text">Performance Funnel</div>
                         <i className="fas fa-ellipsis-v text-muted" style={{ cursor: 'pointer' }}></i>
                     </div>
-                    <div style={{ width: '100%', height: 300, display: 'flex', justifyContent: 'center' }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                            <FunnelChart>
-                                <Tooltip />
-                                <Funnel
-                                    dataKey="value"
-                                    data={funnelData}
-                                    isAnimationActive
-                                >
-                                    <LabelList position="right" fill="#000" stroke="none" dataKey="name" />
-                                    <LabelList position="center" fill="#fff" stroke="none" dataKey="value" formatter={(val) => val.toLocaleString()} />
-                                </Funnel>
-                            </FunnelChart>
-                        </ResponsiveContainer>
+                    <div className="performance-funnel">
+                        {funnelData.map((step, index) => (
+                            <div key={step.name} className="funnel-row" style={{ animationDelay: `${index * 0.08}s` }}>
+                                <div className="funnel-segment-wrap">
+                                    <div
+                                        className="funnel-segment"
+                                        style={{
+                                            '--funnel-fill': step.fill,
+                                            '--funnel-width': index === 0 ? '92%' : index === 1 ? '68%' : '44%'
+                                        }}
+                                    />
+                                </div>
+                                <div className="funnel-label-block">
+                                    <span className="funnel-label-name">{step.name}</span>
+                                    <span className="funnel-label-value">{formatNum(step.value)}</span>
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 </div>
 
@@ -616,13 +730,13 @@ export default function BestPerformingAd() {
                                     contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}
                                     formatter={(value, name) => {
                                         if (name === 'Amount spend') {
-                                            return formatINR(value);
+                                            return formatMoney(value);
                                         }
                                         return value;
                                     }}
                                 />
                                 <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-                                <Line yAxisId="left" type="monotone" dataKey="spend" name="Amount spend (INR)" stroke="#0ea5e9" strokeWidth={2} dot={{ r: 3 }} />
+                                <Line yAxisId="left" type="monotone" dataKey="spend" name="Amount spend" stroke="#0ea5e9" strokeWidth={2} dot={{ r: 3 }} />
                                 <Line yAxisId="right" type="monotone" dataKey="leadGenerated" name="Lead Generated from Ad" stroke="#94a3b8" strokeWidth={2} dot={{ r: 3 }} />
                             </ComposedChart>
                         </ResponsiveContainer>
@@ -645,14 +759,14 @@ export default function BestPerformingAd() {
                                 <Tooltip 
                                     formatter={(value, name) => {
                                         if (name === 'CPM') {
-                                            return formatINR(value);
+                                            return formatMoney(value);
                                         }
                                         return formatNum(value);
                                     }}
                                 />
                                 <Legend iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
                                 <Bar yAxisId="left" dataKey="imp" name="Impressions" fill="#60a5fa" radius={[2, 2, 0, 0]} barSize={10} />
-                                <Line yAxisId="right" type="monotone" dataKey="cpm" name="CPM (INR)" stroke="#f43f5e" strokeWidth={2} dot={false} />
+                                <Line yAxisId="right" type="monotone" dataKey="cpm" name="CPM" stroke="#f43f5e" strokeWidth={2} dot={false} />
                             </ComposedChart>
                         </ResponsiveContainer>
                     </div>
@@ -697,14 +811,14 @@ export default function BestPerformingAd() {
                                 <Tooltip 
                                     formatter={(value, name) => {
                                         if (name === 'CPL') {
-                                            return formatINR(value);
+                                            return formatMoney(value);
                                         }
                                         return formatNum(value);
                                     }}
                                 />
                                 <Legend iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
                                 <Bar yAxisId="left" dataKey="leads" name="Leads" fill="#5b45b0" radius={[2, 2, 0, 0]} barSize={10} />
-                                <Line yAxisId="right" type="monotone" dataKey="cpl" name="CPL (INR)" stroke="#10b981" strokeWidth={2} dot={false} />
+                                <Line yAxisId="right" type="monotone" dataKey="cpl" name="CPL" stroke="#10b981" strokeWidth={2} dot={false} />
                             </ComposedChart>
                         </ResponsiveContainer>
                     </div>
@@ -719,23 +833,25 @@ export default function BestPerformingAd() {
                 <table className="performance-table">
                     <thead>
                         <tr>
+                            <th>Ad account</th>
                             <th>Campaign name</th>
-                            <th>Ad set name</th>
+                            <th>Ad name</th>
                             <th>Amount spend</th>
-                            <th>Impressions</th>
-                            <th>Link clicks</th>
-                            <th>CTR</th>
-                            <th>CPM</th>
-                            <th>Conversion Count</th>
                             <th>Lead Generated from Ad</th>
-                            <th>CPL</th>
+                            <th>Conversion Count</th>
                             <th>Conversion Rate</th>
+                            <th>CTR</th>
+                            <th>CPL</th>
+                            <th>CPM</th>
+                            <th>Hook Rate</th>
+                            <th>Hold Rate</th>
+                            <th>ROAS</th>
                         </tr>
                     </thead>
                     <tbody>
                         {dataLoading ? (
                             <tr>
-                                <td colSpan="11" className="text-center py-4">
+                                <td colSpan="13" className="text-center py-4">
                                     <div className="spinner-border spinner-border-sm text-primary" role="status">
                                         <span className="visually-hidden">Loading...</span>
                                     </div>
@@ -744,34 +860,36 @@ export default function BestPerformingAd() {
                             </tr>
                         ) : campaignData.length === 0 ? (
                             <tr>
-                                <td colSpan="11" className="text-center py-4 text-muted">
+                                <td colSpan="13" className="text-center py-4 text-muted">
                                     No campaign data available. Please select filters or check your Meta API connection.
                                 </td>
                             </tr>
                         ) : (
                             campaignData.map((row) => (
                                 <tr key={row.id}>
+                                    <td>{row.ad_account_display}</td>
                                     <td>{row.name}</td>
-                                    <td>{row.adset}</td>
+                                    <td>{row.ad_name}</td>
                                     <td className={getBgClass(row.spend * USD_TO_INR, 'spend')}>
                                         {formatINR(row.spend * USD_TO_INR)}
-                                    </td>
-                                    <td>{formatNum(row.impressions)}</td>
-                                    <td>{formatNum(row.clicks)}</td>
-                                    <td>{formatPerc(row.ctr)}</td>
-                                    <td>{formatINR(row.cpm)}</td>
-                                    <td className={getBgClass(row.conversions, 'conversionCount')}>
-                                        {formatNum(row.conversions)}
                                     </td>
                                     <td className={getBgClass(row.leads, 'leadGenerated')}>
                                         {formatNum(row.leads)}
                                     </td>
-                                    <td className={getBgClass(row.cpl, 'cpl')}>
-                                        {formatINR(row.cpl)}
+                                    <td className={getBgClass(row.conversions, 'conversionCount')}>
+                                        {formatNum(row.conversions)}
                                     </td>
                                     <td className={getBgClass(row.conversionRate, 'conversionRate')}>
                                         {formatPerc(row.conversionRate)}
                                     </td>
+                                    <td>{formatPerc(row.ctr)}</td>
+                                    <td className={getBgClass(row.cpl, 'cpl')}>
+                                        {formatINR(row.cpl)}
+                                    </td>
+                                    <td>{formatINR(row.cpm)}</td>
+                                    <td>{row.hookRate != null ? formatPerc(row.hookRate) : '—'}</td>
+                                    <td>{row.holdRate != null ? formatPerc(row.holdRate) : '—'}</td>
+                                    <td>{formatROAS(row.roas)}</td>
                                 </tr>
                             ))
                         )}
@@ -787,6 +905,19 @@ export default function BestPerformingAd() {
                 </div>
             </div>
 
+            {/* Date Range Filter Modal (same as Ads Analytics Dashboard) */}
+            <DateRangeFilter
+                isOpen={showDateRangeFilter}
+                onClose={() => setShowDateRangeFilter(false)}
+                onApply={handleDateRangeApply}
+                initialValue={dateRangeFilterValue || {
+                    range_type: 'last_7_days',
+                    start_date: filters.startDate || null,
+                    end_date: filters.endDate || null,
+                    timezone: 'Asia/Kolkata',
+                    compare: { enabled: false }
+                }}
+            />
         </div>
     );
 }

@@ -11,108 +11,50 @@
     color: #334155;
 }
 
-/* ===== FILTERS BAR ===== */
-.filters-row {
-    display: flex;
-    gap: 16px;
-    margin-bottom: 24px;
+/* ===== FILTERS (Time Range, Platform, Page — same as Audience) ===== */
+.best-reel-container .filter-card {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 0.85rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    border: 1px solid #e2e8f0;
+    max-width: 100%;
+}
+
+.best-reel-container .filter-card .row {
     flex-wrap: wrap;
+    margin-left: 0;
+    margin-right: 0;
 }
 
-.filter-box {
-    background: white;
-    border-radius: 8px;
-    padding: 12px 16px;
-    flex: 1;
-    min-width: 200px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    display: flex;
-    flex-direction: column;
-}
-
-.filter-label {
-    font-size: 0.75rem;
-    font-weight: 600;
+.best-reel-container .filter-card .filter-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
     color: #64748b;
-    margin-bottom: 4px;
-}
-
-.filter-select {
-    border: none;
-    font-size: 0.95rem;
-    font-weight: 500;
-    color: #1e293b;
-    width: 100%;
-    outline: none;
-    background: transparent;
-    cursor: pointer;
-}
-
-.date-slider-box {
-    flex: 2;
-    background: white;
-    border-radius: 8px;
-    padding: 12px 16px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    display: flex;
-    flex-direction: column;
-}
-
-.date-inputs {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 8px;
-}
-
-.date-badge {
-    background: #f1f5f9;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 0.8rem;
     font-weight: 600;
-    color: #475569;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    margin-bottom: 0.35rem;
+    display: block;
 }
 
-/* Custom Range Slider Styling (Mock UI) */
-.range-slider-mock {
-    position: relative;
-    height: 6px;
-    background: #e2e8f0;
-    border-radius: 3px;
-    margin-top: 8px;
-    margin-bottom: 8px;
+.best-reel-container .filter-card .filter-emoji {
+    margin-right: 4px;
 }
 
-.range-track {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    background: #475569;
-    border-radius: 3px;
+.best-reel-filter-input {
+    border-radius: 5px;
+    color: #64748b;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    transition: all 0.2s ease;
+    height: 36px;
+    min-width: 180px;
+    background: #ffffff;
+    width: 100%;
 }
 
-.range-handle {
-    width: 16px;
-    height: 16px;
-    background: white;
-    border: 2px solid #475569;
-    border-radius: 50%;
-    position: absolute;
-    top: -5px;
-    cursor: pointer;
-}
-
-.handle-left {
-    left: 0%;
-}
-
-.handle-right {
-    right: 0%;
+.best-reel-filter-input:hover {
+    border-color: #94a3b8;
 }
 
 
@@ -386,6 +328,172 @@
 }
 
 
+/* ===== TOP CONTENT BY VIEWS (card carousel) ===== */
+.top-content-by-views {
+    margin-top: 24px;
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.top-content-by-views-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.top-content-by-views-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888);
+    color: white;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+}
+
+.top-content-by-views-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #1e293b;
+    margin: 0;
+}
+
+.top-content-by-views-carousel-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.top-content-cards-scroll {
+    display: flex;
+    gap: 16px;
+    overflow-x: auto;
+    scroll-behavior: smooth;
+    scrollbar-width: thin;
+    flex: 1;
+    min-width: 0;
+    padding-bottom: 8px;
+}
+
+.top-content-cards-scroll::-webkit-scrollbar {
+    height: 6px;
+}
+
+.top-content-cards-scroll::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 3px;
+}
+
+.top-content-cards-scroll::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+}
+
+.top-content-card {
+    flex: 0 0 260px;
+    width: 260px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    transition: box-shadow 0.2s ease;
+}
+
+.top-content-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.top-content-card-thumb {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 9 / 16;
+    max-height: 280px;
+    object-fit: cover;
+}
+
+.top-content-card-play {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+}
+
+.top-content-card-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #1e293b;
+    margin: 0;
+    padding: 10px 12px 4px;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.top-content-card-date {
+    font-size: 0.8rem;
+    color: #64748b;
+    margin: 0;
+    padding: 0 12px 10px;
+}
+
+.top-content-card-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+    padding: 0 12px 12px;
+}
+
+.top-content-metric {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: #475569;
+}
+
+.top-content-metric i {
+    color: #64748b;
+    width: 14px;
+    text-align: center;
+}
+
+.top-content-scroll-btn {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid #e2e8f0;
+    background: white;
+    color: #475569;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, color 0.2s;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.top-content-scroll-btn:hover {
+    background: #f1f5f9;
+    color: #1e293b;
+}
+
+
 /* ===== VIDEO LIST (Right Col -> Now Full Width) ===== */
 .video-list-panel {
     background: white;
@@ -527,7 +635,7 @@
         grid-template-columns: repeat(2, 1fr);
     }
 
-    .filters-row {
+    .best-reel-container .filter-card .row {
         flex-direction: column;
     }
 

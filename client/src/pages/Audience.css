@@ -81,6 +81,68 @@
     opacity: 0.8;
 }
 
+/* ===== TOP ROW: uniform padding and extra gap above Page performance ===== */
+.audience-top-row {
+    margin-bottom: 2rem;
+}
+
+.audience-top-row .filter-card {
+    padding: 0.55rem 0.75rem;
+    margin-bottom: 0;
+}
+
+/* ===== FOLLOWERS AND NON-FOLLOWERS CARD (right of filters) ===== */
+.audience-followers-card .filter-card-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.audience-followers-label {
+    margin-bottom: 0.5rem !important;
+}
+
+.audience-followers-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.audience-followers-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.audience-followers-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 7.5rem;
+}
+
+.audience-followers-bar-wrap {
+    flex: 1;
+    height: 1.25rem;
+    background: #e2e8f0;
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.audience-followers-bar {
+    height: 100%;
+    min-width: 2%;
+    background: #1e828e;
+    border-radius: 999px;
+}
+
+.audience-followers-pct {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 2.5rem;
+    text-align: right;
+}
 /* ===== LAYOUT (Main Page Container) ===== */
 .audience-container {
     background: var(--bg-primary) !important;
@@ -495,4 +557,94 @@
 
 .location-progress-fill {
     animation: progressFill 1s ease-out;
+}
+
+/* ===== WHEN YOUR VIEWERS ARE ON INSTAGRAM — HEATMAP (larger, with microanimation) ===== */
+.audience-heatmap-section {
+    padding: 1rem 0;
+}
+
+.audience-heatmap-title {
+    font-size: 1.45rem !important;
+}
+
+.audience-heatmap-subtitle {
+    font-size: 1.05rem !important;
+}
+
+.audience-heatmap-wrapper {
+    display: flex;
+    align-items: stretch;
+    gap: 1.25rem;
+    position: relative;
+    min-height: 520px;
+}
+
+.audience-heatmap-y-labels {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    width: 4rem;
+    padding-top: 2.5rem;
+    padding-bottom: 0.5rem;
+    font-size: 1.05rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.audience-heatmap-grid {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 8px;
+}
+
+.audience-heatmap-day-col {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+}
+
+.audience-heatmap-day-label {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.audience-heatmap-cells {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 460px;
+    gap: 5px;
+}
+
+.audience-heatmap-cell {
+    flex: 1;
+    min-height: 14px;
+    border-radius: 6px;
+    background: rgba(91, 69, 176, calc(0.15 + var(--intensity, 0) * 0.85));
+    cursor: default;
+    transition: background 0.2s ease, filter 0.2s ease;
+    will-change: transform;
+}
+
+.audience-heatmap-cell:hover {
+    filter: brightness(1.12);
+}
+
+.audience-heatmap-tooltip {
+    position: fixed;
+    z-index: 1050;
+    padding: 0.75rem 1.1rem;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    font-size: 1rem;
+    color: var(--text-primary);
+    pointer-events: none;
+    white-space: nowrap;
 }

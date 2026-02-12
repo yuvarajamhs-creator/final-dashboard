@@ -15,6 +15,7 @@ const { fetchInsightsFromMetaLive } = require("./insightsService");
 const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
 const { fetchInstagramInsights, fetchInstagramAudienceDemographics, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { fetchInstagramMediaInsights } = require("./instagramMediaInsightsService");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
 const campaignsServiceMeta = require("../services/meta/campaignsService");
@@ -532,7 +533,12 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
           });
           if (liveData && liveData.length > 0) {
             await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
-            liveAggregate = liveAggregate.concat(liveData);
+            const tagged = liveData.map((row) => ({
+              ...row,
+              ad_account_id: String(adAccountId),
+              ad_account_name: row.ad_account_name || '',
+            }));
+            liveAggregate = liveAggregate.concat(tagged);
           }
         } catch (liveErr) {
           if (useLive) {
@@ -2260,6 +2266,59 @@ router.post("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
     }
     return res.status(500).json({
       error: "Failed to fetch Instagram insights",
+      details: err.response?.data || err.message,
+    });
+  }
+});
+
+// GET /api/meta/instagram/media-insights?accountIds=...|pageIds=...&from=...&to=... (or period=last_7_days)
+// Returns media list with hook_rate/hold_rate for Reels only; null + availability for non-Reels.
+router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period } = req.query;
+
+    let accountIds = [];
+    if (accountIdsParam) {
+      accountIds = (typeof accountIdsParam === "string" ? accountIdsParam.split(",") : accountIdsParam || [])
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }
+    let pageIds = [];
+    if (pageIdsParam) {
+      pageIds = (typeof pageIdsParam === "string" ? pageIdsParam.split(",") : pageIdsParam || [])
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }
+
+    const result = await fetchInstagramMediaInsights({
+      accountIds: accountIds.length > 0 ? accountIds : undefined,
+      pageIds: pageIds.length > 0 ? pageIds : undefined,
+      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
+      from: from || undefined,
+      to: to || undefined,
+      period: period || undefined,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error("[Instagram Media Insights] Error:", err.response?.data || err.message);
+    if (err.response?.data?.error?.code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: err.response.data.error.message,
+        isAuthError: true,
+      });
+    }
+    if (err.response?.data?.error?.code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: err.response.data.error.message,
+        isPermissionError: true,
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram media insights",
       details: err.response?.data || err.message,
     });
   }

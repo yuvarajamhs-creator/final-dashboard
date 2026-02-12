@@ -17,6 +17,65 @@
     display: flex;
     gap: 16px;
     margin-bottom: 24px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    animation: filtersFadeIn 0.35s ease-out;
+}
+@keyframes filtersFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.filter-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.filter-block:first-child {
+    flex: 1;
+    min-width: 180px;
+}
+
+.filter-block.custom-select-wrapper {
+    flex: 1;
+    min-width: 160px;
+}
+
+.filter-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    margin: 0;
+}
+
+/* Time Range button - prevent text cutoff, match select height */
+.filter-time-range-btn {
+    min-height: 40px;
+    line-height: 1.4;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+.filter-time-range-btn:hover {
+    border-color: #94a3b8 !important;
+}
+.filter-time-range-btn:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+.filter-time-range-text {
+    line-height: 1.4;
+    padding: 2px 0;
+}
+
+.filter-emoji {
+    margin-right: 4px;
 }
 
 .custom-select-wrapper {
@@ -26,10 +85,11 @@
 
 .filter-select {
     width: 100%;
-    padding: 10px 16px;
+    min-height: 40px;
+    padding: 9px 32px 9px 12px;
+    line-height: 1.4;
     border-radius: 6px;
     border: 1px solid #cbd5e1;
-    /* Slate-300 */
     background-color: white;
     color: #475569;
     font-size: 0.9rem;
@@ -37,6 +97,13 @@
     appearance: none;
     cursor: pointer;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    box-sizing: border-box;
+    overflow: visible;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.filter-select:hover {
+    border-color: #94a3b8;
 }
 
 .filter-select:focus {
@@ -45,7 +112,101 @@
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
-/* ===== KPI CARDS ROW ===== */
+/* ===== KPI CARDS (Dashboard-style, same as Ads Analytics Dashboard) ===== */
+.kpi-card {
+    height: 90%;
+    border-radius: 10px;
+    padding: 1rem;
+    color: white;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+.kpi-card:hover {
+    box-shadow: 0 8px 16px -2px rgba(0, 0, 0, 0.15);
+    transform: translateY(-2px);
+}
+
+/* KPI row subtle entrance */
+.best-ad-container .row.g-3.mb-4 {
+    animation: kpiRowFadeIn 0.4s ease-out 0.05s both;
+}
+@keyframes kpiRowFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.kpi-card-primary {
+    background: linear-gradient(135deg, #5b45b0 0%, #483690 100%);
+}
+
+.kpi-card-success {
+    background: linear-gradient(135deg, #0d47a1 0%, #082d6b 100%);
+}
+
+.kpi-card-warning {
+    background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%);
+}
+
+.kpi-card-purple {
+    background: linear-gradient(135deg, #d81b60 0%, #ad1457 100%);
+}
+
+.kpi-card-info {
+    background: linear-gradient(135deg, #00897b 0%, #006056 100%);
+}
+
+.kpi-card-teal {
+    background: linear-gradient(135deg, #00acc1 0%, #00838f 100%);
+}
+
+.kpi-card-body {
+    position: relative;
+    z-index: 2;
+}
+
+.kpi-card .kpi-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    opacity: 0.9;
+    text-transform: capitalize;
+    display: block;
+}
+
+.kpi-card .kpi-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0.4rem 0;
+    color: white;
+}
+
+.kpi-card .kpi-icon {
+    position: absolute;
+    right: 0.85rem;
+    top: 0.85rem;
+    font-size: 2rem;
+    opacity: 0.2;
+}
+
+.kpi-card .kpi-subtitle {
+    font-size: 0.75rem;
+    opacity: 0.8;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+/* ===== Legacy KPI grid (kept for any other usage) ===== */
 .kpi-grid {
     display: grid;
     grid-template-columns: repeat(6, 1fr);
@@ -153,19 +314,23 @@
 /* ===== MIDDLE SECTION (Funnel + Line Chart) ===== */
 .middle-section {
     display: grid;
-    grid-template-columns: 300px 1fr;
-    /* Fixed width funnel, flex chart */
+    grid-template-columns: 320px 1fr;
     gap: 24px;
     margin-bottom: 24px;
 }
 
-/* Card Container for Charts */
+/* Card Container for Charts - micro-animation on appear */
 .chart-box {
     background: white;
     border-radius: 12px;
     padding: 20px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     border: 1px solid #f1f5f9;
+    transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.2s ease;
+}
+.chart-box:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    border-color: #e2e8f0;
 }
 
 .chart-header {
@@ -181,54 +346,92 @@
     color: #1e293b;
 }
 
-/* Funnel Styling */
-.funnel-container {
+/* ===== PERFORMANCE FUNNEL (custom - no overlap, clear shape) ===== */
+.performance-funnel {
     display: flex;
     flex-direction: column;
-    align-items: center;
+    gap: 6px;
+    padding: 8px 0;
+    min-height: 260px;
     justify-content: center;
-    height: 300px;
 }
 
-.funnel-step {
-    width: 80%;
-    text-align: center;
-    margin-bottom: 4px;
-    position: relative;
-    color: white;
-    font-weight: 700;
+.funnel-row {
     display: flex;
     align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    animation: funnelRowIn 0.35s ease-out both;
+}
+
+@keyframes funnelRowIn {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.funnel-segment-wrap {
+    flex: 1;
+    display: flex;
     justify-content: center;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    min-width: 0;
 }
 
-.step-1 {
-    background-color: #4f46e5;
-    height: 60px;
-    clip-path: polygon(0 0, 100% 0, 85% 100%, 15% 100%);
-    width: 100%;
-    z-index: 3;
+/* Trapezoid segment - funnel shape (wide top → narrow bottom) */
+.funnel-segment {
+    width: var(--funnel-width, 90%);
+    height: 56px;
+    background: var(--funnel-fill, #4338ca);
+    border-radius: 6px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.performance-funnel .funnel-row:nth-child(1) .funnel-segment {
+    clip-path: polygon(0 0, 100% 0, 92% 100%, 8% 100%);
+}
+.performance-funnel .funnel-row:nth-child(2) .funnel-segment {
+    clip-path: polygon(8% 0, 92% 0, 84% 100%, 16% 100%);
+}
+.performance-funnel .funnel-row:nth-child(3) .funnel-segment {
+    clip-path: polygon(16% 0, 84% 0, 50% 100%, 50% 100%);
 }
 
-.step-2 {
-    background-color: #0ea5e9;
-    height: 60px;
-    clip-path: polygon(0 0, 100% 0, 80% 100%, 20% 100%);
-    width: 85%;
-    margin-top: -5px;
-    z-index: 2;
+.funnel-segment:hover {
+    transform: scale(1.01);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
-.step-3 {
-    background-color: #06b6d4;
-    height: 60px;
-    clip-path: polygon(0 0, 100% 0, 50% 100%, 50% 100%);
-    width: 70%;
-    margin-top: -5px;
-    z-index: 1;
-    display: none;
-    /* simple css funnel is hard, will use SVG/Recharts */
+/* Label + count always visible, no overlap */
+.funnel-label-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    min-width: 100px;
+    flex-shrink: 0;
+}
+
+.funnel-label-name {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #1e293b;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.funnel-label-value {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #475569;
+    line-height: 1.3;
+    margin-top: 2px;
+    white-space: nowrap;
 }
 
 
