@@ -43,6 +43,52 @@ const fetchPages = async () => {
     }
 };
 
+const fetchInstagramInsights = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/insights?pageIds=${encodeURIComponent(pageId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || err.details || res.statusText);
+    }
+    return res.json();
+};
+
+const fetchInstagramMediaInsights = async (pageId) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/media-insights?pageIds=${encodeURIComponent(pageId)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || err.details || res.statusText);
+    }
+    return res.json();
+};
+
+const fetchInstagramAudienceDemographics = async (pageId, timeframe) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram-audience-demographics?page_id=${encodeURIComponent(pageId)}&timeframe=${encodeURIComponent(timeframe)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || err.details || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
 const getContentDefaultDates = () => {
     const today = new Date();
     const endDate = new Date(today);
@@ -71,13 +117,24 @@ export default function BestPerformingReel() {
         { id: 'threads', name: 'Threads' },
         { id: 'whatsapp', name: 'WhatsApp' },
     ];
-    const [platformFilters, setPlatformFilters] = useState([]); // multi-select: array of selected platform objects
+    const [platformFilters, setPlatformFilters] = useState([]);
     const [pages, setPages] = useState([]);
-    const [reelPages, setReelPages] = useState([]); // multi-select: array of selected page objects
+    const [reelPage, setReelPage] = useState(null); // single page id (e.g. for "Doctor Farmer")
 
-    const [activeTab, setActiveTab] = useState('all'); // 'all', 'posts', 'stories', 'reels'
+    const [activeTab, setActiveTab] = useState('all');
     const [error, setError] = useState(null);
-    const [activeChart, setActiveChart] = useState(null); // 'watchTime', 'age', 'gender', 'location'
+    const [activeChart, setActiveChart] = useState(null);
+
+    // Live Meta data
+    const [igInsights, setIgInsights] = useState(null);
+    const [mediaInsights, setMediaInsights] = useState(null);
+    const [audienceData, setAudienceData] = useState(null);
+    const [loadingInsights, setLoadingInsights] = useState(false);
+    const [loadingMedia, setLoadingMedia] = useState(false);
+    const [loadingAudience, setLoadingAudience] = useState(false);
+    const [insightsError, setInsightsError] = useState(null);
+    const [mediaError, setMediaError] = useState(null);
+    const [audienceError, setAudienceError] = useState(null);
 
     useEffect(() => {
         const loadPages = async () => {
@@ -86,6 +143,77 @@ export default function BestPerformingReel() {
         };
         loadPages();
     }, []);
+
+    // Fetch Instagram account insights (views, reach, interactions) when page + date range selected
+    useEffect(() => {
+        if (!reelPage || !contentFilters.startDate || !contentFilters.endDate) {
+            setIgInsights(null);
+            setInsightsError(null);
+            return;
+        }
+        let cancelled = false;
+        setLoadingInsights(true);
+        setInsightsError(null);
+        fetchInstagramInsights(reelPage, contentFilters.startDate, contentFilters.endDate)
+            .then((data) => {
+                if (!cancelled) setIgInsights(data);
+            })
+            .catch((err) => {
+                if (!cancelled) setInsightsError(err?.message || 'Failed to load insights');
+            })
+            .finally(() => {
+                if (!cancelled) setLoadingInsights(false);
+            });
+        return () => { cancelled = true; };
+    }, [reelPage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch media insights (reels with views, likes, comments, hook rate) for top content
+    useEffect(() => {
+        if (!reelPage) {
+            setMediaInsights(null);
+            setMediaError(null);
+            return;
+        }
+        let cancelled = false;
+        setLoadingMedia(true);
+        setMediaError(null);
+        fetchInstagramMediaInsights(reelPage)
+            .then((data) => {
+                if (!cancelled) setMediaInsights(data);
+            })
+            .catch((err) => {
+                if (!cancelled) setMediaError(err?.message || 'Failed to load media insights');
+            })
+            .finally(() => {
+                if (!cancelled) setLoadingMedia(false);
+            });
+        return () => { cancelled = true; };
+    }, [reelPage]);
+
+    // Fetch audience demographics (age, gender, location) when page selected
+    useEffect(() => {
+        if (!reelPage) {
+            setAudienceData(null);
+            setAudienceError(null);
+            return;
+        }
+        const start = new Date(contentFilters.startDate);
+        const end = new Date(contentFilters.endDate);
+        const days = Math.round((end - start) / (1000 * 60 * 60 * 24));
+        const timeframe = days <= 8 ? 'this_week' : 'this_month';
+        let cancelled = false;
+        setLoadingAudience(true);
+        setAudienceError(null);
+        fetchInstagramAudienceDemographics(reelPage, timeframe)
+            .then((data) => { if (!cancelled) setAudienceData(data); })
+            .catch((err) => {
+                if (!cancelled) setAudienceError(err?.message || 'Failed to load audience');
+            })
+            .finally(() => {
+                if (!cancelled) setLoadingAudience(false);
+            });
+        return () => { cancelled = true; };
+    }, [reelPage, contentFilters.startDate, contentFilters.endDate]);
 
     const handleContentDateRangeApply = (payload) => {
         if (!payload.start_date || !payload.end_date) return;
@@ -119,9 +247,63 @@ export default function BestPerformingReel() {
         return presetLabels[contentDateRange] || 'Last 7 days';
     };
 
-    // --- MOCK DATA ---
+    // --- DERIVED METRICS FROM LIVE META DATA ---
+    const reelsFromMedia = (mediaInsights?.media || []).filter(
+        (m) => m.product_type === 'REELS' && m.availability === 'available' && (m.video_views ?? 0) >= 0
+    );
+    const totalViewsLive = igInsights?.totalViews ?? 0;
+    const totalReachLive = igInsights?.totalReached ?? 0;
+    const totalInteractionsLive = igInsights?.totalInteractions ?? 0;
+    const engagementRateLive = totalReachLive > 0
+        ? Math.round((totalInteractionsLive / totalReachLive) * 10000) / 100
+        : 0;
+    const totalWatchTimeSeconds = reelsFromMedia.reduce(
+        (sum, m) => sum + (Number(m.video_avg_time_watched || 0) * Number(m.video_views || 0)),
+        0
+    );
+    const watchTimeDisplay = totalWatchTimeSeconds >= 3600
+        ? `${(totalWatchTimeSeconds / 3600).toFixed(1)}K h`
+        : totalWatchTimeSeconds >= 60
+            ? `${(totalWatchTimeSeconds / 60).toFixed(0)}K m`
+            : `${totalWatchTimeSeconds} s`;
+    const hookRates = reelsFromMedia.map((m) => m.hook_rate).filter((r) => r != null && !Number.isNaN(r));
+    const median = (arr) => {
+        if (!arr.length) return 0;
+        const s = [...arr].sort((a, b) => a - b);
+        const m = Math.floor(s.length / 2);
+        return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    const medianHookRate = median(hookRates);
+    const contentWinRateLive = hookRates.length > 0
+        ? Math.round((hookRates.filter((r) => r >= medianHookRate).length / hookRates.length) * 100)
+        : 0;
+    const avgHookRateLive = hookRates.length > 0
+        ? Math.round((hookRates.reduce((a, b) => a + b, 0) / hookRates.length) * 100) / 100
+        : null;
 
-    // 1. Chart Data (Views vs Engagements)
+    const ageBreakdown = audienceData?.age_breakdown || [];
+    const genderBreakdown = audienceData?.gender_breakdown || [];
+    const locationBreakdown = (audienceData?.country_breakdown || []).slice(0, 10);
+
+    const topContentByViews = [...reelsFromMedia]
+        .sort((a, b) => (b.video_views || 0) - (a.video_views || 0))
+        .slice(0, 20)
+        .map((m, idx) => ({
+            id: m.media_id || idx,
+            title: (m.caption && m.caption.slice(0, 50)) || `Reel ${idx + 1}`,
+            timestamp: m.timestamp,
+            views: m.video_views || 0,
+            likes: m.likes || 0,
+            comments: m.comments || 0,
+            shares: 0,
+            permalink: m.permalink,
+        }));
+
+    const loadingAny = loadingInsights || loadingMedia || loadingAudience;
+    const hasLiveData = reelPage && (igInsights || mediaInsights || audienceData);
+    const displayError = insightsError || mediaError || audienceError || error;
+
+    // 1. Chart Data (Views vs Engagements) - use live total when available
     const viewsData = [
         { date: '02 Nov', views: 2400, eng: 40 },
         { date: '03 Nov', views: 2900, eng: 35 },
@@ -212,6 +394,19 @@ export default function BestPerformingReel() {
 
     const COLORS = ['#0369a1', '#38bdf8', '#0ea5e9', '#60a5fa', '#3b82f6', '#8b5cf6', '#ec4899', '#fb923c'];
 
+    const watchTimeChartData = hasLiveData && reelsFromMedia.length > 0
+        ? [{ time: 'Total (min)', value: Math.round(totalWatchTimeSeconds / 60) }]
+        : watchTimeData;
+    const ageChartData = hasLiveData && ageBreakdown.length > 0
+        ? ageBreakdown.map((r, i) => ({ age: r.age || r.age_range || 'N/A', value: r.value, color: COLORS[i % COLORS.length] }))
+        : ageData;
+    const genderChartData = hasLiveData && genderBreakdown.length > 0
+        ? genderBreakdown.map((r, i) => ({ name: r.gender || String(r.name || 'N/A'), value: r.value, color: COLORS[i % COLORS.length] }))
+        : genderData;
+    const locationChartData = hasLiveData && locationBreakdown.length > 0
+        ? locationBreakdown.map((r, i) => ({ location: r.country || r.location || 'N/A', value: r.value, color: COLORS[i % COLORS.length] }))
+        : locationData;
+
     // 3. DATASETS FOR TABS
     const videoList = [
         { id: 1, url: 'https://example.com/video_51', title: 'Example Tutorial Video 51', type: 'videoOnDemand', views: 12970, watch: 48539, likes: 89, shares: 215, comments: 4, rate: '2.37%', avgView: '27.06', subChange: 85, imgColor: '#fb923c' },
@@ -283,14 +478,25 @@ export default function BestPerformingReel() {
         return String(n);
     };
 
-    // Mock publish date for card (e.g. "1 February 17:00")
     const getPublishDate = (item) => {
+        if (item.timestamp) {
+            try {
+                const d = new Date(item.timestamp);
+                return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+            } catch (_) {
+                return '';
+            }
+        }
         const day = (item.id % 28) || 1;
         const month = ['January', 'February', 'March', 'April', 'May', 'June'][item.id % 6];
         const hour = 17;
         const min = (item.id * 17) % 60;
         return `${day} ${month} ${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
     };
+
+    const contentListForTopContent = (activeTab === 'all' || activeTab === 'reels') && hasLiveData && topContentByViews.length > 0
+        ? topContentByViews
+        : currentList;
 
     const topContentScrollRef = useRef(null);
     const scrollTopContent = () => {
@@ -301,23 +507,6 @@ export default function BestPerformingReel() {
 
     return (
         <div className="best-reel-container">
-            {/* Error Message */}
-            {error && (
-                <div className="alert alert-warning alert-dismissible fade show mb-3" role="alert">
-                    <strong>⚠️ {error}</strong>
-                    <br />
-                    <small>
-                        Please configure your Meta API credentials in server/.env to view page and reel data.
-                    </small>
-                    <button
-                        type="button"
-                        className="btn-close"
-                        onClick={() => setError(null)}
-                        aria-label="Close"
-                    ></button>
-                </div>
-            )}
-
             {/* --- TOP FILTERS (Time Range, Platform, Page — same as Audience) --- */}
             <motion.div
                 className="filter-card best-reel-filters mb-4"
@@ -360,8 +549,8 @@ export default function BestPerformingReel() {
                                 label="PAGE"
                                 emoji="📄"
                                 options={pages}
-                                selectedValues={reelPages.map((p) => p.id)}
-                                onChange={(selectedIds) => setReelPages(pages.filter((p) => selectedIds.includes(p.id)))}
+                                selectedValues={reelPage ? [reelPage] : []}
+                                onChange={(selectedIds) => setReelPage(selectedIds.length ? selectedIds[0] : null)}
                                 placeholder="Select a Page"
                                 getOptionLabel={(opt) => opt.name}
                                 getOptionValue={(opt) => opt.id}
@@ -379,34 +568,66 @@ export default function BestPerformingReel() {
                 <button className={`nav-tab-btn ${activeTab === 'reels' ? 'active' : ''}`} onClick={() => setActiveTab('reels')}>Reels</button>
             </div>
 
+            {displayError && (
+                <div className="alert alert-warning alert-dismissible fade show mb-3" role="alert">
+                    <strong>{displayError}</strong>
+                    <button type="button" className="btn-close" onClick={() => { setInsightsError(null); setMediaError(null); setAudienceError(null); setError(null); }} aria-label="Close"></button>
+                </div>
+            )}
+
+            {!reelPage && (
+                <div className="alert alert-info mb-3">
+                    Select a page (e.g. &quot;Doctor Farmer&quot;) from the PAGE filter above to load metrics, audience insights, and top content from Meta.
+                </div>
+            )}
+
+            {reelPage && loadingAny && (
+                <div className="text-muted mb-3"><i className="fas fa-spinner fa-spin me-2"></i>Loading live Meta data…</div>
+            )}
+
             {/* --- WRAPPER FOR ANIMATED CONTENT --- */}
             <div key={activeTab} className={animClass}>
 
-                {/* --- SUMMARY METRICS --- */}
+                {/* --- SUMMARY METRICS (live when page selected) --- */}
                 <div className="summary-metrics-row">
                     <div className="summary-metric-item">
                         <div className="summary-label">Views <i className="fas fa-info-circle text-muted small"></i></div>
-                        <div className="summary-value">{(totals.views / 1000).toFixed(1)}k <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 4.3%</span></div>
+                        <div className="summary-value">
+                            {hasLiveData ? formatCount(totalViewsLive) : (totals.views / 1000).toFixed(1) + 'k'}
+                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 4.3%</span>}
+                        </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Reach <i className="fas fa-info-circle text-muted small"></i></div>
-                        <div className="summary-value">4M <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 11.6%</span></div>
+                        <div className="summary-value">
+                            {hasLiveData ? formatCount(totalReachLive) : '4M'}
+                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 11.6%</span>}
+                        </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Content interactions <i className="fas fa-info-circle text-muted small"></i></div>
-                        <div className="summary-value">{(totals.shares + totals.likes + totals.comments)} <span className="summary-trend trend-down"><i className="fas fa-arrow-down"></i> 29.2%</span></div>
+                        <div className="summary-value">
+                            {hasLiveData ? formatCount(totalInteractionsLive) : (totals.shares + totals.likes + totals.comments)}
+                            {!hasLiveData && <span className="summary-trend trend-down"><i className="fas fa-arrow-down"></i> 29.2%</span>}
+                        </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Hook Rate <i className="fas fa-info-circle text-muted small"></i></div>
-                        <div className="summary-value">42.5% <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 5.1%</span></div>
+                        <div className="summary-value">
+                            {hasLiveData && avgHookRateLive != null ? `${avgHookRateLive}%` : '42.5%'}
+                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 5.1%</span>}
+                        </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Content Win Rate <i className="fas fa-info-circle text-muted small"></i></div>
-                        <div className="summary-value">68% <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 8.2%</span></div>
+                        <div className="summary-value">
+                            {hasLiveData ? `${contentWinRateLive}%` : '68%'}
+                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 8.2%</span>}
+                        </div>
                     </div>
                 </div>
 
-                {/* --- KPI CARDS ROW (Clickable Buttons) --- */}
+                {/* --- KPI CARDS ROW (live audience + watch time + engagement rate) --- */}
                 <div className="kpi-row">
                     <motion.button
                         className={`kpi-card-reel bg-blue-dark ${activeChart === 'watchTime' ? 'active-chart' : ''}`}
@@ -416,7 +637,7 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Watch Time</div>
-                        <div className="value">{(totals.watch / 1000).toFixed(0)}<span className="val-suffix">K</span></div>
+                        <div className="value">{hasLiveData ? watchTimeDisplay : (totals.watch / 1000).toFixed(0)}<span className="val-suffix">{hasLiveData ? '' : 'K'}</span></div>
                     </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-purple-dark ${activeChart === 'age' ? 'active-chart' : ''}`}
@@ -426,7 +647,7 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Age</div>
-                        <div className="value">5<span className="val-suffix">Groups</span></div>
+                        <div className="value">{hasLiveData ? ageBreakdown.length : 5}<span className="val-suffix">Groups</span></div>
                     </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-pink ${activeChart === 'gender' ? 'active-chart' : ''}`}
@@ -436,7 +657,7 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Gender</div>
-                        <div className="value">3<span className="val-suffix">Groups</span></div>
+                        <div className="value">{hasLiveData ? genderBreakdown.length : 3}<span className="val-suffix">Groups</span></div>
                     </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-purple-light ${activeChart === 'location' ? 'active-chart' : ''}`}
@@ -446,9 +667,12 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Location</div>
-                        <div className="value">6<span className="val-suffix">Regions</span></div>
+                        <div className="value">{hasLiveData ? locationBreakdown.length : 6}<span className="val-suffix">Regions</span></div>
                     </motion.button>
-                    <div className="kpi-card-reel bg-teal"><div className="label">Engagement rate</div><div className="value">1.62<span className="val-suffix">%</span></div></div>
+                    <div className="kpi-card-reel bg-teal">
+                        <div className="label">Engagement rate</div>
+                        <div className="value">{hasLiveData ? engagementRateLive.toFixed(2) : '1.62'}<span className="val-suffix">%</span></div>
+                    </div>
                 </div>
 
                 {/* --- DYNAMIC CHARTS SECTION --- */}
@@ -480,14 +704,14 @@ export default function BestPerformingReel() {
                                     </div>
                                     <div style={{ width: '100%', height: 300 }}>
                                         <ResponsiveContainer width="100%" height="100%">
-                                            <ComposedChart data={watchTimeData}>
+                                            <ComposedChart data={watchTimeChartData}>
                                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                                                 <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <Tooltip />
                                                 <Bar dataKey="value" radius={[8, 8, 0, 0]} animationBegin={0} animationDuration={800}>
-                                                    {watchTimeData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                                    {watchTimeChartData.map((entry, index) => (
+                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
                                                     ))}
                                                 </Bar>
                                             </ComposedChart>
@@ -509,14 +733,14 @@ export default function BestPerformingReel() {
                                     </div>
                                     <div style={{ width: '100%', height: 300 }}>
                                         <ResponsiveContainer width="100%" height="100%">
-                                            <ComposedChart data={ageData}>
+                                            <ComposedChart data={ageChartData}>
                                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                                                 <XAxis dataKey="age" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <Tooltip />
                                                 <Bar dataKey="value" radius={[8, 8, 0, 0]} animationBegin={0} animationDuration={800}>
-                                                    {ageData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color} />
+                                                    {ageChartData.map((entry, index) => (
+                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
                                                     ))}
                                                 </Bar>
                                             </ComposedChart>
@@ -540,7 +764,7 @@ export default function BestPerformingReel() {
                                         <ResponsiveContainer width="100%" height="100%">
                                             <PieChart>
                                                 <Pie
-                                                    data={genderData}
+                                                    data={genderChartData}
                                                     cx="50%"
                                                     cy="50%"
                                                     labelLine={false}
@@ -551,8 +775,8 @@ export default function BestPerformingReel() {
                                                     animationBegin={0}
                                                     animationDuration={800}
                                                 >
-                                                    {genderData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color} />
+                                                    {genderChartData.map((entry, index) => (
+                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
                                                     ))}
                                                 </Pie>
                                                 <Tooltip />
@@ -575,14 +799,14 @@ export default function BestPerformingReel() {
                                     </div>
                                     <div style={{ width: '100%', height: 300 }}>
                                         <ResponsiveContainer width="100%" height="100%">
-                                            <ComposedChart data={locationData} layout="vertical">
+                                            <ComposedChart data={locationChartData} layout="vertical">
                                                 <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#f1f5f9" />
                                                 <XAxis type="number" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <YAxis dataKey="location" type="category" width={120} tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                                 <Tooltip />
                                                 <Bar dataKey="value" radius={[0, 8, 8, 0]} animationBegin={0} animationDuration={800}>
-                                                    {locationData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color} />
+                                                    {locationChartData.map((entry, index) => (
+                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
                                                     ))}
                                                 </Bar>
                                             </ComposedChart>
@@ -648,33 +872,33 @@ export default function BestPerformingReel() {
                             ref={topContentScrollRef}
                             role="list"
                         >
-                            {currentList.map((item) => (
-                                <article key={item.id} className="top-content-card" role="listitem">
-                                    <div className="top-content-card-thumb" style={{ backgroundColor: item.imgColor }}>
+                            {contentListForTopContent.map((item, idx) => (
+                                <article key={item.id || idx} className="top-content-card" role="listitem">
+                                    <div className="top-content-card-thumb" style={{ backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
                                         <span className="top-content-card-play" aria-hidden>
                                             <i className="fas fa-play"></i>
                                         </span>
                                     </div>
                                     <h4 className="top-content-card-title" title={item.title}>
-                                        {item.title.length > 35 ? `${item.title.slice(0, 35)}...` : item.title}
+                                        {(item.title || '').length > 35 ? `${(item.title || '').slice(0, 35)}...` : (item.title || 'Reel')}
                                     </h4>
                                     <p className="top-content-card-date">{getPublishDate(item)}</p>
                                     <div className="top-content-card-metrics">
                                         <div className="top-content-metric">
                                             <i className="far fa-eye" aria-hidden></i>
-                                            <span>{formatCount(item.views)}</span>
+                                            <span>{formatCount(item.views || 0)}</span>
                                         </div>
                                         <div className="top-content-metric">
                                             <i className="far fa-comment" aria-hidden></i>
-                                            <span>{formatCount(item.comments)}</span>
+                                            <span>{formatCount(item.comments || 0)}</span>
                                         </div>
                                         <div className="top-content-metric">
                                             <i className="far fa-heart" aria-hidden></i>
-                                            <span>{formatCount(item.likes)}</span>
+                                            <span>{formatCount(item.likes || 0)}</span>
                                         </div>
                                         <div className="top-content-metric">
                                             <i className="fas fa-share-alt" aria-hidden></i>
-                                            <span>{formatCount(item.shares)}</span>
+                                            <span>{formatCount(item.shares != null ? item.shares : 0)}</span>
                                         </div>
                                     </div>
                                 </article>

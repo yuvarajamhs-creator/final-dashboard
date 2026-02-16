@@ -14,8 +14,10 @@ const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insig
 const { fetchInsightsFromMetaLive } = require("./insightsService");
 const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
-const { fetchInstagramInsights, fetchInstagramAudienceDemographics, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { fetchInstagramInsights, fetchInstagramAudienceDemographics, fetchReachByFollowType, fetchOnlineFollowers, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { processOnlineFollowersResponse } = require("./onlineFollowersProcessor");
 const { fetchInstagramMediaInsights } = require("./instagramMediaInsightsService");
+const { runAnalytics } = require("./instagramAnalyticsEngine");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
 const campaignsServiceMeta = require("../services/meta/campaignsService");
@@ -433,12 +435,31 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     }
     const { campaign_id, ad_id, from, to, days, ad_account_id, is_all_campaigns, is_all_ads } = req.query;
 
-    let adAccountIds = [ad_account_id || credentials.adAccountId].flat().filter(Boolean);
-    const raw = (ad_account_id || credentials.adAccountId || '').toString();
-    if (raw.includes(',')) {
-      adAccountIds = raw.split(',').map((s) => s.trim().replace(/^act_/, '')).filter(Boolean);
-    } else if (adAccountIds[0]) {
-      adAccountIds[0] = String(adAccountIds[0]).replace(/^act_/, '');
+    let adAccountIds;
+    const rawAdAccount = (ad_account_id || '').toString().trim();
+    if (rawAdAccount) {
+      if (rawAdAccount.includes(',')) {
+        adAccountIds = rawAdAccount.split(',').map((s) => s.trim().replace(/^act_/, '')).filter(Boolean);
+      } else {
+        adAccountIds = [String(rawAdAccount).replace(/^act_/, '')];
+      }
+    } else {
+      // "All Ad Accounts" - fetch insights from all ad accounts
+      let accounts = await adAccountsService.listFromDb();
+      if (!accounts || accounts.length === 0) {
+        try {
+          await adAccountsService.fetchAndCache();
+          accounts = await adAccountsService.listFromDb();
+        } catch (e) {
+          console.warn("Insights: fetchAndCache ad accounts failed:", e?.message);
+        }
+      }
+      adAccountIds = (accounts || [])
+        .map((a) => String(a.account_id || a.id || '').replace(/^act_/, ''))
+        .filter((id) => id && /^\d+$/.test(id));
+      if (adAccountIds.length === 0) {
+        adAccountIds = [credentials.adAccountId].filter(Boolean);
+      }
     }
     if (!adAccountIds.length) {
       return res.status(400).json({
@@ -518,39 +539,41 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     // #endregion
 
     if (useLive || data.length === 0) {
-      let liveAggregate = [];
-      for (const adAccountId of adAccountIds) {
-        try {
-          const liveData = await fetchInsightsFromMetaLive({
-            accessToken: credentials.accessToken,
-            adAccountId,
-            from: fromDate,
-            to: toDate,
-            isAllCampaigns,
-            isAllAds,
-            campaignIds,
-            adIds,
-          });
-          if (liveData && liveData.length > 0) {
-            await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
-            const tagged = liveData.map((row) => ({
-              ...row,
-              ad_account_id: String(adAccountId),
-              ad_account_name: row.ad_account_name || '',
-            }));
-            liveAggregate = liveAggregate.concat(tagged);
-          }
-        } catch (liveErr) {
-          if (useLive) {
-            console.error("Insights live fetch error:", liveErr?.message || liveErr);
-            return res.status(500).json({
-              error: "Failed to fetch insights from Meta",
-              details: liveErr?.message || String(liveErr),
+      try {
+        const liveResults = await Promise.all(
+          adAccountIds.map(async (adAccountId) => {
+            const liveData = await fetchInsightsFromMetaLive({
+              accessToken: credentials.accessToken,
+              adAccountId,
+              from: fromDate,
+              to: toDate,
+              isAllCampaigns,
+              isAllAds,
+              campaignIds,
+              adIds,
             });
-          }
+            if (liveData && liveData.length > 0) {
+              await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
+              return liveData.map((row) => ({
+                ...row,
+                ad_account_id: String(adAccountId),
+                ad_account_name: row.ad_account_name || '',
+              }));
+            }
+            return [];
+          })
+        );
+        const liveAggregate = liveResults.flat();
+        if (liveAggregate.length > 0) data = liveAggregate;
+      } catch (liveErr) {
+        if (useLive) {
+          console.error("Insights live fetch error:", liveErr?.message || liveErr);
+          return res.status(500).json({
+            error: "Failed to fetch insights from Meta",
+            details: liveErr?.message || String(liveErr),
+          });
         }
       }
-      if (liveAggregate.length > 0) data = liveAggregate;
       // #region agent log
       _log({ location: 'meta.jsx:GET/insights', message: 'live result', data: { source: 'live', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
       // #endregion
@@ -1436,7 +1459,7 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
     }
 
     const pageToken = await getPageAccessToken(pageId);
-    const { city_breakdown, country_breakdown } = await fetchInstagramAudienceDemographics(
+    const { city_breakdown, country_breakdown, age_breakdown, gender_breakdown } = await fetchInstagramAudienceDemographics(
       igAccountId,
       pageToken,
       actualTimeframe
@@ -1444,8 +1467,10 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
 
     return res.json({
       data: {
-        city_breakdown,
-        country_breakdown,
+        city_breakdown: city_breakdown || [],
+        country_breakdown: country_breakdown || [],
+        age_breakdown: age_breakdown || [],
+        gender_breakdown: gender_breakdown || [],
         source: "instagram_audience",
       },
     });
@@ -1461,6 +1486,147 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
     }
     return res.status(500).json({
       error: "Failed to fetch Instagram audience demographics",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Instagram reach by follow_type (Followers vs Non-Followers)
+// GET /api/meta/instagram/reach-by-follow-type?page_id=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+// Same format as Meta: metric=reach, period=day, metric_type=total_value, breakdown=follow_type
+// ---------------------------------------------------------------------
+router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { page_id, from, to } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID that has a linked Instagram Business account.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from && dateRegex.test(String(from).trim()) ? String(from).trim() : null;
+    let toDate = to && dateRegex.test(String(to).trim()) ? String(to).trim() : null;
+    if (!fromDate || !toDate) {
+      const end = new Date();
+      end.setDate(end.getDate() - 1);
+      const start = new Date(end);
+      start.setDate(start.getDate() - 6);
+      fromDate = start.toISOString().slice(0, 10);
+      toDate = end.toISOString().slice(0, 10);
+    }
+
+    const systemToken = getSystemToken();
+    const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
+    const pageRes = await axios.get(pageUrl, {
+      params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+      timeout: 10000,
+    });
+    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      return res.status(400).json({
+        error: "No Instagram account linked",
+        details: "This page does not have a linked Instagram Business account.",
+      });
+    }
+
+    const pageToken = await getPageAccessToken(pageId);
+    const result = await fetchReachByFollowType(igAccountId, fromDate, toDate, pageToken || systemToken);
+    const total = result.total_value || 0;
+    const followerVal = result.follower_value || 0;
+    const nonFollowerVal = result.non_follower_value || 0;
+    const followersPct = total > 0 ? Math.round((followerVal / total) * 100) : 0;
+    const nonFollowersPct = total > 0 ? Math.round((nonFollowerVal / total) * 100) : 0;
+
+    return res.json({
+      data: {
+        total_value: total,
+        follower_value: followerVal,
+        non_follower_value: nonFollowerVal,
+        followers_pct: followersPct,
+        non_followers_pct: nonFollowersPct,
+        name: "reach",
+        period: "day",
+        breakdown: "follow_type",
+      },
+    });
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.error("[Instagram reach-by-follow-type] Error:", code || err.message, msg);
+    if (err.response?.status === 400) {
+      return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 190) {
+      return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
+    }
+    if (code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: msg,
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram reach by follow type",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Instagram online_followers — best posting times (heatmap, peak hours, recommendation)
+// GET /api/meta/instagram/online-followers?page_id=...
+// Fetches metric=online_followers&period=lifetime, processes to best_times, peak_hours, heatmap_data, recommendation_text
+// ---------------------------------------------------------------------
+router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { page_id } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID that has a linked Instagram Business account.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const systemToken = getSystemToken();
+    const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
+    const pageRes = await axios.get(pageUrl, {
+      params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+      timeout: 10000,
+    });
+    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      return res.status(400).json({
+        error: "No Instagram account linked",
+        details: "This page does not have a linked Instagram Business account.",
+      });
+    }
+    const pageToken = await getPageAccessToken(pageId).catch(() => null);
+    const raw = await fetchOnlineFollowers(igAccountId, pageToken || systemToken);
+    const result = processOnlineFollowersResponse(raw);
+    return res.json(result);
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.error("[Instagram online-followers] Error:", code || err.message, msg);
+    if (err.response?.status === 400) {
+      return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 190) {
+      return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
+    }
+    if (code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: msg,
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram online followers",
       details: msg,
     });
   }
@@ -2320,6 +2486,84 @@ router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res)
     return res.status(500).json({
       error: "Failed to fetch Instagram media insights",
       details: err.response?.data || err.message,
+    });
+  }
+});
+
+// GET /api/meta/instagram/analytics?ig_user_id=...&media_id=...&page_id=... (page_id optional; used for token and to resolve ig_user_id if omitted)
+// Returns dashboard JSON: reach, estimated_views, hook_rate, hold_rate, engagement_score, likes, comments, saved, shares, best_posting_time
+router.get("/instagram/analytics", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { ig_user_id: igUserIdParam, media_id: mediaIdParam, page_id: pageIdParam } = req.query;
+    const mediaId = (mediaIdParam && String(mediaIdParam).trim()) || null;
+    if (!mediaId) {
+      return res.status(400).json({
+        error: "media_id is required",
+        message: "Provide media_id (Instagram media ID) as query parameter",
+      });
+    }
+
+    let igUserId = (igUserIdParam && String(igUserIdParam).trim()) || null;
+    let accessToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "").trim();
+
+    if (pageIdParam && String(pageIdParam).trim()) {
+      const pageId = String(pageIdParam).trim();
+      try {
+        const pageToken = await getPageAccessToken(pageId);
+        if (pageToken) accessToken = pageToken;
+        if (!igUserId) {
+          const systemToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "").trim();
+          const pageRes = await axios.get(
+            `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}`,
+            { params: { fields: "instagram_business_account", access_token: systemToken }, timeout: 10000 }
+          );
+          const igAccountId = pageRes.data?.instagram_business_account?.id;
+          if (igAccountId) igUserId = String(igAccountId);
+        }
+      } catch (pageErr) {
+        console.warn("[Instagram Analytics] page_id resolution failed:", pageErr?.message);
+      }
+    }
+
+    if (!igUserId) {
+      return res.status(400).json({
+        error: "ig_user_id is required when page_id is not provided or could not resolve Instagram account",
+        message: "Provide ig_user_id (Instagram Business Account ID) or a valid page_id with linked Instagram",
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(503).json({
+        error: "No access token available",
+        message: "Configure META_ACCESS_TOKEN or provide page_id to use page token",
+      });
+    }
+
+    const dashboard = await runAnalytics({
+      igUserId,
+      mediaId,
+      accessToken,
+    });
+    return res.json(dashboard);
+  } catch (err) {
+    console.error("[Instagram Analytics] Error:", err?.response?.data || err?.message);
+    if (err?.response?.data?.error?.code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: err.response.data.error.message,
+        isAuthError: true,
+      });
+    }
+    if (err?.response?.data?.error?.code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: err.response?.data?.error?.message,
+        isPermissionError: true,
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to run Instagram analytics",
+      details: err?.response?.data || err?.message,
     });
   }
 });

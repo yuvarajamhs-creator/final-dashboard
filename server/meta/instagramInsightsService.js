@@ -537,14 +537,15 @@ async function fetchInstagramInsights(opts = {}) {
 }
 
 /**
- * Fetch Instagram audience demographics (city and country) for Top towns/cities and Top countries.
- * Uses metric=engaged_audience_demographics with breakdown=country and breakdown=city.
+ * Fetch Instagram audience demographics (city, country, age, gender) for audience insights.
+ * Uses metric=engaged_audience_demographics with breakdown=country, city, age, gender.
  * Requires period=lifetime and timeframe (this_week, this_month, etc.); does not support since/until.
+ * Age and gender may be empty if the API or account does not support them.
  *
  * @param {string} igAccountId - Instagram Business Account ID
  * @param {string} accessToken - Page or Instagram access token (instagram_manage_insights)
  * @param {string} [timeframe] - this_week (7d), this_month (30d), or last_90_days
- * @returns {Promise<{ city_breakdown: Array<{city:string,value:number}>, country_breakdown: Array<{country:string,value:number}> }>}
+ * @returns {Promise<{ city_breakdown, country_breakdown, age_breakdown, gender_breakdown }>}
  */
 async function fetchInstagramAudienceDemographics(igAccountId, accessToken, timeframe = "this_month") {
   const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/insights`;
@@ -577,26 +578,23 @@ async function fetchInstagramAudienceDemographics(igAccountId, accessToken, time
     return out;
   };
 
+  const fetchBreakdown = (breakdown) =>
+    rateLimiter.schedule(() =>
+      axios.get(url, { params: { ...baseParams, breakdown }, timeout: 20000 })
+    ).then((res) => parseBreakdownResults(res.data, breakdown)).catch((err) => {
+      console.warn("[Instagram Audience Demographics] breakdown=" + breakdown + ":", err?.response?.data?.error?.message || err.message);
+      return [];
+    });
+
   try {
-    const [countryRes, cityRes] = await Promise.all([
-      rateLimiter.schedule(() =>
-        axios.get(url, {
-          params: { ...baseParams, breakdown: "country" },
-          timeout: 20000,
-        })
-      ),
-      rateLimiter.schedule(() =>
-        axios.get(url, {
-          params: { ...baseParams, breakdown: "city" },
-          timeout: 20000,
-        })
-      ),
+    const [country_breakdown, city_breakdown, age_breakdown, gender_breakdown] = await Promise.all([
+      fetchBreakdown("country"),
+      fetchBreakdown("city"),
+      fetchBreakdown("age"),
+      fetchBreakdown("gender"),
     ]);
 
-    const country_breakdown = parseBreakdownResults(countryRes.data, "country");
-    const city_breakdown = parseBreakdownResults(cityRes.data, "city");
-
-    return { city_breakdown, country_breakdown };
+    return { city_breakdown, country_breakdown, age_breakdown, gender_breakdown };
   } catch (err) {
     const code = err?.response?.data?.error?.code;
     const msg = err?.response?.data?.error?.message || err.message;
@@ -605,9 +603,97 @@ async function fetchInstagramAudienceDemographics(igAccountId, accessToken, time
   }
 }
 
+/**
+ * Fetch Instagram reach broken down by follow_type (Followers vs Non-Followers).
+ * Meta API: GET /v24.0/{IG_USER_ID}/insights?metric=reach&period=day&metric_type=total_value&breakdown=follow_type
+ * Returns same format as Meta Graph API: { data: [{ name, period, total_value, breakdowns }] }
+ *
+ * @param {string} igAccountId - Instagram Business Account ID
+ * @param {string} since - YYYY-MM-DD
+ * @param {string} until - YYYY-MM-DD
+ * @param {string} accessToken - Page or Instagram access token (instagram_manage_insights)
+ * @returns {Promise<{ total_value: number, follower_value: number, non_follower_value: number, raw?: object }>}
+ */
+async function fetchReachByFollowType(igAccountId, since, until, accessToken) {
+  const sinceUnix = dateToUnix(since);
+  const untilUnix = dateToUnix(until);
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/insights`;
+  const params = {
+    metric: "reach",
+    period: "day",
+    metric_type: "total_value",
+    breakdown: "follow_type",
+    access_token: accessToken,
+    ...(sinceUnix != null && { since: sinceUnix }),
+    ...(untilUnix != null && { until: untilUnix }),
+  };
+
+  try {
+    const { data } = await rateLimiter.schedule(() =>
+      axios.get(url, { params, timeout: 20000 })
+    );
+    const items = Array.isArray(data?.data) ? data.data : [];
+    const reachItems = items.filter((m) => m.name === "reach");
+    if (reachItems.length === 0) {
+      return { total_value: 0, follower_value: 0, non_follower_value: 0, raw: data };
+    }
+
+    let totalValue = 0;
+    let followerValue = 0;
+    let nonFollowerValue = 0;
+    for (const reachMetric of reachItems) {
+      totalValue += parseInt(reachMetric.total_value?.value, 10) || 0;
+      const breakdowns = reachMetric.total_value?.breakdowns || reachMetric.breakdowns || [];
+      for (const bd of breakdowns) {
+        const results = bd.results || [];
+        for (const r of results) {
+          const dims = r.dimension_values || [];
+          const val = parseInt(r.value, 10) || 0;
+          if (dims.includes("FOLLOWER")) followerValue += val;
+          if (dims.includes("NON_FOLLOWER")) nonFollowerValue += val;
+        }
+      }
+    }
+
+    return {
+      total_value: totalValue,
+      follower_value: followerValue,
+      non_follower_value: nonFollowerValue,
+      raw: reachItems.length === 1 ? reachItems[0] : { aggregated_from: reachItems.length, items: reachItems },
+    };
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.warn("[Instagram Reach by Follow Type] Error:", code, msg);
+    throw err;
+  }
+}
+
+/**
+ * Fetch online_followers metric from Instagram Insights API.
+ * GET /{IG_USER_ID}/insights?metric=online_followers&period=lifetime
+ * @param {string} igAccountId - Instagram Business Account ID
+ * @param {string} accessToken - Page or Instagram access token (instagram_manage_insights)
+ * @returns {Promise<object>} Raw API response { data: [...] }
+ */
+async function fetchOnlineFollowers(igAccountId, accessToken) {
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/insights`;
+  const params = { metric: "online_followers", period: "lifetime", access_token: accessToken };
+  try {
+    const { data } = await rateLimiter.schedule(() => axios.get(url, { params, timeout: 20000 }));
+    return data || { data: [] };
+  } catch (err) {
+    const msg = err?.response?.data?.error?.message || err.message;
+    console.warn("[Instagram online_followers] Error:", msg);
+    throw err;
+  }
+}
+
 module.exports = {
   fetchInstagramInsights,
   fetchInstagramAudienceDemographics,
+  fetchReachByFollowType,
+  fetchOnlineFollowers,
   resolveIgAccountsFromPages,
   resolveIgAccountsViaInstagramAccountsEdge,
   normalizeAccountResponse,

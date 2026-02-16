@@ -103,6 +103,39 @@ const fetchInstagramAudienceDemographics = async (pageId, timeframe) => {
     return json.data || null;
 };
 
+// Instagram reach by follow_type (Meta: metric=reach, period=day, metric_type=total_value, breakdown=follow_type)
+const fetchInstagramReachByFollowType = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/reach-by-follow-type?page_id=${encodeURIComponent(pageId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
+// Instagram online_followers — best posting times (heatmap, peak hours, recommendation)
+const fetchInstagramOnlineFollowers = async (pageId) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/online-followers?page_id=${encodeURIComponent(pageId)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    return await res.json();
+};
+
 const getContentDefaultDates = () => {
     const today = new Date();
     const endDate = new Date(today);
@@ -158,6 +191,12 @@ export default function Audience() {
     const [igAudienceData, setIgAudienceData] = useState(null);
     const [igAudienceLoading, setIgAudienceLoading] = useState(false);
     const [igAudienceError, setIgAudienceError] = useState(null);
+    const [reachByFollowTypeData, setReachByFollowTypeData] = useState(null);
+    const [reachByFollowTypeLoading, setReachByFollowTypeLoading] = useState(false);
+    const [reachByFollowTypeError, setReachByFollowTypeError] = useState(null);
+    const [onlineFollowersInsight, setOnlineFollowersInsight] = useState(null);
+    const [onlineFollowersLoading, setOnlineFollowersLoading] = useState(false);
+    const [onlineFollowersError, setOnlineFollowersError] = useState(null);
     const [heatmapTooltip, setHeatmapTooltip] = useState(null); // { dayIndex, hour, x, y }
 
     useEffect(() => {
@@ -237,6 +276,48 @@ export default function Audience() {
         return () => { cancelled = true; };
     }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
 
+    // Fetch Instagram reach by follow_type (Followers vs Non-Followers) for the right-side card
+    useEffect(() => {
+        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+            setReachByFollowTypeData(null);
+            setReachByFollowTypeError(null);
+            return;
+        }
+        let cancelled = false;
+        setReachByFollowTypeLoading(true);
+        setReachByFollowTypeError(null);
+        fetchInstagramReachByFollowType(audiencePage, contentFilters.startDate, contentFilters.endDate)
+            .then((data) => { if (!cancelled) setReachByFollowTypeData(data); })
+            .catch((err) => {
+                if (!cancelled) setReachByFollowTypeError(err?.message || 'Failed to load reach by follow type');
+            })
+            .finally(() => {
+                if (!cancelled) setReachByFollowTypeLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Instagram online_followers (best posting times, heatmap) when PAGE is selected
+    useEffect(() => {
+        if (!audiencePage) {
+            setOnlineFollowersInsight(null);
+            setOnlineFollowersError(null);
+            return;
+        }
+        let cancelled = false;
+        setOnlineFollowersLoading(true);
+        setOnlineFollowersError(null);
+        fetchInstagramOnlineFollowers(audiencePage)
+            .then((data) => { if (!cancelled) setOnlineFollowersInsight(data); })
+            .catch((err) => {
+                if (!cancelled) setOnlineFollowersError(err?.message || 'Failed to load best posting times');
+            })
+            .finally(() => {
+                if (!cancelled) setOnlineFollowersLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [audiencePage]);
+
     // Fetch demographic insights (age/gender, country) when time range is set
     useEffect(() => {
         if (!contentFilters.startDate || !contentFilters.endDate) {
@@ -302,8 +383,22 @@ export default function Audience() {
         { name: "Kuwait", val: 0.4, flag: "🇰🇼" },
     ];
 
-    // Followers and Non-Followers (for right-side chart; mock data — can hook to API later)
-    const followersNonFollowersData = { followers: 23, nonFollowers: 77 };
+    // Followers and Non-Followers (from Meta: reach + breakdown=follow_type; show numbers, use % for bar width)
+    const followersNonFollowersData = (() => {
+        const total = reachByFollowTypeData?.total_value ?? 0;
+        const followerVal = reachByFollowTypeData?.follower_value ?? 0;
+        const nonFollowerVal = reachByFollowTypeData?.non_follower_value ?? 0;
+        const followersPct = total > 0 ? (followerVal / total) * 100 : 0;
+        const nonFollowersPct = total > 0 ? (nonFollowerVal / total) * 100 : 0;
+        return {
+            follower_value: followerVal,
+            non_follower_value: nonFollowerVal,
+            total_value: total,
+            followersPct,
+            nonFollowersPct,
+        };
+    })();
+    const formatReachNum = (n) => (typeof n === 'number' ? n.toLocaleString('en-IN') : '0');
 
     const platformData = [
         { name: 'Facebook', reach: 480, results: 0 },
@@ -316,9 +411,25 @@ export default function Audience() {
         { name: 'WhatsApp Bus', reach: 0, results: 0 },
     ];
 
-    // When your viewers are on Instagram — mock 7×24 grid (Mon–Sun × 0–23). Higher in evening and weekends.
+    // When your viewers are on Instagram — use online_followers API data or fallback mock 7×24 grid
     const HEATMAP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const heatmapGrid = React.useMemo(() => {
+        const heatmap = onlineFollowersInsight?.heatmap_data || [];
+        const maxVal = onlineFollowersInsight?.max_followers || 1;
+        if (heatmap.length >= 24) {
+            const byHour = {};
+            heatmap.forEach(({ hour, value }) => { byHour[hour] = value; });
+            const grid = [];
+            for (let d = 0; d < 7; d++) {
+                const row = [];
+                for (let h = 0; h < 24; h++) {
+                    const raw = byHour[h] ?? 0;
+                    row.push(maxVal > 0 ? Math.min(1, raw / maxVal) : 0);
+                }
+                grid.push(row);
+            }
+            return grid;
+        }
         const grid = [];
         for (let d = 0; d < 7; d++) {
             const row = [];
@@ -332,9 +443,22 @@ export default function Audience() {
             grid.push(row);
         }
         return grid;
-    }, []);
+    }, [onlineFollowersInsight]);
 
-    const getHeatmapTooltipLabel = (value) => (value >= 0.6 ? 'Many' : value >= 0.35 ? 'Some' : 'Few');
+    const heatmapHourMeta = React.useMemo(() => {
+        const heatmap = onlineFollowersInsight?.heatmap_data || [];
+        const out = {};
+        heatmap.forEach(({ hour, value, activity_label }) => {
+            out[hour] = { value, activity_label };
+        });
+        return out;
+    }, [onlineFollowersInsight]);
+
+    const getHeatmapTooltipLabel = (value, hour) => {
+        const meta = heatmapHourMeta[hour];
+        if (meta?.activity_label) return meta.activity_label;
+        return value >= 0.6 ? 'Many' : value >= 0.35 ? 'Some' : 'Few';
+    };
     const getLocalTimezoneLabel = () => {
         const offset = -new Date().getTimezoneOffset();
         const sign = offset >= 0 ? '+' : '-';
@@ -663,6 +787,10 @@ export default function Audience() {
                         <div className="filter-card-body">
                             <label className="filter-label d-block audience-followers-label">
                                 <span className="filter-emoji">👥</span> Followers and Non-Followers
+                                {reachByFollowTypeLoading && <span className="ms-2 text-muted small">Loading...</span>}
+                                {reachByFollowTypeError && !reachByFollowTypeLoading && (
+                                    <span className="ms-2 text-danger small" title={reachByFollowTypeError}>Error</span>
+                                )}
                             </label>
                             <div className="audience-followers-chart">
                                 <div className="audience-followers-row">
@@ -671,11 +799,11 @@ export default function Audience() {
                                         <motion.div
                                             className="audience-followers-bar"
                                             initial={{ width: 0 }}
-                                            animate={{ width: `${followersNonFollowersData.followers}%` }}
+                                            animate={{ width: `${followersNonFollowersData.followersPct}%` }}
                                             transition={{ duration: 0.6, ease: 'easeOut' }}
                                         />
                                     </div>
-                                    <span className="audience-followers-pct">{followersNonFollowersData.followers}%</span>
+                                    <span className="audience-followers-pct">{formatReachNum(followersNonFollowersData.follower_value)}</span>
                                 </div>
                                 <div className="audience-followers-row">
                                     <span className="audience-followers-label">From non-followers</span>
@@ -683,11 +811,11 @@ export default function Audience() {
                                         <motion.div
                                             className="audience-followers-bar"
                                             initial={{ width: 0 }}
-                                            animate={{ width: `${followersNonFollowersData.nonFollowers}%` }}
+                                            animate={{ width: `${followersNonFollowersData.nonFollowersPct}%` }}
                                             transition={{ duration: 0.6, delay: 0.1, ease: 'easeOut' }}
                                         />
                                     </div>
-                                    <span className="audience-followers-pct">{followersNonFollowersData.nonFollowers}%</span>
+                                    <span className="audience-followers-pct">{formatReachNum(followersNonFollowersData.non_follower_value)}</span>
                                 </div>
                             </div>
                         </div>
@@ -966,7 +1094,7 @@ export default function Audience() {
                                 </div>
                             </motion.div>
 
-                            {/* 3. When your viewers are on Instagram — heatmap (mock data) */}
+                            {/* 3. When your viewers are on Instagram — best times + heatmap from online_followers API */}
                             <motion.div
                                 variants={itemVariants}
                                 className="mt-5 audience-heatmap-section"
@@ -981,6 +1109,8 @@ export default function Audience() {
                                     transition={{ duration: 0.35, delay: 0.05 }}
                                 >
                                     When your viewers are on Instagram
+                                    {onlineFollowersLoading && <span className="ms-2 text-muted small fw-normal">Loading...</span>}
+                                    {onlineFollowersError && !onlineFollowersLoading && <span className="ms-2 text-danger small fw-normal" title={onlineFollowersError}>Error</span>}
                                 </motion.h6>
                                 <motion.small
                                     className="text-muted d-block mb-3 audience-heatmap-subtitle"
@@ -990,6 +1120,24 @@ export default function Audience() {
                                 >
                                     Your local time ({getLocalTimezoneLabel()}) · {getContentDateRangeDisplay()}
                                 </motion.small>
+                                {onlineFollowersInsight?.is_sample_data && (
+                                    <div className="alert alert-info py-2 px-3 mb-3 small">
+                                        Sample pattern — connect Instagram or check permissions for real data.
+                                    </div>
+                                )}
+                                {onlineFollowersInsight?.best_times?.length > 0 && (
+                                    <motion.div className="mb-3 p-3 rounded-3 border bg-light" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}>
+                                        <div className="small fw-bold text-dark mb-2">Best posting times (top 3)</div>
+                                        <div className="d-flex flex-wrap gap-2 mb-2">
+                                            {onlineFollowersInsight.best_times.map((t, i) => (
+                                                <span key={t.hour} className="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 px-2 py-1">
+                                                    {t.label} — {(t.followers || 0).toLocaleString('en-IN')} online · {t.activity_label}
+                                                </span>
+                                            ))}
+                                        </div>
+                                        <div className="small text-muted">{onlineFollowersInsight.recommendation_text}</div>
+                                    </motion.div>
+                                )}
                                 <motion.div
                                     className="audience-heatmap-wrapper"
                                     initial={{ opacity: 0 }}
@@ -1066,7 +1214,7 @@ export default function Audience() {
                                     >
                                         <strong>{heatmapTooltip.dayLabel} {String(heatmapTooltip.hour).padStart(2, '0')}:00</strong>
                                         <br />
-                                        {getHeatmapTooltipLabel(heatmapTooltip.value)} of your viewers are on Instagram
+                                        {getHeatmapTooltipLabel(heatmapTooltip.value, heatmapTooltip.hour)} of your viewers are on Instagram
                                     </motion.div>
                                 )}
                             </motion.div>

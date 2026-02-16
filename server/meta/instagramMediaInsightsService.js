@@ -65,16 +65,16 @@ async function graphApiGet(url, params) {
 
 /**
  * Step 1 — Fetch media list for an IG Business Account.
- * GET /{ig_user_id}/media?fields=id,media_type,product_type,video_duration,permalink
+ * GET /{ig_user_id}/media?fields=id,media_type,product_type,video_duration,permalink,timestamp,caption
  * Handles pagination via next cursor.
  *
  * @param {string} igAccountId - IG Business Account ID
  * @param {string} accessToken - Page or system access token
- * @returns {Promise<Array<{ id, media_type, product_type, video_duration, permalink }>>}
+ * @returns {Promise<Array<{ id, media_type, product_type, video_duration, permalink, timestamp, caption }>>}
  */
 async function fetchMediaList(igAccountId, accessToken) {
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/media`;
-  const fields = "id,media_type,product_type,video_duration,permalink";
+  const fields = "id,media_type,product_type,video_duration,permalink,timestamp,caption";
   const limit = 100;
   const all = [];
 
@@ -93,6 +93,8 @@ async function fetchMediaList(igAccountId, accessToken) {
         product_type: item.product_type || null,
         video_duration: item.video_duration != null ? Number(item.video_duration) : null,
         permalink: item.permalink || null,
+        timestamp: item.timestamp || null,
+        caption: (item.caption && typeof item.caption === "string") ? item.caption : null,
       });
     }
 
@@ -162,12 +164,12 @@ function extractMetricValue(metric) {
 }
 
 /**
- * Step 3 — Conditional insights fetch per media. Reels: plays, video_views, video_avg_time_watched.
+ * Step 3 — Conditional insights fetch per media. Reels: plays, video_views, video_avg_time_watched, likes, comments.
  * Non-Reels: reach, impressions, likes, comments, saved. Never mix; error-safe.
  *
- * @param {object} media - { id, media_type, product_type, video_duration, permalink }
+ * @param {object} media - { id, media_type, product_type, video_duration, permalink, timestamp, caption }
  * @param {string} accessToken
- * @returns {Promise<{ media_id, media_type, product_type, hook_rate, hold_rate, availability }>}
+ * @returns {Promise<{ media_id, permalink, timestamp, caption, media_type, product_type, plays, video_views, video_avg_time_watched, likes, comments, hook_rate, hold_rate, availability }>}
  */
 async function fetchMediaInsights(media, accessToken) {
   const mediaId = media.id;
@@ -176,11 +178,11 @@ async function fetchMediaInsights(media, accessToken) {
 
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}/insights`;
 
-  // Reels: request retention metrics only (avoids #100 for feed videos)
+  // Reels: request retention + engagement metrics (avoids #100 for feed videos)
   if (reel) {
     const data = await rateLimiter.schedule(() =>
       graphApiGet(baseUrl, {
-        metric: "plays,video_views,video_avg_time_watched",
+        metric: "plays,video_views,video_avg_time_watched,likes,comments",
         access_token: accessToken,
       })
     );
@@ -188,8 +190,16 @@ async function fetchMediaInsights(media, accessToken) {
     if (!data || !Array.isArray(data.data)) {
       return {
         media_id: mediaId,
+        permalink: media.permalink || null,
+        timestamp: media.timestamp || null,
+        caption: media.caption || null,
         media_type: media.media_type || "VIDEO",
         product_type: productType,
+        plays: 0,
+        video_views: 0,
+        video_avg_time_watched: 0,
+        likes: 0,
+        comments: 0,
         hook_rate: null,
         hold_rate: null,
         availability: "not_supported",
@@ -205,14 +215,24 @@ async function fetchMediaInsights(media, accessToken) {
     const video_views = metrics.video_views ?? 0;
     const video_avg_time_watched = metrics.video_avg_time_watched ?? 0;
     const video_duration = media.video_duration ?? 0;
+    const likes = metrics.likes ?? 0;
+    const comments = metrics.comments ?? 0;
 
     const hook_rate = calcHookRate(plays, video_views);
     const hold_rate = calcHoldRate(video_avg_time_watched, video_duration);
 
     return {
       media_id: mediaId,
+      permalink: media.permalink || null,
+      timestamp: media.timestamp || null,
+      caption: media.caption || null,
       media_type: media.media_type || "VIDEO",
       product_type: productType,
+      plays,
+      video_views,
+      video_avg_time_watched,
+      likes,
+      comments,
       hook_rate,
       hold_rate,
       availability: "available",
@@ -229,8 +249,16 @@ async function fetchMediaInsights(media, accessToken) {
 
   return {
     media_id: mediaId,
+    permalink: media.permalink || null,
+    timestamp: media.timestamp || null,
+    caption: media.caption || null,
     media_type: media.media_type || "VIDEO",
     product_type: productType,
+    plays: 0,
+    video_views: 0,
+    video_avg_time_watched: 0,
+    likes: 0,
+    comments: 0,
     hook_rate: null,
     hold_rate: null,
     availability: "not_supported",

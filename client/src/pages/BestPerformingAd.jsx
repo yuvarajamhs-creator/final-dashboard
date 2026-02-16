@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './BestPerformingAd.css';
 import DateRangeFilter from '../components/DateRangeFilter';
+import { PROJECT_ORDER, PROJECT_AD_ACCOUNT_NAMES, buildAdAccountsByProject } from '../constants/projectAdAccounts';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
     Bar, Line, ComposedChart, Legend
@@ -25,6 +26,9 @@ const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
 
 // USD to INR conversion rate (update as needed)
 const USD_TO_INR = 83;
+
+// Revenue per conversion (₹) used for ROAS: (Conversion Count * REVENUE_PER_CONVERSION) / Amount spend
+const REVENUE_PER_CONVERSION = 3999;
 
 // Helper to transform Meta "actions" array -> object map (same as Dashboard)
 const transformActions = (actions = []) => {
@@ -121,7 +125,8 @@ const fetchAdAccounts = async () => {
 };
 
 // Fetch insights from Meta API (same params as Ads Analytics Dashboard for same data)
-const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', endDate = '', adAccountId = null }) => {
+// live: true = fetch from Meta API (slower, freshest); false = use DB cache (faster)
+const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', endDate = '', adAccountId = null, live = false }) => {
     try {
         const token = getAuthToken();
         const headers = { "Content-Type": "application/json" };
@@ -144,8 +149,9 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
         }
         // Same as Dashboard when "All Campaigns" / "All Ads": one aggregated call, same card values
         url += '&is_all_campaigns=1&is_all_ads=1';
-        // Fetch live data from Meta so conversions/actions match Ads Analytics Dashboard
-        url += '&live=1';
+        if (live) {
+            url += '&live=1';
+        }
 
         const res = await fetch(url, { headers });
 
@@ -181,7 +187,7 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
             const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
             const cpl = leadCount > 0 ? spend / leadCount : 0;
             const cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
-            const conversionRate = clicks > 0 ? (conversions / clicks) * 100 : 0;
+            const conversionRate = leadCount > 0 ? (conversions / leadCount) * 100 : 0;
 
             return {
                 campaign_id: d.campaign_id,
@@ -213,14 +219,13 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
 
 export default function BestPerformingAd() {
 
-    // Helper for table heatmap styles (simple version)
-    // Note: val should be in INR for spend and cpl
+    // Helper for table heatmap styles (values in INR)
     const getBgClass = (val, type) => {
-        if (type === 'spend' && val > 200 * USD_TO_INR) return 'cell-heatmap-mid';
+        if (type === 'spend' && val > 20000) return 'cell-heatmap-mid';
         if (type === 'leadGenerated' && val > 300) return 'cell-heatmap-high';
         if (type === 'conversionCount' && val > 800) return 'cell-heatmap-high';
         if (type === 'conversionRate' && val > 3.0) return 'cell-heatmap-high';
-        if (type === 'cpl' && val > 0.65 * USD_TO_INR) return 'cell-heatmap-low';
+        if (type === 'cpl' && val > 5000) return 'cell-heatmap-low';
         return '';
     };
 
@@ -229,12 +234,15 @@ export default function BestPerformingAd() {
     const [showDateRangeFilter, setShowDateRangeFilter] = useState(false);
     const [dateRangeFilterValue, setDateRangeFilterValue] = useState(null);
     const [selectedProject, setSelectedProject] = useState('');
+    const [projectsDropdownOpen, setProjectsDropdownOpen] = useState(false);
+    const [hoveredProject, setHoveredProject] = useState(null);
+    const projectsDropdownRef = useRef(null);
     const [adAccounts, setAdAccounts] = useState([]);
     const [adAccountsLoading, setAdAccountsLoading] = useState(true);
-    const [selectedAdAccount, setSelectedAdAccount] = useState(null);
     const [insightsData, setInsightsData] = useState([]);
     const [dataLoading, setDataLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [manualConversionByCampaign, setManualConversionByCampaign] = useState({});
 
     // Load ad accounts on mount
     useEffect(() => {
@@ -250,27 +258,82 @@ export default function BestPerformingAd() {
         return () => { cancelled = true; };
     }, []);
 
-    // Fetch insights data when date range or ad account changes
+    // Close projects dropdown when clicking outside
     useEffect(() => {
+        const handleClickOutside = (e) => {
+            if (projectsDropdownRef.current && !projectsDropdownRef.current.contains(e.target)) {
+                setProjectsDropdownOpen(false);
+            }
+        };
+        if (projectsDropdownOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [projectsDropdownOpen]);
+
+    // Comma-separated ad account IDs for the selected project (null = All Projects = no filter)
+    const selectedProjectAdAccountIds = useMemo(() => {
+        if (!selectedProject) return null;
+        const byProject = buildAdAccountsByProject(adAccounts);
+        const accounts = byProject[selectedProject] || [];
+        const ids = accounts.map((a) => a.value).filter(Boolean);
+        return ids.length > 0 ? ids.join(',') : null;
+    }, [selectedProject, adAccounts]);
+
+    // Fetch insights: when "All Projects" is selected, always use Meta live data; otherwise DB first then live refresh. Project selection filters by that project's ad accounts.
+    useEffect(() => {
+        let cancelled = false;
+        setDataLoading(true);
+        setError(null);
+        const isAllProjects = selectedProject === '';
+
         const loadInsights = async () => {
-            setDataLoading(true);
-            setError(null);
             try {
-                const data = await fetchInsightsData({
+                if (isAllProjects) {
+                    // All Projects: fetch only live Meta data so KPIs/charts always show fresh data (no ad_account_id filter)
+                    const liveData = await fetchInsightsData({
+                        startDate: filters.startDate,
+                        endDate: filters.endDate,
+                        adAccountId: selectedProjectAdAccountIds || undefined,
+                        live: true
+                    });
+                    if (cancelled) return;
+                    setInsightsData(liveData || []);
+                    setDataLoading(false);
+                    return;
+                }
+                // Specific project: filter by that project's ad account IDs; Phase 1 from DB cache, then Phase 2 live refresh
+                const cachedData = await fetchInsightsData({
                     startDate: filters.startDate,
                     endDate: filters.endDate,
-                    adAccountId: selectedAdAccount || undefined
+                    adAccountId: selectedProjectAdAccountIds || undefined,
+                    live: false
                 });
-                setInsightsData(data);
-            } catch (e) {
-                console.error("Failed to load insights:", e);
-                setError(e.message || "Failed to load insights data.");
-            } finally {
+                if (cancelled) return;
+                if (cachedData && cachedData.length > 0) {
+                    setInsightsData(cachedData);
+                    setDataLoading(false);
+                }
+                const liveData = await fetchInsightsData({
+                    startDate: filters.startDate,
+                    endDate: filters.endDate,
+                    adAccountId: selectedProjectAdAccountIds || undefined,
+                    live: true
+                });
+                if (cancelled) return;
+                setInsightsData(liveData || []);
                 setDataLoading(false);
+            } catch (e) {
+                if (!cancelled) {
+                    console.error("Failed to load insights:", e);
+                    setError(e.message || "Failed to load insights data.");
+                    setDataLoading(false);
+                }
             }
         };
         loadInsights();
-    }, [filters.startDate, filters.endDate, selectedAdAccount]);
+        return () => { cancelled = true; };
+    }, [filters.startDate, filters.endDate, selectedProject, selectedProjectAdAccountIds]);
 
     // Calculate totals from insights data
     const totals = useMemo(() => {
@@ -293,12 +356,12 @@ export default function BestPerformingAd() {
         // Calculate derived metrics
         t.cpm = t.impressions > 0 ? (t.spend / t.impressions) * 1000 : 0;
         t.cpl = t.leads > 0 ? t.spend / t.leads : 0;
-        t.conversionRate = t.clicks > 0 ? (t.conversions / t.clicks) * 100 : 0;
+        t.conversionRate = t.leads > 0 ? (t.conversions / t.leads) * 100 : 0;
 
-        // Convert to INR
-        t.spendINR = t.spend * USD_TO_INR;
-        t.cpmINR = t.cpm * USD_TO_INR;
-        t.cplINR = t.cpl * USD_TO_INR;
+        // Meta account is INR; no conversion
+        t.spendINR = t.spend;
+        t.cpmINR = t.cpm;
+        t.cplINR = t.cpl;
 
         return t;
     }, [insightsData]);
@@ -310,16 +373,17 @@ export default function BestPerformingAd() {
         { value: totals.leads, name: 'Leads', fill: '#06b6d4' }
     ], [totals]);
 
-    // Aggregate data by date for charts
-    const aggregateByDate = useMemo(() => {
-        const dateMap = {};
+    // Aggregate data by ad for charts (top 20 by spend; X-axis = Ad Name)
+    const TOP_ADS_LIMIT = 20;
+    const aggregateByAd = useMemo(() => {
+        const adMap = {};
         insightsData.forEach((r) => {
-            const dateKey = r.date || '';
-            if (!dateKey) return;
-            
-            if (!dateMap[dateKey]) {
-                dateMap[dateKey] = {
-                    date: dateKey,
+            const key = String(r.ad_id || r.ad_name || 'unknown').trim() || 'unknown';
+            const adName = (r.ad_name && String(r.ad_name).trim()) ? r.ad_name.trim() : (r.ad_id ? `Ad ${r.ad_id}` : 'Unknown');
+            if (!adMap[key]) {
+                adMap[key] = {
+                    ad_id: r.ad_id,
+                    adName,
                     spend: 0,
                     impressions: 0,
                     clicks: 0,
@@ -327,71 +391,69 @@ export default function BestPerformingAd() {
                     conversions: 0
                 };
             }
-            
-            dateMap[dateKey].spend += r.spend || 0;
-            dateMap[dateKey].impressions += r.impressions || 0;
-            dateMap[dateKey].clicks += r.clicks || 0;
-            dateMap[dateKey].leads += r.leads || 0;
-            dateMap[dateKey].conversions += r.conversions || 0;
+            adMap[key].spend += r.spend || 0;
+            adMap[key].impressions += r.impressions || 0;
+            adMap[key].clicks += r.clicks || 0;
+            adMap[key].leads += r.leads || 0;
+            adMap[key].conversions += r.conversions || 0;
         });
-        
-        return Object.values(dateMap).sort((a, b) => new Date(a.date) - new Date(b.date));
+        return Object.values(adMap)
+            .sort((a, b) => (b.spend || 0) - (a.spend || 0))
+            .slice(0, TOP_ADS_LIMIT)
+            .map((d) => {
+                const adNameShort = d.adName.length > 18 ? d.adName.slice(0, 15) + '…' : d.adName;
+                const cpm = d.impressions > 0 ? (d.spend / d.impressions) * 1000 : 0;
+                const cpl = d.leads > 0 ? d.spend / d.leads : 0;
+                const conversionRate = d.leads > 0 ? (d.conversions / d.leads) * 100 : 0;
+                return {
+                    ...d,
+                    adNameShort,
+                    cpm,
+                    cpl,
+                    conversionRate
+                };
+            });
     }, [insightsData]);
 
-    // Dynamics Data (Amount Spend vs Lead Generated from Ad) - use raw spend to match Ad Spend card
+    // Dynamics Data (Amount Spend vs Lead Generated from Ad) - by Ad Name
     const dynamicsData = useMemo(() => {
-        return aggregateByDate.map((d) => {
-            const date = new Date(d.date);
-            const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            return {
-                date: formattedDate,
-                spend: d.spend,
-                leadGenerated: d.leads
-            };
-        });
-    }, [aggregateByDate]);
+        return aggregateByAd.map((d) => ({
+            adName: d.adName,
+            adNameShort: d.adNameShort,
+            spend: d.spend,
+            leadGenerated: d.leads
+        }));
+    }, [aggregateByAd]);
 
-    // Impressions & CPM Data - use raw CPM to match CPM card
+    // Impressions & CPM Data - by Ad Name
     const impressionsData = useMemo(() => {
-        return aggregateByDate.map((d) => {
-            const date = new Date(d.date);
-            const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            const cpm = d.impressions > 0 ? (d.spend / d.impressions) * 1000 : 0;
-            return {
-                day: formattedDate,
-                imp: d.impressions,
-                cpm: cpm
-            };
-        });
-    }, [aggregateByDate]);
+        return aggregateByAd.map((d) => ({
+            adName: d.adName,
+            adNameShort: d.adNameShort,
+            imp: d.impressions,
+            cpm: d.cpm
+        }));
+    }, [aggregateByAd]);
 
-    // Link clicks & Conversion Rate Data
+    // Link clicks & Conversion Rate Data - by Ad Name
     const clicksData = useMemo(() => {
-        return aggregateByDate.map((d) => {
-            const date = new Date(d.date);
-            const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            const conversionRate = d.clicks > 0 ? (d.conversions / d.clicks) * 100 : 0;
-            return {
-                day: formattedDate,
-                clicks: d.clicks,
-                conversionRate: conversionRate
-            };
-        });
-    }, [aggregateByDate]);
+        return aggregateByAd.map((d) => ({
+            adName: d.adName,
+            adNameShort: d.adNameShort,
+            clicks: d.clicks,
+            conversionRate: d.conversionRate
+        }));
+    }, [aggregateByAd]);
 
-    // Leads & CPL Data - use raw CPL to match CPL card
+    // Leads & CPL Data - by Ad Name
     const leadsData = useMemo(() => {
-        return aggregateByDate.map((d) => {
-            const date = new Date(d.date);
-            const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            const cpl = d.leads > 0 ? d.spend / d.leads : 0;
-            return {
-                day: formattedDate,
-                leads: d.leads,
-                cpl: cpl
-            };
-        });
-    }, [aggregateByDate]);
+        return aggregateByAd.map((d) => ({
+            adName: d.adName,
+            adNameShort: d.adNameShort,
+            leads: d.leads,
+            cpl: d.cpl
+        }));
+    }, [aggregateByAd]);
 
     // Resolve ad account display name from id or API-provided name
     const getAdAccountDisplay = (adAccountId, adAccountNameFromApi) => {
@@ -401,20 +463,20 @@ export default function BestPerformingAd() {
         return acc ? (acc.account_name || acc.name || adAccountId) : adAccountId;
     };
 
-    // Aggregate data by campaign and ad for table (live Meta API data; ad account per row from API)
+    // Aggregate data by campaign for table (campaign-level; live Meta API data)
     const campaignData = useMemo(() => {
         const campaignMap = {};
-        
+
         insightsData.forEach((r) => {
-            const key = `${r.campaign_id || r.campaign}_${r.ad_id || r.ad_name || 'no_ad'}`;
-            
+            const key = String(r.campaign_id || r.campaign || 'unknown');
+
             if (!campaignMap[key]) {
+                const firstAdName = (r.ad_name && String(r.ad_name).trim()) ? r.ad_name.trim() : '—';
                 campaignMap[key] = {
                     id: key,
                     campaign_id: r.campaign_id,
-                    ad_id: r.ad_id,
                     name: r.campaign || 'Unknown Campaign',
-                    ad_name: r.ad_name || 'Unnamed Ad',
+                    ad_name: firstAdName,
                     ad_account_id: r.ad_account_id || null,
                     ad_account_name: r.ad_account_name || '',
                     spend: 0,
@@ -425,7 +487,7 @@ export default function BestPerformingAd() {
                     conversions: 0
                 };
             }
-            
+
             campaignMap[key].spend += r.spend || 0;
             campaignMap[key].revenue += r.revenue || 0;
             campaignMap[key].impressions += r.impressions || 0;
@@ -433,27 +495,44 @@ export default function BestPerformingAd() {
             campaignMap[key].leads += r.leads || 0;
             campaignMap[key].conversions += r.conversions || 0;
         });
-        
-        return Object.values(campaignMap).map((item) => {
-            const ctr = item.impressions > 0 ? (item.clicks / item.impressions) * 100 : 0;
-            const cpm = item.impressions > 0 ? (item.spend / item.impressions) * 1000 : 0;
-            const cpl = item.leads > 0 ? item.spend / item.leads : 0;
-            const conversionRate = item.clicks > 0 ? (item.conversions / item.clicks) * 100 : 0;
-            const roas = item.spend > 0 && item.revenue > 0 ? item.revenue / item.spend : null;
-            const ad_account_display = getAdAccountDisplay(item.ad_account_id, item.ad_account_name);
-            return {
-                ...item,
-                ad_account_display,
-                ctr,
-                cpm: cpm * USD_TO_INR,
-                cpl: cpl * USD_TO_INR,
-                conversionRate,
-                roas,
-                hookRate: null,
-                holdRate: null
-            };
-        }).sort((a, b) => b.spend - a.spend);
+
+        const result = Object.values(campaignMap)
+            .map((item) => {
+                const ctr = item.impressions > 0 ? (item.clicks / item.impressions) * 100 : 0;
+                const cpm = item.impressions > 0 ? (item.spend / item.impressions) * 1000 : 0;
+                const cpl = item.leads > 0 ? item.spend / item.leads : 0;
+                const conversionRate = item.leads > 0 ? (item.conversions / item.leads) * 100 : 0;
+                const roas = item.spend > 0 ? (item.conversions * REVENUE_PER_CONVERSION) / item.spend : null;
+                const ad_account_display = getAdAccountDisplay(item.ad_account_id, item.ad_account_name);
+                return {
+                    ...item,
+                    ad_account_display,
+                    ctr,
+                    cpm,
+                    cpl,
+                    conversionRate,
+                    roas,
+                    hookRate: null,
+                    holdRate: null
+                };
+            })
+            .sort((a, b) => {
+                const leadDiff = (b.leads || 0) - (a.leads || 0);
+                if (leadDiff !== 0) return leadDiff;
+                return (b.spend || 0) - (a.spend || 0);
+            });
+        return result;
     }, [insightsData, adAccounts]);
+
+    // Total conversion count for KPI: sum of manual overrides (when set) or API conversions per campaign
+    const totalConversionCount = useMemo(() => {
+        return campaignData.reduce((sum, row) => {
+            const effective = manualConversionByCampaign[row.id] !== undefined
+                ? manualConversionByCampaign[row.id]
+                : row.conversions;
+            return sum + (Number(effective) || 0);
+        }, 0);
+    }, [campaignData, manualConversionByCampaign]);
 
     // Date range filter handler (same as Ads Analytics Dashboard)
     const handleDateRangeApply = (payload) => {
@@ -521,7 +600,7 @@ export default function BestPerformingAd() {
                 </div>
             )}
 
-            {/* --- FILTERS ROW: 1. Time Range, 2. All Projects, 3. Ad Account --- */}
+            {/* --- FILTERS ROW: 1. Time Range, 2. All Projects --- */}
             <div className="filters-bar">
                 {/* 1. Time Range (same as Ads Analytics Dashboard) */}
                 <div className="filter-block">
@@ -548,61 +627,82 @@ export default function BestPerformingAd() {
                     </button>
                 </div>
 
-                {/* 2. All Projects */}
-                <div className="filter-block custom-select-wrapper">
+                {/* 2. All Projects - custom dropdown with hover split view */}
+                <div className="filter-block projects-dropdown-wrapper">
                     <label className="filter-label"><span className="filter-emoji">📁</span> All Projects</label>
-                    <select
-                        className="filter-select"
-                        value={selectedProject}
-                        onChange={(e) => setSelectedProject(e.target.value)}
-                        style={{ borderRadius: '5px' }}
-                    >
-                        <option value="">All Projects</option>
-                        <option value="Free Webinar">Free Webinar</option>
-                        <option value="Paid Webinar">Paid Webinar</option>
-                        <option value="Dental Care">Dental Care</option>
-                        <option value="Physio Care">Physio Care</option>
-                        <option value="Direct Walkin">Direct Walkin</option>
-                        <option value="Youtube">Youtube</option>
-                    </select>
-                </div>
-
-                {/* 3. Ad Account */}
-                <div className="filter-block custom-select-wrapper">
-                    <label className="filter-label"><span className="filter-emoji">🏢</span> Ad Account</label>
-                    <select
-                        className="filter-select"
-                        value={selectedAdAccount || ''}
-                        onChange={(e) => setSelectedAdAccount(e.target.value || null)}
-                        style={{
-                            borderRadius: '5px',
-                            border: '1px solid rgba(0,0,0,0.1)',
-                            background: 'var(--card, #ffffff)',
-                            fontSize: '0.875rem'
-                        }}
-                    >
-                        <option value="">All Ad Accounts</option>
-                        {adAccountsLoading ? (
-                            <option value="" disabled>Loading ad accounts...</option>
-                        ) : !adAccounts || adAccounts.length === 0 ? (
-                            <option value="" disabled>No ad accounts available</option>
-                        ) : (
-                            adAccounts
-                                .filter((account) => {
-                                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                                    return !displayName.toLowerCase().includes('read-only');
-                                })
-                                .map((account) => {
-                                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                                    const value = account.account_id || account.id;
-                                    return (
-                                        <option key={value} value={value}>
-                                            {displayName}
-                                        </option>
-                                    );
-                                })
+                    <div className="projects-dropdown" ref={projectsDropdownRef}>
+                        <button
+                            type="button"
+                            className="projects-dropdown-trigger"
+                            onClick={() => setProjectsDropdownOpen((o) => !o)}
+                            aria-expanded={projectsDropdownOpen}
+                            aria-haspopup="listbox"
+                        >
+                            <span className="projects-dropdown-trigger-text">
+                                {selectedProject || 'All Projects'}
+                            </span>
+                            <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                        </button>
+                        {projectsDropdownOpen && (
+                            <div className="projects-dropdown-panel">
+                                <div
+                                    className="projects-dropdown-left"
+                                    onMouseLeave={() => setHoveredProject(null)}
+                                >
+                                    <div
+                                        className={`projects-dropdown-project-row${selectedProject === '' ? ' projects-dropdown-project-row-selected' : ''}`}
+                                        onMouseEnter={() => setHoveredProject('')}
+                                        onClick={() => { setSelectedProject(''); setProjectsDropdownOpen(false); }}
+                                    >
+                                        All Projects
+                                    </div>
+                                    {PROJECT_ORDER.map((projectName) => (
+                                        <div
+                                            key={projectName}
+                                            className={`projects-dropdown-project-row${selectedProject === projectName ? ' projects-dropdown-project-row-selected' : ''}`}
+                                            onMouseEnter={() => setHoveredProject(projectName)}
+                                            onClick={() => { setSelectedProject(projectName); setProjectsDropdownOpen(false); }}
+                                        >
+                                            {projectName}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="projects-dropdown-right">
+                                    {(hoveredProject === '' || (hoveredProject === null && selectedProject === '')) ? (
+                                        <div className="projects-dropdown-all-accounts">
+                                            {PROJECT_ORDER.map((projectName) => {
+                                                const accounts = PROJECT_AD_ACCOUNT_NAMES[projectName] || [];
+                                                return (
+                                                    <div key={projectName} className="projects-dropdown-project-group">
+                                                        <div className="projects-dropdown-group-label">{projectName}</div>
+                                                        {accounts.length === 0 ? (
+                                                            <span className="projects-dropdown-placeholder small">No accounts</span>
+                                                        ) : (
+                                                            <ul className="projects-dropdown-account-list">
+                                                                {accounts.map((name, idx) => (
+                                                                    <li key={`${projectName}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                                                                ))}
+                                                            </ul>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : hoveredProject === null ? (
+                                        <span className="projects-dropdown-placeholder">Select a project to see accounts</span>
+                                    ) : (PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).length === 0 ? (
+                                        <span className="projects-dropdown-placeholder">No accounts</span>
+                                    ) : (
+                                        <ul className="projects-dropdown-account-list">
+                                            {(PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).map((name, idx) => (
+                                                <li key={`${hoveredProject}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
+                            </div>
                         )}
-                    </select>
+                    </div>
                 </div>
             </div>
 
@@ -648,7 +748,7 @@ export default function BestPerformingAd() {
                         <div className="kpi-card-body">
                             <div className="kpi-icon">📊</div>
                             <small className="kpi-label">Conversion Rate</small>
-                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatPerc(totals.clicks > 0 ? (totals.conversions / totals.clicks) * 100 : 0)}</div>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatPerc(totals.leads > 0 ? (totals.conversions / totals.leads) * 100 : 0)}</div>
                             <small className="kpi-subtitle">Clicks to Conversions</small>
                         </div>
                     </div>
@@ -671,7 +771,7 @@ export default function BestPerformingAd() {
                         <div className="kpi-card-body">
                             <div className="kpi-icon">✅</div>
                             <small className="kpi-label">Conversion Count</small>
-                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatNum(totals.conversions)}</div>
+                            <div className="kpi-value">{dataLoading ? 'Loading...' : formatNum(totalConversionCount)}</div>
                             <small className="kpi-subtitle">Total Conversions</small>
                         </div>
                     </div>
@@ -721,18 +821,23 @@ export default function BestPerformingAd() {
                     </div>
                     <div style={{ width: '100%', height: 300 }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={dynamicsData}>
+                            <ComposedChart data={dynamicsData} margin={{ top: 5, right: 10, left: 0, bottom: 30 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                                <XAxis dataKey="adNameShort" tick={{ fontSize: 9, fill: '#64748b' }} axisLine={false} tickLine={false} angle={-35} textAnchor="end" height={50} />
                                 <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                 <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                                 <Tooltip 
                                     contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}
-                                    formatter={(value, name) => {
-                                        if (name === 'Amount spend') {
-                                            return formatMoney(value);
-                                        }
-                                        return value;
+                                    content={({ active, payload }) => {
+                                        if (!active || !payload?.length) return null;
+                                        const p = payload[0].payload;
+                                        return (
+                                            <div className="chart-tooltip-custom p-2">
+                                                <div className="fw-semibold text-dark mb-2">{p.adName}</div>
+                                                <div>Amount spend : {formatINR(p.spend)}</div>
+                                                <div>Lead Generated from Ad : {formatNum(p.leadGenerated)}</div>
+                                            </div>
+                                        );
                                     }}
                                 />
                                 <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
@@ -751,17 +856,22 @@ export default function BestPerformingAd() {
                     <div className="chart-header"><div className="chart-title-text">Impressions & CPM</div></div>
                     <div style={{ height: 200 }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={impressionsData}>
+                            <ComposedChart data={impressionsData} margin={{ bottom: 30 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                                <XAxis dataKey="day" tick={{ fontSize: 10 }} />
+                                <XAxis dataKey="adNameShort" tick={{ fontSize: 9 }} angle={-35} textAnchor="end" height={50} />
                                 <YAxis yAxisId="left" hide />
                                 <YAxis yAxisId="right" orientation="right" hide />
                                 <Tooltip 
-                                    formatter={(value, name) => {
-                                        if (name === 'CPM') {
-                                            return formatMoney(value);
-                                        }
-                                        return formatNum(value);
+                                    content={({ active, payload }) => {
+                                        if (!active || !payload?.length) return null;
+                                        const p = payload[0].payload;
+                                        return (
+                                            <div className="chart-tooltip-custom p-2">
+                                                <div className="fw-semibold text-dark mb-2">{p.adName}</div>
+                                                <div>Impressions : {formatNum(p.imp)}</div>
+                                                <div>CPM : {formatINR(p.cpm)}</div>
+                                            </div>
+                                        );
                                     }}
                                 />
                                 <Legend iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
@@ -777,17 +887,22 @@ export default function BestPerformingAd() {
                     <div className="chart-header"><div className="chart-title-text">Link clicks & Conversion Rate</div></div>
                     <div style={{ height: 200 }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={clicksData}>
+                            <ComposedChart data={clicksData} margin={{ bottom: 30 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                                <XAxis dataKey="day" tick={{ fontSize: 10 }} />
+                                <XAxis dataKey="adNameShort" tick={{ fontSize: 9 }} angle={-35} textAnchor="end" height={50} />
                                 <YAxis yAxisId="left" hide />
                                 <YAxis yAxisId="right" orientation="right" hide />
                                 <Tooltip 
-                                    formatter={(value, name) => {
-                                        if (name === 'Conversion Rate') {
-                                            return formatPerc(value);
-                                        }
-                                        return formatNum(value);
+                                    content={({ active, payload }) => {
+                                        if (!active || !payload?.length) return null;
+                                        const p = payload[0].payload;
+                                        return (
+                                            <div className="chart-tooltip-custom p-2">
+                                                <div className="fw-semibold text-dark mb-2">{p.adName}</div>
+                                                <div>Link clicks : {formatNum(p.clicks)}</div>
+                                                <div>Conversion Rate : {formatPerc(p.conversionRate)}</div>
+                                            </div>
+                                        );
                                     }}
                                 />
                                 <Legend iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
@@ -803,17 +918,22 @@ export default function BestPerformingAd() {
                     <div className="chart-header"><div className="chart-title-text">Leads & CPL</div></div>
                     <div style={{ height: 200 }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={leadsData}>
+                            <ComposedChart data={leadsData} margin={{ bottom: 30 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                                <XAxis dataKey="day" tick={{ fontSize: 10 }} />
+                                <XAxis dataKey="adNameShort" tick={{ fontSize: 9 }} angle={-35} textAnchor="end" height={50} />
                                 <YAxis yAxisId="left" hide />
                                 <YAxis yAxisId="right" orientation="right" hide />
                                 <Tooltip 
-                                    formatter={(value, name) => {
-                                        if (name === 'CPL') {
-                                            return formatMoney(value);
-                                        }
-                                        return formatNum(value);
+                                    content={({ active, payload }) => {
+                                        if (!active || !payload?.length) return null;
+                                        const p = payload[0].payload;
+                                        return (
+                                            <div className="chart-tooltip-custom p-2">
+                                                <div className="fw-semibold text-dark mb-2">{p.adName}</div>
+                                                <div>Leads : {formatNum(p.leads)}</div>
+                                                <div>CPL : {formatINR(p.cpl)}</div>
+                                            </div>
+                                        );
                                     }}
                                 />
                                 <Legend iconType="circle" wrapperStyle={{ fontSize: '10px' }} />
@@ -865,22 +985,52 @@ export default function BestPerformingAd() {
                                 </td>
                             </tr>
                         ) : (
-                            campaignData.map((row) => (
+                            campaignData.map((row) => {
+                                const effectiveConversions = manualConversionByCampaign[row.id] !== undefined
+                                    ? manualConversionByCampaign[row.id]
+                                    : row.conversions;
+                                const effectiveConversionRate = row.leads > 0
+                                    ? (effectiveConversions / row.leads) * 100
+                                    : 0;
+                                const effectiveRoas = row.spend > 0 ? (effectiveConversions * REVENUE_PER_CONVERSION) / row.spend : null;
+                                return (
                                 <tr key={row.id}>
                                     <td>{row.ad_account_display}</td>
                                     <td>{row.name}</td>
                                     <td>{row.ad_name}</td>
-                                    <td className={getBgClass(row.spend * USD_TO_INR, 'spend')}>
-                                        {formatINR(row.spend * USD_TO_INR)}
+                                    <td className={getBgClass(row.spend, 'spend')}>
+                                        {formatINR(row.spend)}
                                     </td>
                                     <td className={getBgClass(row.leads, 'leadGenerated')}>
                                         {formatNum(row.leads)}
                                     </td>
-                                    <td className={getBgClass(row.conversions, 'conversionCount')}>
-                                        {formatNum(row.conversions)}
+                                    <td className={getBgClass(effectiveConversions, 'conversionCount')}>
+                                        <input
+                                            type="number"
+                                            min={0}
+                                            step={1}
+                                            className="conversion-count-input"
+                                            value={manualConversionByCampaign[row.id] !== undefined ? manualConversionByCampaign[row.id] : row.conversions}
+                                            onChange={(e) => {
+                                                const v = e.target.value;
+                                                if (v === '') {
+                                                    setManualConversionByCampaign((prev) => {
+                                                        const next = { ...prev };
+                                                        delete next[row.id];
+                                                        return next;
+                                                    });
+                                                } else {
+                                                    const n = parseInt(v, 10);
+                                                    if (!Number.isNaN(n) && n >= 0) {
+                                                        setManualConversionByCampaign((prev) => ({ ...prev, [row.id]: n }));
+                                                    }
+                                                }
+                                            }}
+                                            aria-label={`Conversion count for ${row.name}`}
+                                        />
                                     </td>
-                                    <td className={getBgClass(row.conversionRate, 'conversionRate')}>
-                                        {formatPerc(row.conversionRate)}
+                                    <td className={getBgClass(effectiveConversionRate, 'conversionRate')}>
+                                        {formatPerc(effectiveConversionRate)}
                                     </td>
                                     <td>{formatPerc(row.ctr)}</td>
                                     <td className={getBgClass(row.cpl, 'cpl')}>
@@ -889,16 +1039,17 @@ export default function BestPerformingAd() {
                                     <td>{formatINR(row.cpm)}</td>
                                     <td>{row.hookRate != null ? formatPerc(row.hookRate) : '—'}</td>
                                     <td>{row.holdRate != null ? formatPerc(row.holdRate) : '—'}</td>
-                                    <td>{formatROAS(row.roas)}</td>
+                                    <td>{formatROAS(effectiveRoas)}</td>
                                 </tr>
-                            ))
+                                );
+                            })
                         )}
                     </tbody>
                 </table>
                 <div className="d-flex justify-content-end mt-3 text-muted small">
                     {campaignData.length > 0 ? (
                         <>
-                            1 - {Math.min(campaignData.length, 10)} / {campaignData.length}{' '}
+                            1 - {campaignData.length} campaigns · Sorted by total leads (descending)
                             <i className="fas fa-chevron-left ms-3 me-2"></i> <i className="fas fa-chevron-right"></i>
                         </>
                     ) : null}

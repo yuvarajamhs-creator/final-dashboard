@@ -1,6 +1,6 @@
 /* eslint-disable no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -22,6 +22,7 @@ import { getCurrentTheme, setTheme } from "../utils/theme";
 import MultiSelectFilter from "../components/MultiSelectFilter";
 import DateRangeFilter from "../components/DateRangeFilter";
 import { downloadCSV } from "../utils/csvExport";
+import { PROJECT_ORDER, PROJECT_AD_ACCOUNT_NAMES, buildAdAccountsByProject } from "../constants/projectAdAccounts";
 import ExcelJS from 'exceljs';
 import './Dashboards.css';
 
@@ -1014,6 +1015,11 @@ export default function AdsDashboardBootstrap() {
   const [selectedAds, setSelectedAds] = useState([]);
   const [selectedPlatforms, setSelectedPlatforms] = useState([]);
   const [selectedPlatform, setSelectedPlatform] = useState(null); // Single platform for main dashboard filter
+  // All Projects filter (single selection: '' = All Projects, or project name from PROJECT_ORDER)
+  const [selectedProject, setSelectedProject] = useState('');
+  const [projectsDropdownOpen, setProjectsDropdownOpen] = useState(false);
+  const [hoveredProject, setHoveredProject] = useState(null);
+  const projectsDropdownRef = useRef(null);
   const [selectedL1Revenue, setSelectedL1Revenue] = useState([]);
   const [selectedL2Revenue, setSelectedL2Revenue] = useState([]);
   const [selectedAction, setSelectedAction] = useState("");
@@ -1221,6 +1227,19 @@ export default function AdsDashboardBootstrap() {
     setCurrentTheme(newTheme);
   };
 
+  // Project → ad accounts (for All Projects filter and Ad Account dropdown)
+  const adAccountsByProject = useMemo(() => buildAdAccountsByProject(adAccounts), [adAccounts]);
+  const selectedProjectAccountIds = useMemo(() => {
+    if (!selectedProject) return [];
+    const list = adAccountsByProject[selectedProject] || [];
+    return list.map((x) => x.value);
+  }, [selectedProject, adAccountsByProject]);
+  const accountsForProject = useMemo(() => {
+    if (selectedProjectAccountIds.length === 0) return [];
+    const idSet = new Set(selectedProjectAccountIds.map(String));
+    return adAccounts.filter((acc) => idSet.has(String(acc.account_id || acc.id)));
+  }, [adAccounts, selectedProjectAccountIds]);
+
   const load = async (useLive = false) => {
     setLoading(true);
     setCampaignsLoading(true);
@@ -1228,11 +1247,25 @@ export default function AdsDashboardBootstrap() {
 
     try {
       
-      // First, fetch campaigns to determine if all are selected
-      const [campData, projectsData] = await Promise.all([
-        fetchCampaigns(selectedAdAccount),
-        fetchProjects()
-      ]);
+      // First, fetch campaigns (single account or merge from project accounts)
+      let campData;
+      if (selectedAdAccount) {
+        campData = await fetchCampaigns(selectedAdAccount);
+      } else if (selectedProject && accountsForProject.length > 0) {
+        const campaignPromises = accountsForProject.map((acc) =>
+          fetchCampaigns(acc.account_id || acc.id)
+        );
+        const results = await Promise.all(campaignPromises);
+        const byId = new Map();
+        results.flat().forEach((c) => {
+          const id = c.id || c.campaign_id;
+          if (id && !byId.has(id)) byId.set(id, c);
+        });
+        campData = Array.from(byId.values());
+      } else {
+        campData = await fetchCampaigns(null);
+      }
+      const projectsData = await fetchProjects();
 
       // The active-campaigns API only returns active campaigns, so we can use the list directly
       const activeCampaignsList = campData || [];
@@ -1271,13 +1304,15 @@ export default function AdsDashboardBootstrap() {
       
 
       // When "All Ad Accounts" is selected, fetch from each account and combine.
-      // Use same filtered list as dropdown (exclude Read-Only names).
-      const isAllAdAccounts = !selectedAdAccount && adAccounts.length > 0;
+      // If a project is selected, restrict to that project's accounts; else use all non-read-only.
+      const isAllAdAccounts = !selectedAdAccount && (
+        selectedProject ? accountsForProject.length > 0 : adAccounts.length > 0
+      );
       const accountsForFetch = isAllAdAccounts
-        ? adAccounts.filter((account) => {
+        ? (selectedProject ? accountsForProject : adAccounts.filter((account) => {
             const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
             return !displayName.toLowerCase().includes('read-only');
-          })
+          }))
         : [];
 
       let rows;
@@ -1457,6 +1492,31 @@ export default function AdsDashboardBootstrap() {
       setLoading(false);
     }
   };
+
+  // When project changes, clear Ad Account if it's not in the selected project's accounts
+  useEffect(() => {
+    if (!selectedAdAccount) return;
+    if (selectedProject && selectedProjectAccountIds.length > 0 && !selectedProjectAccountIds.some((id) => String(id) === String(selectedAdAccount))) {
+      setSelectedAdAccount(null);
+      setSelectedCampaigns([]);
+      setSelectedAds([]);
+      setCampaigns([]);
+      setAds([]);
+    }
+  }, [selectedProject, selectedProjectAccountIds]);
+
+  // Close All Projects dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (projectsDropdownRef.current && !projectsDropdownRef.current.contains(e.target)) {
+        setProjectsDropdownOpen(false);
+      }
+    };
+    if (projectsDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [projectsDropdownOpen]);
 
   // Load ad accounts on mount
   useEffect(() => {
@@ -1852,7 +1912,7 @@ export default function AdsDashboardBootstrap() {
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [days, selectedAdAccount, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, adAccounts]);
+  }, [days, selectedAdAccount, selectedProject, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, adAccounts]);
 
   // Load leads when form or date filters change
 
@@ -3847,6 +3907,83 @@ export default function AdsDashboardBootstrap() {
                   <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
                       </button>
                 </div>
+            {/* All Projects - two-column dropdown (projects left, accounts on hover right) */}
+            <div className="col-12 col-md-auto filter-block projects-dropdown-wrapper">
+              <label className="filter-label"><span className="filter-emoji">📁</span> All Projects</label>
+              <div className="projects-dropdown" ref={projectsDropdownRef}>
+                <button
+                  type="button"
+                  className="projects-dropdown-trigger"
+                  onClick={() => setProjectsDropdownOpen((o) => !o)}
+                  aria-expanded={projectsDropdownOpen}
+                  aria-haspopup="listbox"
+                >
+                  <span className="projects-dropdown-trigger-text">
+                    {selectedProject || 'All Projects'}
+                  </span>
+                  <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                </button>
+                {projectsDropdownOpen && (
+                  <div className="projects-dropdown-panel">
+                    <div
+                      className="projects-dropdown-left"
+                      onMouseLeave={() => setHoveredProject(null)}
+                    >
+                      <div
+                        className={`projects-dropdown-project-row${selectedProject === '' ? ' projects-dropdown-project-row-selected' : ''}`}
+                        onMouseEnter={() => setHoveredProject('')}
+                        onClick={() => { setSelectedProject(''); setProjectsDropdownOpen(false); }}
+                      >
+                        All Projects
+                      </div>
+                      {PROJECT_ORDER.map((projectName) => (
+                        <div
+                          key={projectName}
+                          className={`projects-dropdown-project-row${selectedProject === projectName ? ' projects-dropdown-project-row-selected' : ''}`}
+                          onMouseEnter={() => setHoveredProject(projectName)}
+                          onClick={() => { setSelectedProject(projectName); setProjectsDropdownOpen(false); }}
+                        >
+                          {projectName}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="projects-dropdown-right">
+                      {(hoveredProject === '' || (hoveredProject === null && selectedProject === '')) ? (
+                        <div className="projects-dropdown-all-accounts">
+                          {PROJECT_ORDER.map((projectName) => {
+                            const accounts = PROJECT_AD_ACCOUNT_NAMES[projectName] || [];
+                            return (
+                              <div key={projectName} className="projects-dropdown-project-group">
+                                <div className="projects-dropdown-group-label">{projectName}</div>
+                                {accounts.length === 0 ? (
+                                  <span className="projects-dropdown-placeholder small">No accounts</span>
+                                ) : (
+                                  <ul className="projects-dropdown-account-list">
+                                    {accounts.map((name, idx) => (
+                                      <li key={`${projectName}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : hoveredProject === null ? (
+                        <span className="projects-dropdown-placeholder">Select a project to see accounts</span>
+                      ) : (PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).length === 0 ? (
+                        <span className="projects-dropdown-placeholder">No accounts</span>
+                      ) : (
+                        <ul className="projects-dropdown-account-list">
+                          {(PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).map((name, idx) => (
+                            <li key={`${hoveredProject}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
             <div className="col-12 col-md-auto">
               <label className="filter-label">
                 <span className="filter-emoji">🏢</span> Ad Account
@@ -3864,7 +4001,6 @@ export default function AdsDashboardBootstrap() {
                   setAds([]); // Clear ads state
                   setPage(1);
                 }}
-                
                 style={{ 
                   fontSize: '0.875rem', 
                   height: '36px',
@@ -3878,25 +4014,23 @@ export default function AdsDashboardBootstrap() {
                   if (adAccountsLoading) {
                     return <option value="" disabled>Loading ad accounts...</option>;
                   }
-                  
-                  if (!adAccounts || adAccounts.length === 0) {
-                    return <option value="" disabled>No ad accounts available</option>;
+                  const list = selectedProject ? accountsForProject : (adAccounts || []);
+                  const filtered = list.filter(account => {
+                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                    return !displayName.toLowerCase().includes('read-only');
+                  });
+                  if (filtered.length === 0) {
+                    return <option value="" disabled>{selectedProject ? 'No accounts in this project' : 'No ad accounts available'}</option>;
                   }
-                  
-                  return adAccounts
-                    .filter(account => {
-                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                      return !displayName.toLowerCase().includes('read-only');
-                    })
-                    .map(account => {
-                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                      const value = account.account_id || account.id;
-                      return (
-                        <option key={value} value={value}>
-                          {displayName}
-                        </option>
-                      );
-                    });
+                  return filtered.map(account => {
+                    const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
+                    const value = account.account_id || account.id;
+                    return (
+                      <option key={value} value={value}>
+                        {displayName}
+                      </option>
+                    );
+                  });
                 })()}
               </select>
             </div>
