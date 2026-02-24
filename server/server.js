@@ -22,6 +22,10 @@ app.use("/api/wix", wixRoutes);
 const permissionsRoutes = require("./routes/permissions");
 app.use("/api/permissions", permissionsRoutes);
 
+// Import AI Insights routes (Gemini)
+const aiInsightsRoutes = require("./routes/aiInsights");
+app.use("/api/ai", aiInsightsRoutes);
+
 app.get("/", (req, res) => {
   res.send("Backend is running...");
 });

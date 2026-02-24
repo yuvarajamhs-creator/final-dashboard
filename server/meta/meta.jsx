@@ -12,11 +12,13 @@ const { getInsights, upsertInsights } = require("../repositories/insightsReposit
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
 const { fetchInsightsFromMetaLive } = require("./insightsService");
+const { fetchVideoPerformance } = require("./videoPerformanceService");
 const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
 const { fetchInstagramInsights, fetchInstagramAudienceDemographics, fetchReachByFollowType, fetchOnlineFollowers, resolveIgAccountsFromPages } = require("./instagramInsightsService");
 const { processOnlineFollowersResponse } = require("./onlineFollowersProcessor");
 const { fetchInstagramMediaInsights } = require("./instagramMediaInsightsService");
+const insightsCache = require("../cache/insightsCache");
 const { runAnalytics } = require("./instagramAnalyticsEngine");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
@@ -209,6 +211,36 @@ async function getPageAccessToken(pageId) {
     // Clear cache on error
     delete pageTokenCache.tokens[pageId];
 
+    // Fallback 1: try GET pageId with META_ACCESS_TOKEN if different from system token (e.g. user token has page access)
+    const systemToken = getSystemToken();
+    const altToken = (process.env.META_ACCESS_TOKEN || '').trim();
+    if (altToken && altToken !== systemToken) {
+      try {
+        const altRes = await axios.get(
+          `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
+          { params: { fields: 'access_token', access_token: altToken }, timeout: 30000 }
+        );
+        if (altRes.data && altRes.data.access_token) {
+          const pageToken = altRes.data.access_token;
+          pageTokenCache.tokens[pageId] = { token: pageToken, expiresAt: Date.now() + pageTokenCache.ttl };
+          return pageToken;
+        }
+      } catch (altErr) {
+        // ignore, try next fallback
+      }
+    }
+
+    // Fallback 2: refresh cache from me/accounts and businesses/owned_pages, then check cache again
+    try {
+      await loadPageTokensIntoCache();
+      const cached = pageTokenCache.tokens[pageId];
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.token;
+      }
+    } catch (refreshErr) {
+      // ignore
+    }
+
     // Handle specific error codes
     if (errorCode === 190) {
       throw new Error(`Page Access Token expired/invalid for page ${pageId}: ${errorMsg}. Please check your System User Token.`);
@@ -221,6 +253,21 @@ async function getPageAccessToken(pageId) {
     }
 
     throw new Error(`Failed to get page access token for page ${pageId}: ${errorMsg}`);
+  }
+}
+
+/**
+ * Get page access token without throwing. Use when the page may not be in the System User's scope
+ * (e.g. different page IDs). Returns { token } on success, { token: null, error: string } on failure.
+ */
+async function getPageAccessTokenSafe(pageId) {
+  if (!pageId) return { token: null, error: "Page ID is required" };
+  try {
+    const token = await getPageAccessToken(pageId);
+    return { token };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    return { token: null, error: msg };
   }
 }
 
@@ -523,17 +570,31 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     const adIds = (ad_id || '').split(',').map((s) => s.trim()).filter(Boolean);
 
     const useLive = req.query.live === '1' || req.query.live === 'true';
-    let data = [];
-    for (const adAccountId of adAccountIds) {
-      const rows = await getInsights({
-        ad_account_id: adAccountId,
-        from: fromDate,
-        to: toDate,
-        campaign_id: campaignIdForDb,
-        ad_id: adIdForDb,
-      });
-      data = data.concat(rows);
+    const insightsCacheKey = insightsCache.buildInsightsKey({
+      ad_account_id: adAccountIds.slice().sort().join(','),
+      from: fromDate,
+      to: toDate,
+      campaign_id: campaignIdForDb,
+      ad_id: adIdForDb,
+      live: useLive,
+    });
+    const cachedInsights = insightsCache.get(insightsCacheKey);
+    if (cachedInsights != null) {
+      return res.json(cachedInsights);
     }
+
+    const dbResults = await Promise.all(
+      adAccountIds.map((adAccountId) =>
+        getInsights({
+          ad_account_id: adAccountId,
+          from: fromDate,
+          to: toDate,
+          campaign_id: campaignIdForDb,
+          ad_id: adIdForDb,
+        })
+      )
+    );
+    let data = dbResults.flat();
     // #region agent log
     _log({ location: 'meta.jsx:GET/insights', message: 'db result', data: { source: 'db', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
     // #endregion
@@ -579,13 +640,52 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
       // #endregion
     }
 
-    res.json({ data });
+    const payload = { data };
+    insightsCache.set(insightsCacheKey, payload, 5 * 60); // 5 min TTL
+    res.json(payload);
   } catch (err) {
     console.error("Insights DB Error:", err?.message || err);
     res.status(500).json({
       error: "Failed to fetch insights",
       details: err?.message || String(err),
     });
+  }
+});
+
+// ---------------------------------------------------------------------
+// VIDEO PERFORMANCE — Hook Rate and Hold Rate per ad from Meta Ads Insights.
+// GET /api/meta/video-performance?adAccountId=&accessToken=&since=&until=
+// ---------------------------------------------------------------------
+router.get("/video-performance", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { adAccountId, accessToken: queryToken, since, until } = req.query;
+    if (!adAccountId || !String(adAccountId).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "adAccountId is required",
+      });
+    }
+    let accessToken = (queryToken && String(queryToken).trim()) || null;
+    if (!accessToken) {
+      try {
+        const credentials = getCredentials();
+        accessToken = credentials.accessToken;
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: "accessToken is required (query param or META_ACCESS_TOKEN in server .env)",
+        });
+      }
+    }
+    const data = await fetchVideoPerformance(adAccountId, accessToken, since || undefined, until || undefined);
+    return res.json({ success: true, data });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    const message = err.message || "Failed to fetch video performance";
+    if (status >= 500) {
+      console.error("[VideoPerformance]", message);
+    }
+    return res.status(status).json({ success: false, error: message });
   }
 });
 
@@ -627,7 +727,7 @@ router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) =>
       });
     }
 
-    const requestedBreakdowns = (breakdowns || 'age,gender,country,region').toString().split(',').map((s) => s.trim()).filter(Boolean);
+    const requestedBreakdowns = (breakdowns || 'age,gender,country').toString().split(',').map((s) => s.trim()).filter(Boolean);
     const isAllCampaigns = is_all_campaigns === '1' || is_all_campaigns === 'true';
     const isAllAds = is_all_ads === '1' || is_all_ads === 'true';
     const campaignIds = (campaign_id || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -1078,11 +1178,13 @@ async function fetchAllAdsCached(credentials, res, send, sendError) {
 // ---------------------------------------------------------------------
 // 5.0) AD ACCOUNTS API - DB-first. UI dropdown reads from DB only.
 //    GET /api/meta/ad-accounts → list from DB; if empty, fetch /me/adaccounts and cache, then return.
+//    ?refresh=true → force fetch from Meta (handles pagination) and refresh cache.
 // ---------------------------------------------------------------------
 router.get("/ad-accounts", optionalAuthMiddleware, async (req, res) => {
   try {
+    const forceRefresh = req.query.refresh === 'true' || req.query.refresh === '1';
     let accounts = await adAccountsService.listFromDb();
-    if (!accounts || accounts.length === 0) {
+    if (forceRefresh || !accounts || accounts.length === 0) {
       try {
         await adAccountsService.fetchAndCache();
         accounts = await adAccountsService.listFromDb();
@@ -1282,6 +1384,41 @@ async function fetchPageById(pageId, accessToken) {
   return response.data ? [response.data] : [];
 }
 
+/** Load all page tokens into cache (me/accounts + businesses). Used as fallback when getPageAccessToken fails. */
+async function loadPageTokensIntoCache() {
+  const systemToken = (
+    (process.env.META_SYSTEM_ACCESS_TOKEN_1 || process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || ''
+  ).trim();
+  const userToken = (process.env.META_ACCESS_TOKEN || '').trim();
+  const pageIdEnv = (process.env.META_PAGE_ID || '').trim();
+  if (!systemToken && !userToken) return [];
+  const accessToken = systemToken || userToken;
+  let rawPages = [];
+  if (userToken) {
+    try { rawPages = await fetchPagesFromMeAccounts(userToken); } catch (e) { /* ignore */ }
+  }
+  if (rawPages.length === 0 && systemToken) {
+    try { rawPages = await fetchPagesFromMeAccounts(systemToken); } catch (e) { /* ignore */ }
+  }
+  if (rawPages.length === 0) {
+    const bizToken = userToken || systemToken;
+    if (bizToken) {
+      try { rawPages = await fetchPagesFromBusinesses(bizToken); } catch (e) { /* ignore */ }
+    }
+  }
+  if (rawPages.length === 0 && pageIdEnv) {
+    try { rawPages = await fetchPageById(pageIdEnv, accessToken); } catch (e) { /* ignore */ }
+  }
+  const now = Date.now();
+  const ttl = pageTokenCache.ttl || 60 * 60 * 1000;
+  for (const page of rawPages) {
+    if (page && page.id && page.access_token) {
+      pageTokenCache.tokens[page.id] = { token: page.access_token, expiresAt: now + ttl };
+    }
+  }
+  return rawPages;
+}
+
 router.get("/pages", optionalAuthMiddleware, async (req, res) => {
   try {
     const systemToken = (
@@ -1297,11 +1434,21 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
     const accessToken = systemToken || userToken;
     let rawPages = [];
 
-    // 1) Try me/accounts (works with User tokens; System User often returns empty)
-    try {
-      rawPages = await fetchPagesFromMeAccounts(accessToken);
-    } catch (e) {
-      console.warn("[Pages] me/accounts failed:", e.response?.data?.error?.message || e.message);
+    // 1) Try me/accounts — use User token first (Meta returns pages for User tokens with pages_show_list;
+    //    System User tokens often return empty for me/accounts)
+    if (userToken) {
+      try {
+        rawPages = await fetchPagesFromMeAccounts(userToken);
+      } catch (e) {
+        console.warn("[Pages] me/accounts (user token) failed:", e.response?.data?.error?.message || e.message);
+      }
+    }
+    if (rawPages.length === 0 && systemToken) {
+      try {
+        rawPages = await fetchPagesFromMeAccounts(systemToken);
+      } catch (e) {
+        console.warn("[Pages] me/accounts (system token) failed:", e.response?.data?.error?.message || e.message);
+      }
     }
 
     // 2) If empty, try businesses -> owned_pages (works when pages are linked to Business)
@@ -1324,6 +1471,17 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
       } catch (e) {
         console.warn("[Pages] META_PAGE_ID fallback failed:", e.response?.data?.error?.message || e.message);
       }
+    }
+
+    if (rawPages.length === 0) {
+      console.warn(
+        "[Pages] No pages returned. PAGE dropdown will be empty. " +
+        "Fix: (1) Use a User token with pages_show_list for me/accounts, or " +
+        "(2) Link pages to a Business and use a token with business_management, or " +
+        "(3) Set META_PAGE_ID in server/.env to a Facebook Page ID."
+      );
+    } else {
+      console.log(`[Pages] Returning ${rawPages.length} page(s) for PAGE filter.`);
     }
 
     const now = Date.now();
@@ -1428,6 +1586,16 @@ router.get("/page-name", optionalAuthMiddleware, async (req, res) => {
 // Returns city_breakdown and country_breakdown from Instagram engaged_audience_demographics
 // ---------------------------------------------------------------------
 router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (req, res) => {
+  const emptyData = () => ({
+    data: {
+      city_breakdown: [],
+      country_breakdown: [],
+      age_breakdown: [],
+      gender_breakdown: [],
+      source: "instagram_audience",
+    },
+    message: "Page not accessible with current token. Add this page in Meta Business Suite or select a page your app can access.",
+  });
   try {
     const { page_id, timeframe } = req.query;
     if (!page_id || String(page_id).trim() === "") {
@@ -1443,22 +1611,33 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
 
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    const pageRes = await axios.get(pageUrl, {
-      params: {
-        access_token: systemToken,
-        fields: "instagram_business_account{id}",
-      },
-      timeout: 10000,
-    });
+    let pageRes;
+    try {
+      pageRes = await axios.get(pageUrl, {
+        params: {
+          access_token: systemToken,
+          fields: "instagram_business_account{id}",
+        },
+        timeout: 10000,
+      });
+    } catch (pageErr) {
+      const code = pageErr?.response?.data?.error?.code;
+      console.warn("[Instagram Audience Demographics] Page not accessible:", pageId, code, pageErr?.response?.data?.error?.message || pageErr.message);
+      return res.status(200).json(emptyData());
+    }
     const igAccountId = pageRes.data?.instagram_business_account?.id;
     if (!igAccountId) {
-      return res.status(400).json({
-        error: "No Instagram account linked",
-        details: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
+      return res.status(200).json({
+        ...emptyData(),
+        message: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
       });
     }
 
-    const pageToken = await getPageAccessToken(pageId);
+    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !pageToken) {
+      console.warn("[Instagram Audience Demographics] Page token not available for page:", pageId, tokenError);
+      return res.status(200).json(emptyData());
+    }
     const { city_breakdown, country_breakdown, age_breakdown, gender_breakdown } = await fetchInstagramAudienceDemographics(
       igAccountId,
       pageToken,
@@ -1476,13 +1655,16 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
     });
   } catch (err) {
     const code = err?.response?.data?.error?.code;
-    const msg = err?.response?.data?.error?.message || err.message;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
     console.error("[Instagram Audience Demographics] Error:", code || err.message, msg);
     if (err.response?.status === 400) {
       return res.status(400).json({
         error: "Bad request",
         details: msg,
       });
+    }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json(emptyData());
     }
     return res.status(500).json({
       error: "Failed to fetch Instagram audience demographics",
@@ -1520,20 +1702,63 @@ router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req
 
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    const pageRes = await axios.get(pageUrl, {
-      params: { access_token: systemToken, fields: "instagram_business_account{id}" },
-      timeout: 10000,
-    });
+    let pageRes;
+    try {
+      pageRes = await axios.get(pageUrl, {
+        params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+        timeout: 10000,
+      });
+    } catch (pageErr) {
+      console.warn("[Instagram reach-by-follow-type] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "Page not accessible with current token.",
+      });
+    }
     const igAccountId = pageRes.data?.instagram_business_account?.id;
     if (!igAccountId) {
-      return res.status(400).json({
-        error: "No Instagram account linked",
-        details: "This page does not have a linked Instagram Business account.",
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "This page does not have a linked Instagram Business account.",
       });
     }
 
-    const pageToken = await getPageAccessToken(pageId);
-    const result = await fetchReachByFollowType(igAccountId, fromDate, toDate, pageToken || systemToken);
+    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !pageToken) {
+      console.warn("[Instagram reach-by-follow-type] Page token not available:", pageId, tokenError);
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "Page not accessible with current token.",
+      });
+    }
+    const result = await fetchReachByFollowType(igAccountId, fromDate, toDate, pageToken);
     const total = result.total_value || 0;
     const followerVal = result.follower_value || 0;
     const nonFollowerVal = result.non_follower_value || 0;
@@ -1554,10 +1779,25 @@ router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req
     });
   } catch (err) {
     const code = err?.response?.data?.error?.code;
-    const msg = err?.response?.data?.error?.message || err.message;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
     console.error("[Instagram reach-by-follow-type] Error:", code || err.message, msg);
     if (err.response?.status === 400) {
       return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "Permission not available (pages_read_engagement). Returning empty data.",
+      });
     }
     if (code === 190) {
       return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
@@ -1582,6 +1822,7 @@ router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req
 // Fetches metric=online_followers&period=lifetime, processes to best_times, peak_hours, heatmap_data, recommendation_text
 // ---------------------------------------------------------------------
 router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, res) => {
+  const emptyOnlineFollowers = () => processOnlineFollowersResponse({ data: [] });
   try {
     const { page_id } = req.query;
     if (!page_id || String(page_id).trim() === "") {
@@ -1593,27 +1834,40 @@ router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, re
     const pageId = String(page_id).trim();
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    const pageRes = await axios.get(pageUrl, {
-      params: { access_token: systemToken, fields: "instagram_business_account{id}" },
-      timeout: 10000,
-    });
+    let pageRes;
+    try {
+      pageRes = await axios.get(pageUrl, {
+        params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+        timeout: 10000,
+      });
+    } catch (pageErr) {
+      console.warn("[Instagram online-followers] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+    }
     const igAccountId = pageRes.data?.instagram_business_account?.id;
     if (!igAccountId) {
-      return res.status(400).json({
-        error: "No Instagram account linked",
-        details: "This page does not have a linked Instagram Business account.",
+      return res.status(200).json({
+        ...emptyOnlineFollowers(),
+        message: "This page does not have a linked Instagram Business account.",
       });
     }
-    const pageToken = await getPageAccessToken(pageId).catch(() => null);
-    const raw = await fetchOnlineFollowers(igAccountId, pageToken || systemToken);
+    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !pageToken) {
+      console.warn("[Instagram online-followers] Page token not available:", pageId, tokenError);
+      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+    }
+    const raw = await fetchOnlineFollowers(igAccountId, pageToken);
     const result = processOnlineFollowersResponse(raw);
     return res.json(result);
   } catch (err) {
     const code = err?.response?.data?.error?.code;
-    const msg = err?.response?.data?.error?.message || err.message;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
     console.error("[Instagram online-followers] Error:", code || err.message, msg);
     if (err.response?.status === 400) {
       return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Permission not available (pages_read_engagement). Returning empty data." });
     }
     if (code === 190) {
       return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
@@ -2064,34 +2318,34 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
 //    Uses Page Access Token (required by Meta for this endpoint)
 // ---------------------------------------------------------------------
 router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) => {
+  const emptyPageInsights = (since, until) => ({
+    followers: [],
+    reach: [],
+    impressions: [],
+    fan_adds: [],
+    fan_removes: [],
+    views: [],
+    interactions: [],
+    current_followers: 0,
+    current_reach: 0,
+    total_follows: 0,
+    total_unfollows: 0,
+    total_reached: 0,
+    total_views: 0,
+    total_interactions: 0,
+    period: `${since} to ${until}`,
+  });
   try {
     const { pageId } = req.params;
     const { from, to, metric } = req.query;
 
-    const accessToken = await getPageAccessToken(pageId);
-    
-    // Page Insights API: request impressions, reach, and engagement so the chart shows all three.
-    // First try full set; if Meta returns #100, try alternatives then last-resort impressions only.
-    // Page engagement metrics (page_consumptions, page_engaged_users) were deprecated Sept 2024 and trigger #100.
-    const metricsToTry = metric ? [metric] : [
-      "page_media_view,page_impressions_unique,page_follows",
-      "page_impressions,page_impressions_unique,page_follows",
-      "page_impressions"
-    ];
-    
-    // Date range handling
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     let since = null;
     let until = null;
-    
-    if (from && to) {
-      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-      if (dateRegex.test(from) && dateRegex.test(to)) {
-        since = from;
-        until = to;
-      }
+    if (from && to && dateRegex.test(from) && dateRegex.test(to)) {
+      since = from;
+      until = to;
     }
-    
-    // Default to last 30 days if no date range provided
     if (!since || !until) {
       const today = new Date();
       const thirtyDaysAgo = new Date(today);
@@ -2099,6 +2353,25 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
       until = today.toISOString().split('T')[0];
       since = thirtyDaysAgo.toISOString().split('T')[0];
     }
+
+    const { token: accessToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !accessToken) {
+      console.warn("[Page Insights] Page not accessible:", pageId, tokenError);
+      return res.status(200).json({
+        data: emptyPageInsights(since, until),
+        message: "Page not accessible with current token. Add this page in Meta Business Suite or select a page your app can access.",
+      });
+    }
+    
+    // Page Insights API: request impressions, reach, and engagement so the chart shows all three.
+    // First try full set; if Meta returns #100, try alternatives then last-resort impressions only.
+    // Page engagement metrics (page_consumptions, page_engaged_users) were deprecated Sept 2024 and trigger #100.
+    const metricsToTry = metric ? [metric] : [
+      "page_media_view,page_impressions_unique,page_follows,page_fan_adds,page_fan_removes",
+      "page_media_view,page_impressions_unique,page_follows",
+      "page_impressions,page_impressions_unique,page_follows",
+      "page_impressions"
+    ];
     
     const insightsUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}/insights`;
     
@@ -2437,11 +2710,13 @@ router.post("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/meta/instagram/media-insights?accountIds=...|pageIds=...&from=...&to=... (or period=last_7_days)
-// Returns media list with hook_rate/hold_rate for Reels only; null + availability for non-Reels.
+// GET /api/meta/instagram/media-insights?accountIds=...|pageIds=...&from=...&to=...&contentType=... (or period=last_7_days)
+// Returns media list with hook_rate/hold_rate for Reels; views, reach, total_interactions for all. Includes byContentType aggregates.
+// Cache-first: 10–100 ms when cached; Meta is only called on cache miss (TTL 5 min).
+// Token: Page Access Token or System User with instagram_manage_insights, instagram_basic, pages_read_engagement.
 router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res) => {
   try {
-    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period } = req.query;
+    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period, contentType } = req.query;
 
     let accountIds = [];
     if (accountIdsParam) {
@@ -2456,15 +2731,31 @@ router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res)
         .filter(Boolean);
     }
 
-    const result = await fetchInstagramMediaInsights({
+    const cacheOpts = {
       accountIds: accountIds.length > 0 ? accountIds : undefined,
       pageIds: pageIds.length > 0 ? pageIds : undefined,
-      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
       from: from || undefined,
       to: to || undefined,
       period: period || undefined,
+      contentType: contentType && ["all", "posts", "stories", "reels"].includes(String(contentType).toLowerCase()) ? String(contentType).toLowerCase() : undefined,
+    };
+    const cacheKey = insightsCache.buildMediaInsightsKey(cacheOpts);
+    const cached = insightsCache.get(cacheKey);
+    if (cached != null) {
+      return res.json(cached);
+    }
+
+    const result = await fetchInstagramMediaInsights({
+      accountIds: cacheOpts.accountIds,
+      pageIds: cacheOpts.pageIds,
+      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
+      from: cacheOpts.from,
+      to: cacheOpts.to,
+      period: cacheOpts.period,
+      contentType: cacheOpts.contentType,
     });
 
+    insightsCache.set(cacheKey, result, 5 * 60); // 5 min TTL
     return res.json(result);
   } catch (err) {
     console.error("[Instagram Media Insights] Error:", err.response?.data || err.message);
@@ -3229,48 +3520,61 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
     
     if (formId) {
       // Direct form ID provided
-      // We need page_id to get the Page Access Token for fetching leads
-      try {
-        const formResponse = await axios.get(
-          `https://graph.facebook.com/${META_API_VERSION}/${formId}`,
-          { params: { access_token: accessToken, fields: "id,name,page_id" } }
-        );
-        if (!formResponse.data.page_id) {
-          return res.status(400).json({ 
-            error: "Form missing page_id", 
-            details: "Unable to determine which page this form belongs to. Cannot fetch leads without page_id." 
-          });
-        }
+      // When pageId is also provided: use it directly - no need to call GET /formId (avoids permission
+      // issues for pages like Integfarms My Health School, MHS Dental Care where System token may not
+      // have access to the form object, but Page Access Token works for /formId/leads)
+      if (pageId) {
         formsToFetch.push({
           form_id: formId,
-          name: formResponse.data.name || `Form ${formId}`,
-          page_id: formResponse.data.page_id
+          name: `Form ${formId}`,
+          page_id: pageId
         });
-      } catch (err) {
-        const errorData = err.response?.data?.error;
-        const errorCode = errorData?.code;
-        const errorMsg = errorData?.message || err.message;
-        
-        // Handle token errors
-        if (errorCode === 190) {
-          return res.status(401).json({ 
-            error: "Meta Access Token expired or invalid", 
+      } else {
+        // No pageId: must fetch form info to get page_id (requires System token to access form object)
+        try {
+          const formResponse = await axios.get(
+            `https://graph.facebook.com/${META_API_VERSION}/${formId}`,
+            { params: { access_token: accessToken, fields: "id,name,page_id" } }
+          );
+          if (!formResponse.data.page_id) {
+            return res.status(400).json({
+              error: "Form missing page_id",
+              details: "Unable to determine which page this form belongs to. Cannot fetch leads without page_id."
+            });
+          }
+          formsToFetch.push({
+            form_id: formId,
+            name: formResponse.data.name || `Form ${formId}`,
+            page_id: formResponse.data.page_id
+          });
+        } catch (err) {
+          const errorData = err.response?.data?.error;
+          const errorCode = errorData?.code;
+          const errorMsg = errorData?.message || err.message;
+
+          if (errorCode === 190) {
+            return res.status(401).json({
+              error: "Meta Access Token expired or invalid",
+              details: errorMsg,
+              isAuthError: true,
+              instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+            });
+          }
+
+          if (errorCode === 200 || errorCode === 10) {
+            return res.status(403).json({
+              error: "Permission error",
+              details: errorMsg,
+              instruction: "Ensure your System User Token has 'leads_retrieval' and assign the Page to your System User in Meta Business Manager"
+            });
+          }
+
+          return res.status(400).json({
+            error: "Invalid formId",
             details: errorMsg,
-            isAuthError: true,
-            instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+            instruction: "Provide pageId alongside formId when selecting a page (e.g. Integfarms My Health School, MHS Dental Care) to use Page Access Token instead."
           });
         }
-        
-        if (errorCode === 200 || errorCode === 10) {
-          return res.status(403).json({ 
-            error: "Permission error", 
-            details: errorMsg,
-            instruction: "Ensure your System User Token has required permissions"
-          });
-        }
-        
-        console.error(`[Leads API] Error fetching form ${formId}:`, errorMsg);
-        return res.status(400).json({ error: "Invalid formId", details: errorMsg });
       }
     } else if (adId) {
       // Fetch forms associated with ad - use same logic as /forms endpoint

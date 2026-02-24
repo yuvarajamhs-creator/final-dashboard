@@ -161,13 +161,24 @@ async function callMetaInsights(accessToken, adAccountId, opts) {
     const data = res.data;
     return Array.isArray(data.data) ? data.data : [];
   } catch (err) {
-    const code = err?.response?.data?.error?.code;
+    const rawCode = err?.response?.data?.error?.code;
+    const code = rawCode != null ? Number(rawCode) : null;
     const msg = err?.response?.data?.error?.message || err.message;
     if (code === 100) {
       console.warn('[DemographicInsights] Meta API #100 (invalid breakdown) — request skipped or split. Details:', msg);
       return [];
     }
-    console.warn('[DemographicInsights] Meta API error:', code, msg);
+    // #10 = permission (e.g. pages_read_engagement / Region-level) — return empty instead of failing the whole request
+    if (code === 10) {
+      console.warn('[DemographicInsights] Meta API #10 (permission) — returning empty. Details:', msg);
+      return [];
+    }
+    // Fallback: message mentions Region-level or pages_read_engagement → treat as permission, return []
+    if (msg && typeof msg === 'string' && (msg.includes('(#10)') || msg.includes('pages_read_engagement') || msg.includes('Region-level'))) {
+      console.warn('[DemographicInsights] Meta API permission-like error — returning empty. Details:', msg);
+      return [];
+    }
+    console.warn('[DemographicInsights] Meta API error:', rawCode, msg);
     throw err;
   }
 }

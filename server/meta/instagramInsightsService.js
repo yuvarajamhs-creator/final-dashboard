@@ -118,6 +118,43 @@ async function resolveIgAccountsFromPages(pageIds, accessToken) {
 }
 
 /**
+ * Format YYYY-MM-DD to chart label "DD Mon" (e.g. "02 Nov").
+ */
+function formatChartDate(isoDate) {
+  if (!isoDate) return "";
+  const d = new Date(isoDate + "T00:00:00Z");
+  const day = d.getUTCDate();
+  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+  return `${String(day).padStart(2, "0")} ${mon}`;
+}
+
+/**
+ * Build daily views and engagements series from raw Meta insights data.
+ * @param {object[]} data - Meta API response data array (metrics with name views, total_interactions)
+ * @returns {Array<{ date: string, views: number, eng: number }>}
+ */
+function buildDailyViewsEngagements(data) {
+  const byDate = {};
+  for (const m of data || []) {
+    const name = m.name;
+    if (name !== "views" && name !== "total_interactions") continue;
+    const values = m.values || [];
+    for (const v of values) {
+      const endTime = v?.end_time;
+      const dateStr = endTime ? endTime.split("T")[0] : null;
+      if (!dateStr) continue;
+      const num = Number(v?.value) || 0;
+      if (!byDate[dateStr]) byDate[dateStr] = { date: formatChartDate(dateStr), views: 0, eng: 0 };
+      if (name === "views") byDate[dateStr].views += num;
+      else if (name === "total_interactions") byDate[dateStr].eng += num;
+    }
+  }
+  return Object.keys(byDate)
+    .sort()
+    .map((k) => byDate[k]);
+}
+
+/**
  * Extract numeric value from Meta API response. Handles both time_series (values array)
  * and total_value response formats per Meta docs.
  */
@@ -136,6 +173,17 @@ function extractMetricValue(m) {
     sum += Number(v?.value) || 0;
   }
   return sum;
+}
+
+/**
+ * Sum all daily values from follower_count metric.
+ * Use when API returns daily new followers per day (each value = new followers that day).
+ * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} followerCountMetric
+ * @returns {number}
+ */
+function sumFollowerCountValues(followerCountMetric) {
+  const values = followerCountMetric?.values || [];
+  return values.reduce((sum, v) => sum + (Number(v?.value) || 0), 0);
 }
 
 /**
@@ -162,12 +210,36 @@ function computeUnfollowsFromFollowerCountDeltas(followerCountMetric) {
     if (dailyChange > 0) totalFollows += dailyChange;
     else if (dailyChange < 0) totalUnfollows += Math.abs(dailyChange);
   }
+  const sumOfDailyValues = sorted.reduce((s, v) => s + v.value, 0);
+  if (totalFollows === 0 && sumOfDailyValues > 0) {
+    totalFollows = sumOfDailyValues;
+  }
   return {
     total_follows: totalFollows,
     total_unfollows: totalUnfollows,
     net_followers: totalFollows - totalUnfollows,
     date_range_days: sorted.length,
   };
+}
+
+/**
+ * Build daily subscriber change series from follower_count metric (daily deltas).
+ * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} followerCountMetric
+ * @returns {Array<{ date: string, val: number }>}
+ */
+function buildDailySubscriberChange(followerCountMetric) {
+  const values = followerCountMetric?.values || [];
+  if (values.length < 2) return [];
+  const sorted = [...values]
+    .filter((v) => v && (v.value != null) && v.end_time)
+    .map((v) => ({ value: Number(v.value) || 0, date: (v.end_time || "").split("T")[0] }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const out = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const dailyChange = sorted[i].value - sorted[i - 1].value;
+    out.push({ date: formatChartDate(sorted[i].date), val: dailyChange });
+  }
+  return out;
 }
 
 /**
@@ -191,9 +263,13 @@ function normalizeAccountResponse(accountId, data, date) {
     net_followers_delta: 0,
     date_range_days: 0,
     date: date || new Date().toISOString().slice(0, 10),
+    daily_views_engagements: [],
+    daily_subscriber_change: [],
   };
 
   if (!Array.isArray(data)) return out;
+
+  out.daily_views_engagements = buildDailyViewsEngagements(data);
 
   for (const m of data) {
     const name = m.name;
@@ -204,26 +280,29 @@ function normalizeAccountResponse(accountId, data, date) {
       const latest = values.length > 0 ? values[values.length - 1] : null;
       out.follows = latest ? Number(latest.value) || 0 : totalValue != null ? Number(totalValue) : 0;
       const deltaResult = computeUnfollowsFromFollowerCountDeltas(m);
-      out.total_follows_delta = deltaResult.total_follows;
+      // Follows card: use sum of daily values (daily new followers) instead of sum of deltas
+      out.total_follows_delta = sumFollowerCountValues(m);
       out.total_unfollows = deltaResult.total_unfollows;
       out.net_followers_delta = deltaResult.net_followers;
       out.date_range_days = deltaResult.date_range_days;
+      out.daily_subscriber_change = buildDailySubscriberChange(m);
       continue;
     }
 
     const sum = extractMetricValue(m);
+    const hasTotalValue = m.total_value != null;
     switch (name) {
       case "reach":
         out.reached = sum;
         break;
       case "views":
-        out.views = sum;
+        if (hasTotalValue || out.views === 0) out.views = sum;
         break;
       case "impressions":
         if (out.views === 0) out.views = sum;
         break;
       case "total_interactions":
-        out.interactions = sum;
+        if (hasTotalValue || out.interactions === 0) out.interactions = sum;
         break;
       case "profile_views":
         if (out.interactions === 0) out.interactions = sum;
@@ -295,9 +374,10 @@ async function fetchInsightsRequest(igAccountId, since, until, accessToken, metr
 
 /**
  * Fetch insights for a single IG Business Account.
- * Uses two requests to match required formats:
+ * Uses three requests:
  * - Reached/Follows: metric=reach,follower_count&period=day
- * - Views/Interactions: metric=views,total_interactions&metric_type=total_value&period=day
+ * - Views/Interactions totals: metric=views,total_interactions&metric_type=total_value&period=day (for summary cards)
+ * - Views/Interactions daily: metric=views,total_interactions&period=day (for chart time-series)
  *
  * @param {string} igAccountId
  * @param {string} since - YYYY-MM-DD (converted to Unix for Meta API)
@@ -306,14 +386,16 @@ async function fetchInsightsRequest(igAccountId, since, until, accessToken, metr
  * @returns {Promise<{ accountId, reached, follows, views, interactions, date } | null>}
  */
 async function fetchSingleAccountInsights(igAccountId, since, until, accessToken) {
-  const [reachData, viewsData] = await Promise.all([
+  const [reachData, viewsDataTotal, viewsDataDaily] = await Promise.all([
     fetchInsightsRequest(igAccountId, since, until, accessToken, "reach,follower_count"),
     fetchInsightsRequest(igAccountId, since, until, accessToken, "views,total_interactions", "total_value"),
+    fetchInsightsRequest(igAccountId, since, until, accessToken, "views,total_interactions"),
   ]);
 
   const mergedData = [
     ...(Array.isArray(reachData) ? reachData : []),
-    ...(Array.isArray(viewsData) ? viewsData : []),
+    ...(Array.isArray(viewsDataTotal) ? viewsDataTotal : []),
+    ...(Array.isArray(viewsDataDaily) ? viewsDataDaily : []),
   ];
 
   if (mergedData.length === 0) {
@@ -348,9 +430,39 @@ function getDateRangeFromPeriod(period) {
 }
 
 /**
+ * Merge daily chart series from multiple accounts (by date, sum values).
+ * @param {Array<Array<{ date: string, views?: number, eng?: number, val?: number }>>>} seriesList
+ * @param {'views_eng'|'subscriber'} type
+ * @returns {Array<{ date: string, views?: number, eng?: number, val?: number }>}
+ */
+function mergeDailySeries(seriesList, type) {
+  const byDate = {};
+  for (const arr of seriesList) {
+    if (!Array.isArray(arr)) continue;
+    for (const row of arr) {
+      const d = row?.date;
+      if (!d) continue;
+      if (!byDate[d]) {
+        if (type === "views_eng") byDate[d] = { date: d, views: 0, eng: 0 };
+        else byDate[d] = { date: d, val: 0 };
+      }
+      if (type === "views_eng") {
+        byDate[d].views += Number(row.views) || 0;
+        byDate[d].eng += Number(row.eng) || 0;
+      } else {
+        byDate[d].val += Number(row.val) || 0;
+      }
+    }
+  }
+  return Object.keys(byDate)
+    .sort()
+    .map((k) => byDate[k]);
+}
+
+/**
  * Aggregate normalized account data for dashboard.
  *
- * @param {Array<{ accountId, reached, follows, views, interactions }>} accounts
+ * @param {Array<{ accountId, reached, follows, views, interactions, daily_views_engagements, daily_subscriber_change }>} accounts
  * @returns {object}
  */
 function aggregateAccounts(accounts) {
@@ -365,6 +477,15 @@ function aggregateAccounts(accounts) {
   const dateRangeDaysArr = valid.map((a) => a.date_range_days || 0);
   const maxDateRangeDays = dateRangeDaysArr.length > 0 ? Math.max(0, ...dateRangeDaysArr) : 0;
 
+  const dailyViewsEngagements = mergeDailySeries(
+    valid.map((a) => a.daily_views_engagements || []),
+    "views_eng"
+  );
+  const dailySubscriberChange = mergeDailySeries(
+    valid.map((a) => a.daily_subscriber_change || []),
+    "subscriber"
+  );
+
   return {
     totalReached,
     totalFollows,
@@ -374,6 +495,8 @@ function aggregateAccounts(accounts) {
     totalFollowsDelta,
     netFollowersDelta,
     date_range_days: maxDateRangeDays,
+    daily_views_engagements: dailyViewsEngagements,
+    daily_subscriber_change: dailySubscriberChange,
     accounts: valid.map((a) => ({
       accountId: a.accountId,
       reached: a.reached || 0,
@@ -512,7 +635,7 @@ async function fetchInstagramInsights(opts = {}) {
     data: {
       total_views: aggregated.totalViews,
       total_interactions: aggregated.totalInteractions,
-      total_follows: aggregated.totalFollows,
+      total_follows: aggregated.totalFollowsDelta,
       total_reached: aggregated.totalReached,
       total_unfollows: aggregated.totalUnfollows,
       viewsChange: 0,
@@ -522,6 +645,8 @@ async function fetchInstagramInsights(opts = {}) {
       unfollowsChange: 0,
       date_range_days: aggregated.date_range_days,
       period: `${since} to ${until}`,
+      daily_views_engagements: aggregated.daily_views_engagements || [],
+      daily_subscriber_change: aggregated.daily_subscriber_change || [],
     },
     error: null,
   };
@@ -586,6 +711,14 @@ async function fetchInstagramAudienceDemographics(igAccountId, accessToken, time
       return [];
     });
 
+  const isPermissionError = (err) => {
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    if (code === 10 || code === "10") return true;
+    if (msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) return true;
+    return false;
+  };
+
   try {
     const [country_breakdown, city_breakdown, age_breakdown, gender_breakdown] = await Promise.all([
       fetchBreakdown("country"),
@@ -596,6 +729,11 @@ async function fetchInstagramAudienceDemographics(igAccountId, accessToken, time
 
     return { city_breakdown, country_breakdown, age_breakdown, gender_breakdown };
   } catch (err) {
+    if (isPermissionError(err)) {
+      const msg = err?.response?.data?.error?.message || err.message;
+      console.warn("[Instagram Audience Demographics] Permission #10 — returning empty. Details:", msg);
+      return { city_breakdown: [], country_breakdown: [], age_breakdown: [], gender_breakdown: [] };
+    }
     const code = err?.response?.data?.error?.code;
     const msg = err?.response?.data?.error?.message || err.message;
     console.warn("[Instagram Audience Demographics] Error:", code, msg);
@@ -663,7 +801,11 @@ async function fetchReachByFollowType(igAccountId, since, until, accessToken) {
     };
   } catch (err) {
     const code = err?.response?.data?.error?.code;
-    const msg = err?.response?.data?.error?.message || err.message;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      console.warn("[Instagram Reach by Follow Type] Permission #10 — returning empty. Details:", msg);
+      return { total_value: 0, follower_value: 0, non_follower_value: 0 };
+    }
     console.warn("[Instagram Reach by Follow Type] Error:", code, msg);
     throw err;
   }
@@ -683,7 +825,12 @@ async function fetchOnlineFollowers(igAccountId, accessToken) {
     const { data } = await rateLimiter.schedule(() => axios.get(url, { params, timeout: 20000 }));
     return data || { data: [] };
   } catch (err) {
-    const msg = err?.response?.data?.error?.message || err.message;
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      console.warn("[Instagram online_followers] Permission #10 — returning empty. Details:", msg);
+      return { data: [] };
+    }
     console.warn("[Instagram online_followers] Error:", msg);
     throw err;
   }

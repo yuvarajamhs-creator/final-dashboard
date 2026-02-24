@@ -4,7 +4,7 @@ import MultiSelectFilter from '../components/MultiSelectFilter';
 import DateRangeFilter from '../components/DateRangeFilter';
 import './BestPerformingReel.css';
 import {
-    ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell
+    ComposedChart, Bar, BarChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LabelList
 } from 'recharts';
 
 // Helper to get auth token
@@ -58,12 +58,17 @@ const fetchInstagramInsights = async (pageId, from, to) => {
     return res.json();
 };
 
-const fetchInstagramMediaInsights = async (pageId) => {
+const fetchInstagramMediaInsights = async (pageId, opts = {}) => {
     const token = getAuthToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    const params = new URLSearchParams();
+    params.append('pageIds', pageId);
+    if (opts.contentType) params.append('contentType', opts.contentType);
+    if (opts.from) params.append('from', opts.from);
+    if (opts.to) params.append('to', opts.to);
     const res = await fetch(
-        `${API_BASE}/api/meta/instagram/media-insights?pageIds=${encodeURIComponent(pageId)}`,
+        `${API_BASE}/api/meta/instagram/media-insights?${params.toString()}`,
         { headers }
     );
     if (!res.ok) {
@@ -83,11 +88,27 @@ const fetchInstagramAudienceDemographics = async (pageId, timeframe) => {
     );
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || err.details || res.statusText);
+        throw new Error(err.details || err.error || res.statusText);
     }
     const json = await res.json();
     return json.data || null;
 };
+
+const fetchDemographicInsights = async (from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    return await res.json();
+};
+// Media insights fetched without date filter so Top Content by Views is populated (all media, ranked by views).
 
 const getContentDefaultDates = () => {
     const today = new Date();
@@ -125,16 +146,23 @@ export default function BestPerformingReel() {
     const [error, setError] = useState(null);
     const [activeChart, setActiveChart] = useState(null);
 
-    // Live Meta data
+    // Live Meta data: account-level (period) for Views/Reach/Interactions; media for Top Content, Hook Rate, tables
     const [igInsights, setIgInsights] = useState(null);
     const [mediaInsights, setMediaInsights] = useState(null);
-    const [audienceData, setAudienceData] = useState(null);
     const [loadingInsights, setLoadingInsights] = useState(false);
     const [loadingMedia, setLoadingMedia] = useState(false);
-    const [loadingAudience, setLoadingAudience] = useState(false);
     const [insightsError, setInsightsError] = useState(null);
     const [mediaError, setMediaError] = useState(null);
-    const [audienceError, setAudienceError] = useState(null);
+
+    // Audience demographics (Age, Gender, Location) from Instagram engaged_audience_demographics
+    const [demographicsData, setDemographicsData] = useState(null);
+    const [loadingDemographics, setLoadingDemographics] = useState(false);
+    const [igDemographicsError, setIgDemographicsError] = useState(null); // Instagram-only error (no global banner)
+
+    // Ads Insights demographics (Age & Gender grouped) for grouped bar chart like Audience page
+    const [adsDemographicsData, setAdsDemographicsData] = useState(null);
+    const [loadingAdsDemographics, setLoadingAdsDemographics] = useState(false);
+    const [adsDemographicsError, setAdsDemographicsError] = useState(null);
 
     useEffect(() => {
         const loadPages = async () => {
@@ -144,7 +172,7 @@ export default function BestPerformingReel() {
         loadPages();
     }, []);
 
-    // Fetch Instagram account insights (views, reach, interactions) when page + date range selected
+    // Fetch account-level Instagram insights (period-based: Views, Reach, Content interactions for selected date range)
     useEffect(() => {
         if (!reelPage || !contentFilters.startDate || !contentFilters.endDate) {
             setIgInsights(null);
@@ -155,19 +183,13 @@ export default function BestPerformingReel() {
         setLoadingInsights(true);
         setInsightsError(null);
         fetchInstagramInsights(reelPage, contentFilters.startDate, contentFilters.endDate)
-            .then((data) => {
-                if (!cancelled) setIgInsights(data);
-            })
-            .catch((err) => {
-                if (!cancelled) setInsightsError(err?.message || 'Failed to load insights');
-            })
-            .finally(() => {
-                if (!cancelled) setLoadingInsights(false);
-            });
+            .then((data) => { if (!cancelled) setIgInsights(data); })
+            .catch((err) => { if (!cancelled) setInsightsError(err?.message || 'Failed to load insights'); })
+            .finally(() => { if (!cancelled) setLoadingInsights(false); });
         return () => { cancelled = true; };
     }, [reelPage, contentFilters.startDate, contentFilters.endDate]);
 
-    // Fetch media insights (reels with views, likes, comments, hook rate) for top content
+    // Fetch media insights. For Stories, skip date filter so we get latest available (API only returns stories for ~24–48h).
     useEffect(() => {
         if (!reelPage) {
             setMediaInsights(null);
@@ -177,7 +199,12 @@ export default function BestPerformingReel() {
         let cancelled = false;
         setLoadingMedia(true);
         setMediaError(null);
-        fetchInstagramMediaInsights(reelPage)
+        const opts = { contentType: activeTab };
+        if (contentFilters.startDate && contentFilters.endDate && activeTab !== 'stories') {
+            opts.from = contentFilters.startDate;
+            opts.to = contentFilters.endDate;
+        }
+        fetchInstagramMediaInsights(reelPage, opts)
             .then((data) => {
                 if (!cancelled) setMediaInsights(data);
             })
@@ -188,32 +215,56 @@ export default function BestPerformingReel() {
                 if (!cancelled) setLoadingMedia(false);
             });
         return () => { cancelled = true; };
-    }, [reelPage]);
+    }, [reelPage, activeTab, contentFilters.startDate, contentFilters.endDate]);
 
-    // Fetch audience demographics (age, gender, location) when page selected
+    // Map time range to demographics API timeframe (this_week | this_month | last_90_days)
+    const demographicsTimeframe = contentDateRange === 'last_7_days' || contentDateRange === 'this_week'
+        ? 'this_week'
+        : contentDateRange === 'last_90_days'
+            ? 'last_90_days'
+            : 'this_month';
+
+    // Fetch Instagram audience demographics (Age, Gender, Location) for cards and charts
     useEffect(() => {
         if (!reelPage) {
-            setAudienceData(null);
-            setAudienceError(null);
+            setDemographicsData(null);
+            setIgDemographicsError(null);
             return;
         }
-        const start = new Date(contentFilters.startDate);
-        const end = new Date(contentFilters.endDate);
-        const days = Math.round((end - start) / (1000 * 60 * 60 * 24));
-        const timeframe = days <= 8 ? 'this_week' : 'this_month';
         let cancelled = false;
-        setLoadingAudience(true);
-        setAudienceError(null);
-        fetchInstagramAudienceDemographics(reelPage, timeframe)
-            .then((data) => { if (!cancelled) setAudienceData(data); })
-            .catch((err) => {
-                if (!cancelled) setAudienceError(err?.message || 'Failed to load audience');
+        setDemographicsData(null); // clear previous page's data so UI doesn't show stale Age/Gender/Location
+        setLoadingDemographics(true);
+        setIgDemographicsError(null);
+        fetchInstagramAudienceDemographics(reelPage, demographicsTimeframe)
+            .then((data) => {
+                if (!cancelled) {
+                    setDemographicsData(data);
+                    setIgDemographicsError(null);
+                }
             })
-            .finally(() => {
-                if (!cancelled) setLoadingAudience(false);
-            });
+            .catch((err) => {
+                if (!cancelled) setIgDemographicsError(err?.message || 'Failed to load Instagram demographics');
+            })
+            .finally(() => { if (!cancelled) setLoadingDemographics(false); });
         return () => { cancelled = true; };
-    }, [reelPage, contentFilters.startDate, contentFilters.endDate]);
+    }, [reelPage, demographicsTimeframe]);
+
+    // Fetch Ads Insights demographics (age_gender_breakdown) for Age & Gender Distribution chart (same as Audience page)
+    useEffect(() => {
+        if (!contentFilters.startDate || !contentFilters.endDate) {
+            setAdsDemographicsData(null);
+            setAdsDemographicsError(null);
+            return;
+        }
+        let cancelled = false;
+        setLoadingAdsDemographics(true);
+        setAdsDemographicsError(null);
+        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate)
+            .then((payload) => { if (!cancelled) setAdsDemographicsData(payload); })
+            .catch((err) => { if (!cancelled) setAdsDemographicsError(err?.message || 'Failed to load Ads demographics'); })
+            .finally(() => { if (!cancelled) setLoadingAdsDemographics(false); });
+        return () => { cancelled = true; };
+    }, [contentFilters.startDate, contentFilters.endDate]);
 
     const handleContentDateRangeApply = (payload) => {
         if (!payload.start_date || !payload.end_date) return;
@@ -248,94 +299,163 @@ export default function BestPerformingReel() {
     };
 
     // --- DERIVED METRICS FROM LIVE META DATA ---
-    const reelsFromMedia = (mediaInsights?.media || []).filter(
-        (m) => m.product_type === 'REELS' && m.availability === 'available' && (m.video_views ?? 0) >= 0
+    const byContentType = mediaInsights?.byContentType || {};
+    const aggForTab = byContentType[activeTab] || {};
+    const mediaForTab = (mediaInsights?.media || []).filter((m) => {
+        const pt = m.product_type || (m.media_type === 'VIDEO' && (m.permalink || '').includes('/reel/') ? 'REELS' : 'FEED');
+        if (activeTab === 'all') return true;
+        if (activeTab === 'posts') return pt === 'FEED';
+        if (activeTab === 'stories') return pt === 'STORY';
+        if (activeTab === 'reels') return pt === 'REELS';
+        return true;
+    });
+    const reelsFromMedia = mediaForTab.filter(
+        (m) => (m.product_type === 'REELS' || (m.media_type === 'VIDEO' && (m.permalink || '').includes('/reel/'))) && (m.availability === 'available' || m.views > 0) && ((m.video_views ?? m.views ?? 0) >= 0)
     );
-    const totalViewsLive = igInsights?.totalViews ?? 0;
-    const totalReachLive = igInsights?.totalReached ?? 0;
-    const totalInteractionsLive = igInsights?.totalInteractions ?? 0;
+    // Prefer period-based totals from account-level insights (matches Meta Content overview)
+    const totalViewsLive = (igInsights?.totalViews ?? igInsights?.total_views) != null ? (igInsights.totalViews ?? igInsights.total_views) : (aggForTab.views ?? 0);
+    const totalReachLive = (igInsights?.totalReached ?? igInsights?.total_reached) != null ? (igInsights.totalReached ?? igInsights.total_reached) : (aggForTab.reach ?? 0);
+    const totalInteractionsLive = (igInsights?.totalInteractions ?? igInsights?.total_interactions) != null ? (igInsights.totalInteractions ?? igInsights.total_interactions) : (aggForTab.total_interactions ?? 0);
     const engagementRateLive = totalReachLive > 0
         ? Math.round((totalInteractionsLive / totalReachLive) * 10000) / 100
         : 0;
     const totalWatchTimeSeconds = reelsFromMedia.reduce(
-        (sum, m) => sum + (Number(m.video_avg_time_watched || 0) * Number(m.video_views || 0)),
+        (sum, m) => sum + (Number(m.video_avg_time_watched || 0) * Number(m.video_views || m.views || 0)),
         0
     );
-    const watchTimeDisplay = totalWatchTimeSeconds >= 3600
-        ? `${(totalWatchTimeSeconds / 3600).toFixed(1)}K h`
-        : totalWatchTimeSeconds >= 60
-            ? `${(totalWatchTimeSeconds / 60).toFixed(0)}K m`
-            : `${totalWatchTimeSeconds} s`;
-    const hookRates = reelsFromMedia.map((m) => m.hook_rate).filter((r) => r != null && !Number.isNaN(r));
-    const median = (arr) => {
-        if (!arr.length) return 0;
-        const s = [...arr].sort((a, b) => a - b);
-        const m = Math.floor(s.length / 2);
-        return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-    };
-    const medianHookRate = median(hookRates);
-    const contentWinRateLive = hookRates.length > 0
-        ? Math.round((hookRates.filter((r) => r >= medianHookRate).length / hookRates.length) * 100)
+    const hours = totalWatchTimeSeconds / 3600;
+    const watchTimeDisplay = hours >= 1e6
+        ? `${(hours / 1e6).toFixed(1)}M h`
+        : hours >= 1000
+            ? `${(hours / 1000).toFixed(1)}K h`
+            : hours >= 1
+                ? `${hours.toFixed(1)} h`
+                : totalWatchTimeSeconds >= 60
+                    ? `${(totalWatchTimeSeconds / 60).toFixed(0)} m`
+                    : `${Math.round(totalWatchTimeSeconds)} s`;
+    const avgHookRateLive = aggForTab.hook_rate != null ? aggForTab.hook_rate : (reelsFromMedia.length > 0
+        ? Math.round((reelsFromMedia.map((m) => m.hook_rate).filter((r) => r != null && !Number.isNaN(r)).reduce((a, b) => a + b, 0) / reelsFromMedia.filter((m) => m.hook_rate != null).length) * 100) / 100
+        : null);
+    const contentWinRateLive = aggForTab.content_win_rate ?? 0;
+
+    // Demographics: prefer Instagram; fall back to Ads Insights (age_gender, region, country) when no Instagram
+    const ageBreakdown = demographicsData?.age_breakdown ?? [];
+    const genderBreakdown = demographicsData?.gender_breakdown ?? [];
+    const countryBreakdown = demographicsData?.country_breakdown ?? [];
+    const cityBreakdown = demographicsData?.city_breakdown ?? [];
+    // Location card: prefer city count (city-level) when available, else country count, else Ads region/country
+    const locationBreakdown = cityBreakdown.length > 0 ? cityBreakdown : countryBreakdown;
+
+    // Fallback counts from Ads Insights when Instagram demographics missing (e.g. page has no IG linked)
+    const adsAgeGender = adsDemographicsData?.age_gender_breakdown ?? [];
+    const adsRegionBreakdown = adsDemographicsData?.region_breakdown ?? [];
+    const adsCountryBreakdown = adsDemographicsData?.country_breakdown ?? [];
+    const ageGroupsCountFromAds = adsAgeGender.length > 0
+        ? new Set(adsAgeGender.map((r) => r.age).filter(Boolean)).size
         : 0;
-    const avgHookRateLive = hookRates.length > 0
-        ? Math.round((hookRates.reduce((a, b) => a + b, 0) / hookRates.length) * 100) / 100
-        : null;
+    const genderGroupsCountFromAds = adsAgeGender.length > 0
+        ? new Set(adsAgeGender.map((r) => (r.gender || '').toLowerCase()).filter(Boolean)).size
+        : 0;
+    const locationCountFromAds = adsRegionBreakdown.length > 0 ? adsRegionBreakdown.length : adsCountryBreakdown.length;
 
-    const ageBreakdown = audienceData?.age_breakdown || [];
-    const genderBreakdown = audienceData?.gender_breakdown || [];
-    const locationBreakdown = (audienceData?.country_breakdown || []).slice(0, 10);
-
-    const topContentByViews = [...reelsFromMedia]
-        .sort((a, b) => (b.video_views || 0) - (a.video_views || 0))
+    const mediaToTableRow = (m, idx, typeLabel) => ({
+        id: m.media_id || idx,
+        url: m.permalink || '#',
+        title: (m.caption && m.caption.slice(0, 50)) || `${typeLabel} ${idx + 1}`,
+        type: typeLabel,
+        views: m.views || m.video_views || 0,
+        watch: Math.round((Number(m.video_avg_time_watched || 0) * Number(m.video_views || m.views || 0))),
+        likes: m.likes || 0,
+        shares: 0,
+        comments: m.comments || 0,
+        rate: m.hook_rate != null ? `${m.hook_rate}%` : 'N/A',
+        avgView: m.video_avg_time_watched != null ? m.video_avg_time_watched.toFixed(2) : 'N/A',
+        subChange: 0,
+        imgColor: ['#fb923c', '#fdba74', '#fca5a5', '#86efac', '#fde047'][idx % 5],
+        permalink: m.permalink,
+        timestamp: m.timestamp,
+    });
+    const livePostsList = mediaForTab.filter((m) => (m.product_type || 'FEED') === 'FEED').map((m, idx) => mediaToTableRow(m, idx, 'Post'));
+    const liveStoriesList = mediaForTab.filter((m) => (m.product_type || '') === 'STORY').map((m, idx) => mediaToTableRow(m, idx, 'Story'));
+    const liveReelsList = reelsFromMedia.map((m, idx) => mediaToTableRow(m, idx, 'Reel'));
+    const liveAllList = mediaForTab.map((m, idx) => {
+        const typeLabel = (m.product_type || 'FEED') === 'REELS' ? 'Reel' : (m.product_type || '') === 'STORY' ? 'Story' : 'Post';
+        return mediaToTableRow(m, idx, typeLabel);
+    });
+    const topContentByViews = [...mediaForTab]
+        .sort((a, b) => (b.views || b.video_views || 0) - (a.views || a.video_views || 0))
         .slice(0, 20)
         .map((m, idx) => ({
             id: m.media_id || idx,
-            title: (m.caption && m.caption.slice(0, 50)) || `Reel ${idx + 1}`,
+            title: (m.caption && m.caption.slice(0, 50)) || `Content ${idx + 1}`,
             timestamp: m.timestamp,
-            views: m.video_views || 0,
+            thumbnail_url: m.thumbnail_url || m.media_url || null,
+            views: m.views || m.video_views || 0,
             likes: m.likes || 0,
             comments: m.comments || 0,
-            shares: 0,
+            shares: m.shares ?? 0,
+            saved: m.saved ?? 0,
+            follows: m.follows ?? 0,
             permalink: m.permalink,
         }));
 
-    const loadingAny = loadingInsights || loadingMedia || loadingAudience;
-    const hasLiveData = reelPage && (igInsights || mediaInsights || audienceData);
-    const displayError = insightsError || mediaError || audienceError || error;
+    const loadingAny = loadingInsights || loadingMedia;
+    const hasLiveData = reelPage && (igInsights || mediaInsights);
+    const displayError = insightsError || mediaError || error;
 
-    // 1. Chart Data (Views vs Engagements) - use live total when available
-    const viewsData = [
-        { date: '02 Nov', views: 2400, eng: 40 },
-        { date: '03 Nov', views: 2900, eng: 35 },
-        { date: '04 Nov', views: 3500, eng: 60 },
-        { date: '05 Nov', views: 3400, eng: 55 },
-        { date: '06 Nov', views: 3200, eng: 50 },
-        { date: '07 Nov', views: 3100, eng: 45 },
-        { date: '08 Nov', views: 2200, eng: 30 },
-        { date: '09 Nov', views: 2300, eng: 40 },
-        { date: '10 Nov', views: 3600, eng: 65 },
-        { date: '11 Nov', views: 3000, eng: 45 },
-        { date: '12 Nov', views: 3000, eng: 50 },
-        { date: '13 Nov', views: 3100, eng: 60 },
-        { date: '14 Nov', views: 2500, eng: 55 },
-        { date: '15 Nov', views: 1800, eng: 40 },
-        { date: '16 Nov', views: 2000, eng: 35 },
-        { date: '17 Nov', views: 2900, eng: 90 },
-        { date: '18 Nov', views: 2800, eng: 20 },
-        { date: '19 Nov', views: 2700, eng: 25 },
-        { date: '20 Nov', views: 2750, eng: 30 },
-        { date: '21 Nov', views: 2200, eng: 25 },
-        { date: '22 Nov', views: 1700, eng: 35 },
-        { date: '23 Nov', views: 1900, eng: 40 },
-        { date: '24 Nov', views: 2600, eng: 35 },
-        { date: '25 Nov', views: 2500, eng: 30 },
-        { date: '26 Nov', views: 2400, eng: 20 },
-        { date: '27 Nov', views: 2100, eng: 25 },
-        { date: '28 Nov', views: 1900, eng: 30 },
-    ];
+    // Helper: format YYYY-MM-DD to chart label "DD Mon"
+    const formatChartDate = (isoDate) => {
+        if (!isoDate) return '';
+        const d = new Date(isoDate + 'T00:00:00Z');
+        const day = d.getUTCDate();
+        const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+        return `${String(day).padStart(2, '0')} ${mon}`;
+    };
 
-    // 2. Subscriber Change Data
-    const subData = [
+    // Build daily views/engagements from media list (by post date) when API daily series is empty
+    const buildViewsDataFromMedia = (mediaList, startDate, endDate) => {
+        if (!Array.isArray(mediaList) || !startDate || !endDate) return [];
+        const start = new Date(startDate + 'T00:00:00Z').getTime();
+        const end = new Date(endDate + 'T23:59:59Z').getTime();
+        const byDate = {};
+        mediaList.forEach((m) => {
+            const ts = m.timestamp;
+            if (!ts) return;
+            const t = new Date(ts).getTime();
+            if (t < start || t > end) return;
+            const dateStr = ts.split('T')[0];
+            if (!byDate[dateStr]) byDate[dateStr] = { date: formatChartDate(dateStr), views: 0, eng: 0 };
+            byDate[dateStr].views += Number(m.views ?? m.video_views ?? 0) || 0;
+            byDate[dateStr].eng += Number(m.total_interactions ?? (m.likes || 0) + (m.comments || 0) + (m.saved || 0) + (m.shares || 0)) || 0;
+        });
+        return Object.keys(byDate).sort().map((k) => byDate[k]);
+    };
+
+    // 1. Chart Data (Views vs Engagements) – API first; fallback: derive from media by post date; then single-point from totals
+    const dailyViewsEngagements = igInsights?.daily_views_engagements ?? igInsights?.data?.daily_views_engagements;
+    const viewsDataFromApi = Array.isArray(dailyViewsEngagements) && dailyViewsEngagements.length > 0 ? dailyViewsEngagements : [];
+    const viewsDataFromMedia = viewsDataFromApi.length === 0 && contentFilters?.startDate && contentFilters?.endDate
+        ? buildViewsDataFromMedia(mediaInsights?.media ?? [], contentFilters.startDate, contentFilters.endDate)
+        : [];
+    const totalsFallback =
+        viewsDataFromApi.length === 0 &&
+        viewsDataFromMedia.length === 0 &&
+        reelPage &&
+        (igInsights?.totalViews != null || igInsights?.total_views != null || igInsights?.data?.total_views != null)
+            ? (() => {
+                const totalViews = Number(igInsights?.totalViews ?? igInsights?.total_views ?? igInsights?.data?.total_views ?? 0);
+                const totalEng = Number(igInsights?.totalInteractions ?? igInsights?.total_interactions ?? igInsights?.data?.total_interactions ?? 0);
+                if (totalViews === 0 && totalEng === 0) return [];
+                const mid = contentFilters?.startDate && contentFilters?.endDate
+                    ? formatChartDate(contentFilters.startDate)
+                    : formatChartDate(new Date(Date.now() - 86400000 * 3).toISOString().slice(0, 10));
+                return [{ date: mid, views: totalViews, eng: totalEng }];
+            })()
+            : [];
+    const viewsData = viewsDataFromApi.length > 0 ? viewsDataFromApi : (viewsDataFromMedia.length > 0 ? viewsDataFromMedia : totalsFallback);
+
+    // 2. Subscriber Change Data – Meta live data when available
+    const SAMPLE_SUB_DATA = [
         { date: '02 Nov', val: 15 },
         { date: '04 Nov', val: 18 },
         { date: '06 Nov', val: 14 },
@@ -358,6 +478,10 @@ export default function BestPerformingReel() {
         { date: '05 Dec', val: 6 },
         { date: '06 Dec', val: 10 },
     ];
+    const subData =
+        Array.isArray(igInsights?.data?.daily_subscriber_change) && igInsights.data.daily_subscriber_change.length > 0
+            ? igInsights.data.daily_subscriber_change
+            : SAMPLE_SUB_DATA;
 
     // Chart Data for new KPIs
     const watchTimeData = [
@@ -402,39 +526,72 @@ export default function BestPerformingReel() {
         : ageData;
     const genderChartData = hasLiveData && genderBreakdown.length > 0
         ? genderBreakdown.map((r, i) => ({ name: r.gender || String(r.name || 'N/A'), value: r.value, color: COLORS[i % COLORS.length] }))
-        : genderData;
-    const locationChartData = hasLiveData && locationBreakdown.length > 0
-        ? locationBreakdown.map((r, i) => ({ location: r.country || r.location || 'N/A', value: r.value, color: COLORS[i % COLORS.length] }))
+        : [];
+    const locationChartData = hasLiveData && countryBreakdown.length > 0
+        ? countryBreakdown.map((r, i) => ({ location: r.country || r.location || 'N/A', value: r.value, color: COLORS[i % COLORS.length] }))
         : locationData;
 
-    // 3. DATASETS FOR TABS
-    const videoList = [
-        { id: 1, url: 'https://example.com/video_51', title: 'Example Tutorial Video 51', type: 'videoOnDemand', views: 12970, watch: 48539, likes: 89, shares: 215, comments: 4, rate: '2.37%', avgView: '27.06', subChange: 85, imgColor: '#fb923c' },
-        { id: 2, url: 'https://example.com/video_30', title: 'Sample Video Content 30', type: 'videoOnDemand', views: 9026, watch: 18216, likes: 51, shares: 60, comments: 1, rate: '1.24%', avgView: '36.07', subChange: 53, imgColor: '#fdba74' },
-        { id: 3, url: 'https://example.com/shorts_64', title: 'Sample Educational Content 64', type: 'shorts', views: 8942, watch: 1647, likes: 51, shares: 6, comments: 0, rate: '0.64%', avgView: '135.47', subChange: 17, imgColor: '#fca5a5' },
-        { id: 4, url: 'https://example.com/video_127', title: 'Sample Presentation Video 127', type: 'videoOnDemand', views: 3325, watch: 8105, likes: 31, shares: 25, comments: 4, rate: '1.80%', avgView: '24.34', subChange: 23, imgColor: '#86efac' },
-        { id: 5, url: 'https://example.com/shorts_97', title: 'Sample Presentation Video 97', type: 'shorts', views: 2362, watch: 1940, likes: 5, shares: 4, comments: 0, rate: '0.38%', avgView: '207.00', subChange: 0, imgColor: '#fde047' },
-    ];
+    // Top towns/cities (city-level) from Instagram audience for Location Distribution — percentages, sorted, top 10
+    const topTownsCitiesDisplay = (() => {
+        const rows = cityBreakdown || [];
+        if (!rows.length) return [];
+        const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
+        if (total === 0) return [];
+        return rows
+            .map((r) => ({
+                name: r.city || 'Unknown',
+                val: Math.round(((Number(r.value) || 0) / total) * 1000) / 10,
+            }))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+    })();
 
-    const postsList = [
-        { id: 1, url: 'https://example.com/post_101', title: 'New Product Announcement', type: 'Post', views: 15400, watch: 0, likes: 450, shares: 120, comments: 34, rate: '4.1%', avgView: 'N/A', subChange: 45, imgColor: '#60a5fa' },
-        { id: 2, url: 'https://example.com/post_102', title: 'Community Update - November', type: 'Post', views: 11200, watch: 0, likes: 320, shares: 80, comments: 12, rate: '3.5%', avgView: 'N/A', subChange: 22, imgColor: '#93c5fd' },
-        { id: 3, url: 'https://example.com/post_103', title: 'Holiday Sale Teaser', type: 'Post', views: 22000, watch: 0, likes: 890, shares: 340, comments: 150, rate: '8.2%', avgView: 'N/A', subChange: 110, imgColor: '#3b82f6' },
-        { id: 4, url: 'https://example.com/post_104', title: 'Behind the Scenes Photo', type: 'Post', views: 9800, watch: 0, likes: 210, shares: 40, comments: 8, rate: '2.8%', avgView: 'N/A', subChange: 12, imgColor: '#2563eb' },
-    ];
+    // Top regions or countries from Ads Insights (fallback when no Instagram city data)
+    const topRegionsOrCountriesFromAds = (() => {
+        const rows = adsRegionBreakdown.length > 0 ? adsRegionBreakdown : adsCountryBreakdown;
+        if (!rows.length) return { list: [], label: null, subtitle: null };
+        const total = rows.reduce((s, r) => s + (Number(r.reach) || Number(r.impressions) || 0), 0);
+        if (total === 0) return { list: [], label: null, subtitle: null };
+        const key = adsRegionBreakdown.length > 0 ? 'region' : 'country';
+        const list = rows
+            .map((r) => ({
+                name: r[key] || 'Unknown',
+                val: Math.round(((Number(r.reach) || Number(r.impressions) || 0) / total) * 1000) / 10,
+            }))
+            .sort((a, b) => b.val - a.val)
+            .slice(0, 10);
+        const label = adsRegionBreakdown.length > 0 ? 'Top regions' : 'Top countries';
+        const subtitle = 'From Meta Ads Insights (region/country-level)';
+        return { list, label, subtitle };
+    })();
 
-    const storiesList = [
-        { id: 1, url: 'https://example.com/story_501', title: 'Daily Vlog: Morning Coffee', type: 'Story', views: 5600, watch: 2800, likes: 120, shares: 10, comments: 2, rate: '2.1%', avgView: '85.5', subChange: 5, imgColor: '#a78bfa' },
-        { id: 2, url: 'https://example.com/story_502', title: 'Q&A Session Highlights', type: 'Story', views: 4800, watch: 2400, likes: 95, shares: 12, comments: 8, rate: '2.0%', avgView: '78.2', subChange: 8, imgColor: '#c4b5fd' },
-        { id: 3, url: 'https://example.com/story_503', title: 'Quick Tip #4', type: 'Story', views: 6200, watch: 3100, likes: 150, shares: 25, comments: 5, rate: '2.9%', avgView: '90.1', subChange: 15, imgColor: '#8b5cf6' },
-    ];
+    // Age & Gender Distribution (Ads Insights) — grouped bar chart like Audience page
+    const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const ageGenderChartData = (() => {
+        const rows = adsDemographicsData?.age_gender_breakdown || [];
+        if (!rows.length) return null;
+        const byAge = {};
+        AGE_BUCKETS.forEach((b) => { byAge[b] = { age: b, men: 0, women: 0 }; });
+        rows.forEach((r) => {
+            const age = (r.age || '').trim() || 'unknown';
+            const bucket = AGE_BUCKETS.find((b) => b === age) || (AGE_BUCKETS.includes(age) ? age : null);
+            if (!bucket) return;
+            const val = Number(r.reach) || Number(r.impressions) || 0;
+            const g = (r.gender || '').toLowerCase();
+            if (g === 'male' || g === 'm') byAge[bucket].men += val;
+            else if (g === 'female' || g === 'f') byAge[bucket].women += val;
+        });
+        return AGE_BUCKETS.map((b) => byAge[b]);
+    })();
+    const ageGenderChartDataWithTotal = (() => {
+        if (!ageGenderChartData || !ageGenderChartData.length) return null;
+        const totalMen = ageGenderChartData.reduce((s, row) => s + (Number(row.men) || 0), 0);
+        const totalWomen = ageGenderChartData.reduce((s, row) => s + (Number(row.women) || 0), 0);
+        return [...ageGenderChartData, { age: 'All Ages', men: totalMen, women: totalWomen }];
+    })();
 
-    const reelsList = [
-        { id: 1, url: 'https://example.com/reel_201', title: 'Best Reel Highlights 2024', type: 'Reel', views: 18500, watch: 42000, likes: 620, shares: 95, comments: 42, rate: '5.2%', avgView: '135.2', subChange: 128, imgColor: '#ec4899' },
-        { id: 2, url: 'https://example.com/reel_202', title: 'Tutorial Reel - Quick Tips', type: 'Reel', views: 12200, watch: 28800, likes: 380, shares: 58, comments: 28, rate: '3.8%', avgView: '142.0', subChange: 76, imgColor: '#f472b6' },
-        { id: 3, url: 'https://example.com/reel_203', title: 'Behind the Scenes Reel', type: 'Reel', views: 9600, watch: 19200, likes: 290, shares: 44, comments: 15, rate: '3.1%', avgView: '98.5', subChange: 52, imgColor: '#fb7185' },
-        { id: 4, url: 'https://example.com/reel_204', title: 'Product Launch Reel', type: 'Reel', views: 21400, watch: 51200, likes: 890, shares: 132, comments: 68, rate: '6.4%', avgView: '168.3', subChange: 195, imgColor: '#db2777' },
-    ];
+    // 3. CONTENT LIST FOR TABS — live data only; no sample/placeholder when no page or no media
+    const emptyList = [];
 
     // Totals for the table footer (Dynamic based on selected data)
     const calculateTotals = (data) => {
@@ -450,23 +607,34 @@ export default function BestPerformingReel() {
         }), { views: 0, watch: 0, likes: 0, shares: 0, comments: 0, subChange: 0 });
     };
 
-    // LOGIC TO SWITCH CONTENT
-    let currentList = videoList;
-    let tableTitle = 'Video Performance';
+    // LOGIC TO SWITCH CONTENT — live data only when page selected and media available
+    let currentList = emptyList;
+    let tableTitle = 'All Content Performance';
     let animClass = 'anim-fade-in';
 
-    if (activeTab === 'posts') {
-        currentList = postsList;
-        tableTitle = 'Posts Performance';
-        animClass = 'anim-slide-in';
-    } else if (activeTab === 'stories') {
-        currentList = storiesList;
-        tableTitle = 'Stories Performance';
-        animClass = 'anim-zoom-in';
-    } else if (activeTab === 'reels') {
-        currentList = reelsList;
-        tableTitle = 'Reels Performance';
-        animClass = 'anim-fade-in';
+    if (hasLiveData && mediaInsights?.media?.length > 0) {
+        if (activeTab === 'posts') {
+            currentList = livePostsList;
+            tableTitle = 'Posts Performance';
+            animClass = 'anim-slide-in';
+        } else if (activeTab === 'stories') {
+            currentList = liveStoriesList;
+            tableTitle = 'Stories Performance';
+            animClass = 'anim-zoom-in';
+        } else if (activeTab === 'reels') {
+            currentList = liveReelsList;
+            tableTitle = 'Reels Performance';
+            animClass = 'anim-fade-in';
+        } else {
+            currentList = liveAllList;
+            tableTitle = 'All Content Performance';
+            animClass = 'anim-fade-in';
+        }
+    } else {
+        if (activeTab === 'posts') tableTitle = 'Posts Performance';
+        else if (activeTab === 'stories') tableTitle = 'Stories Performance';
+        else if (activeTab === 'reels') tableTitle = 'Reels Performance';
+        else tableTitle = 'All Content Performance';
     }
 
     const totals = calculateTotals(currentList);
@@ -494,7 +662,7 @@ export default function BestPerformingReel() {
         return `${day} ${month} ${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
     };
 
-    const contentListForTopContent = (activeTab === 'all' || activeTab === 'reels') && hasLiveData && topContentByViews.length > 0
+    const contentListForTopContent = hasLiveData && topContentByViews.length > 0
         ? topContentByViews
         : currentList;
 
@@ -502,6 +670,11 @@ export default function BestPerformingReel() {
     const scrollTopContent = () => {
         if (topContentScrollRef.current) {
             topContentScrollRef.current.scrollBy({ left: 280, behavior: 'smooth' });
+        }
+    };
+    const scrollTopContentBack = () => {
+        if (topContentScrollRef.current) {
+            topContentScrollRef.current.scrollBy({ left: -280, behavior: 'smooth' });
         }
     };
 
@@ -522,14 +695,12 @@ export default function BestPerformingReel() {
                             </label>
                             <button
                                 type="button"
-                                className="best-reel-filter-input d-flex align-items-center gap-2 px-3 py-2 border shadow-sm cursor-pointer"
+                                className={`best-reel-filter-trigger ${showContentDateRangeFilter ? 'open' : ''}`}
                                 onClick={() => setShowContentDateRangeFilter(true)}
                             >
                                 <i className="far fa-calendar-alt text-secondary opacity-75"></i>
-                                <span className="fw-medium small text-dark flex-grow-1 text-center" style={{ fontSize: '0.8rem' }}>
-                                    {getContentDateRangeDisplay()}
-                                </span>
-                                <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                                <span className="best-reel-filter-trigger-text">{getContentDateRangeDisplay()}</span>
+                                <i className={`fas fa-chevron-down best-reel-filter-arrow ${showContentDateRangeFilter ? 'rotated' : ''}`}></i>
                             </button>
                         </div>
                         <div className="col-12 col-md-auto">
@@ -539,7 +710,7 @@ export default function BestPerformingReel() {
                                 options={platformFilterOptions}
                                 selectedValues={platformFilters.map((p) => p.id)}
                                 onChange={(selectedIds) => setPlatformFilters(platformFilterOptions.filter((p) => selectedIds.includes(p.id)))}
-                                placeholder="Select platform"
+                                placeholder="All Platforms"
                                 getOptionLabel={(opt) => opt.name}
                                 getOptionValue={(opt) => opt.id}
                             />
@@ -554,6 +725,7 @@ export default function BestPerformingReel() {
                                 placeholder="Select a Page"
                                 getOptionLabel={(opt) => opt.name}
                                 getOptionValue={(opt) => opt.id}
+                                singleSelect
                             />
                         </div>
                     </div>
@@ -571,58 +743,61 @@ export default function BestPerformingReel() {
             {displayError && (
                 <div className="alert alert-warning alert-dismissible fade show mb-3" role="alert">
                     <strong>{displayError}</strong>
-                    <button type="button" className="btn-close" onClick={() => { setInsightsError(null); setMediaError(null); setAudienceError(null); setError(null); }} aria-label="Close"></button>
+                    <button type="button" className="btn-close" onClick={() => { setInsightsError(null); setMediaError(null); setError(null); }} aria-label="Close"></button>
                 </div>
             )}
 
             {!reelPage && (
                 <div className="alert alert-info mb-3">
-                    Select a page (e.g. &quot;Doctor Farmer&quot;) from the PAGE filter above to load metrics, audience insights, and top content from Meta.
+                    Select a page (e.g. &quot;Doctor Farmer&quot;) from the PAGE filter above to load metrics and top content from Meta.
                 </div>
             )}
 
-            {reelPage && loadingAny && (
+            {reelPage && loadingInsights && (
                 <div className="text-muted mb-3"><i className="fas fa-spinner fa-spin me-2"></i>Loading live Meta data…</div>
+            )}
+            {reelPage && !loadingInsights && loadingMedia && (
+                <div className="text-muted mb-3 small"><i className="fas fa-spinner fa-spin me-2"></i>Loading top content…</div>
             )}
 
             {/* --- WRAPPER FOR ANIMATED CONTENT --- */}
             <div key={activeTab} className={animClass}>
 
-                {/* --- SUMMARY METRICS (live when page selected) --- */}
+                {/* --- SUMMARY METRICS (blank for Views/Reach/Content interactions/Content Win Rate when no page selected) --- */}
                 <div className="summary-metrics-row">
                     <div className="summary-metric-item">
                         <div className="summary-label">Views <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">
-                            {hasLiveData ? formatCount(totalViewsLive) : (totals.views / 1000).toFixed(1) + 'k'}
-                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 4.3%</span>}
+                            {!reelPage ? '—' : hasLiveData ? formatCount(totalViewsLive) : (totals.views / 1000).toFixed(1) + 'k'}
+                            {reelPage && !hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 4.3%</span>}
                         </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Reach <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">
-                            {hasLiveData ? formatCount(totalReachLive) : '4M'}
-                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 11.6%</span>}
+                            {!reelPage ? '—' : hasLiveData ? formatCount(totalReachLive) : '4M'}
+                            {reelPage && !hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 11.6%</span>}
                         </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Content interactions <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">
-                            {hasLiveData ? formatCount(totalInteractionsLive) : (totals.shares + totals.likes + totals.comments)}
-                            {!hasLiveData && <span className="summary-trend trend-down"><i className="fas fa-arrow-down"></i> 29.2%</span>}
+                            {!reelPage ? '—' : hasLiveData ? formatCount(totalInteractionsLive) : (totals.shares + totals.likes + totals.comments)}
+                            {reelPage && !hasLiveData && <span className="summary-trend trend-down"><i className="fas fa-arrow-down"></i> 29.2%</span>}
                         </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Hook Rate <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">
-                            {hasLiveData && avgHookRateLive != null ? `${avgHookRateLive}%` : '42.5%'}
-                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 5.1%</span>}
+                            {!reelPage ? '—' : hasLiveData && avgHookRateLive != null ? `${avgHookRateLive}%` : '—'}
+                            {reelPage && hasLiveData && avgHookRateLive != null && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 5.1%</span>}
                         </div>
                     </div>
                     <div className="summary-metric-item">
                         <div className="summary-label">Content Win Rate <i className="fas fa-info-circle text-muted small"></i></div>
                         <div className="summary-value">
-                            {hasLiveData ? `${contentWinRateLive}%` : '68%'}
-                            {!hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 8.2%</span>}
+                            {!reelPage ? '—' : hasLiveData ? `${contentWinRateLive}%` : '68%'}
+                            {reelPage && !hasLiveData && <span className="summary-trend trend-up"><i className="fas fa-arrow-up"></i> 8.2%</span>}
                         </div>
                     </div>
                 </div>
@@ -647,7 +822,10 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Age</div>
-                        <div className="value">{hasLiveData ? ageBreakdown.length : 5}<span className="val-suffix">Groups</span></div>
+                        <div className="value">
+                            {loadingDemographics && !adsDemographicsData ? '...' : (ageBreakdown.length || ageGroupsCountFromAds || (reelPage ? 0 : 5))}
+                            <span className="val-suffix">Groups</span>
+                        </div>
                     </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-pink ${activeChart === 'gender' ? 'active-chart' : ''}`}
@@ -657,7 +835,10 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Gender</div>
-                        <div className="value">{hasLiveData ? genderBreakdown.length : 3}<span className="val-suffix">Groups</span></div>
+                        <div className="value">
+                            {loadingDemographics && !adsDemographicsData ? '...' : (genderBreakdown.length || genderGroupsCountFromAds || (reelPage ? 0 : 3))}
+                            <span className="val-suffix">Groups</span>
+                        </div>
                     </motion.button>
                     <motion.button
                         className={`kpi-card-reel bg-purple-light ${activeChart === 'location' ? 'active-chart' : ''}`}
@@ -667,7 +848,10 @@ export default function BestPerformingReel() {
                         transition={{ type: "spring", stiffness: 300 }}
                     >
                         <div className="label">Location</div>
-                        <div className="value">{hasLiveData ? locationBreakdown.length : 6}<span className="val-suffix">Regions</span></div>
+                        <div className="value">
+                            {loadingDemographics && !adsDemographicsData ? '...' : (locationBreakdown.length || locationCountFromAds || (reelPage ? 0 : 6))}
+                            <span className="val-suffix">{cityBreakdown.length > 0 ? 'Cities' : (adsRegionBreakdown.length > 0 ? 'Regions' : 'Countries')}</span>
+                        </div>
                     </motion.button>
                     <div className="kpi-card-reel bg-teal">
                         <div className="label">Engagement rate</div>
@@ -726,26 +910,78 @@ export default function BestPerformingReel() {
                                     animate={{ opacity: 1 }}
                                     transition={{ delay: 0.2 }}
                                 >
-                                    <div className="chart-header-row">
-                                        <div className="chart-legend-custom">
-                                            <div className="fw-bold">Age Distribution</div>
+                                    {ageGenderChartDataWithTotal && ageGenderChartDataWithTotal.length > 0 ? (
+                                        <>
+                                            <div className="chart-header-row">
+                                                <div className="chart-legend-custom">
+                                                    <div className="fw-bold">Age & Gender Distribution</div>
+                                                    <small className="text-secondary text-muted d-block">Audience breakdown by demographics (Meta Ads Insights)</small>
+                                                </div>
+                                            </div>
+                                            {adsDemographicsError && (
+                                                <div className="text-muted small mb-2">{adsDemographicsError}</div>
+                                            )}
+                                            <div style={{ width: '100%', height: 350 }}>
+                                                <ResponsiveContainer width="100%" height="100%">
+                                                    <BarChart data={ageGenderChartDataWithTotal} margin={{ top: 20, right: 30, left: 0, bottom: 5 }} barSize={32} barGap={8}>
+                                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                                        <XAxis dataKey="age" tick={{ fill: '#64748b', fontSize: 13, fontWeight: 500 }} axisLine={false} tickLine={false} dy={10} />
+                                                        <YAxis tick={{ fill: '#64748b', fontSize: 12 }} axisLine={false} tickLine={false} />
+                                                        <Tooltip
+                                                            cursor={{ fill: 'rgba(0,0,0,0.02)' }}
+                                                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.1)', padding: '12px' }}
+                                                        />
+                                                        <Bar dataKey="men" name="Men" fill="#5b45b0" radius={[6, 6, 0, 0]} animationDuration={1500}>
+                                                            <LabelList dataKey="men" position="top" formatter={(v) => formatCount(v)} />
+                                                        </Bar>
+                                                        <Bar dataKey="women" name="Women" fill="#00bcd4" radius={[6, 6, 0, 0]} animationDuration={1500}>
+                                                            <LabelList dataKey="women" position="top" formatter={(v) => formatCount(v)} />
+                                                        </Bar>
+                                                    </BarChart>
+                                                </ResponsiveContainer>
+                                                <div className="d-flex justify-content-center gap-4 mt-4">
+                                                    <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
+                                                        <div className="rounded-circle" style={{ width: 12, height: 12, background: '#5b45b0' }}></div>
+                                                        <span className="fw-bold text-dark small">Men</span>
+                                                    </div>
+                                                    <div className="d-flex align-items-center gap-2 px-3 py-2 bg-light rounded-pill">
+                                                        <div className="rounded-circle" style={{ width: 12, height: 12, background: '#00bcd4' }}></div>
+                                                        <span className="fw-bold text-dark small">Women</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </>
+                                    ) : loadingAdsDemographics ? (
+                                        <div className="d-flex align-items-center justify-content-center text-muted" style={{ minHeight: 320 }}>
+                                            <div className="text-center">
+                                                <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
+                                                <p className="mb-0 small">Loading Age & Gender demographics...</p>
+                                            </div>
                                         </div>
-                                    </div>
-                                    <div style={{ width: '100%', height: 300 }}>
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <ComposedChart data={ageChartData}>
-                                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                                <XAxis dataKey="age" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                                                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                                                <Tooltip />
-                                                <Bar dataKey="value" radius={[8, 8, 0, 0]} animationBegin={0} animationDuration={800}>
-                                                    {ageChartData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
-                                                    ))}
-                                                </Bar>
-                                            </ComposedChart>
-                                        </ResponsiveContainer>
-                                    </div>
+                                    ) : (
+                                        <>
+                                            <div className="chart-header-row">
+                                                <div className="chart-legend-custom">
+                                                    <div className="fw-bold">Age Distribution</div>
+                                                </div>
+                                            </div>
+                                            <div style={{ width: '100%', height: 300 }}>
+                                                <ResponsiveContainer width="100%" height="100%">
+                                                    <ComposedChart data={ageChartData}>
+                                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                                        <XAxis dataKey="age" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                                                        <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                                                        <Tooltip />
+                                                        <Bar dataKey="value" radius={[8, 8, 0, 0]} animationBegin={0} animationDuration={800}>
+                                                            {ageChartData.map((entry, index) => (
+                                                                <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
+                                                            ))}
+                                                        </Bar>
+                                                    </ComposedChart>
+                                                </ResponsiveContainer>
+                                            </div>
+                                        </>
+                                    )}
                                 </motion.div>
                             )}
 
@@ -758,31 +994,44 @@ export default function BestPerformingReel() {
                                     <div className="chart-header-row">
                                         <div className="chart-legend-custom">
                                             <div className="fw-bold">Gender Distribution</div>
+                                            {genderChartData.length > 0 && (
+                                                <small className="text-muted d-block">From Instagram audience (selected page)</small>
+                                            )}
                                         </div>
                                     </div>
-                                    <div style={{ width: '100%', height: 300 }}>
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <PieChart>
-                                                <Pie
-                                                    data={genderChartData}
-                                                    cx="50%"
-                                                    cy="50%"
-                                                    labelLine={false}
-                                                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                                                    outerRadius={100}
-                                                    fill="#8884d8"
-                                                    dataKey="value"
-                                                    animationBegin={0}
-                                                    animationDuration={800}
-                                                >
-                                                    {genderChartData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
-                                                    ))}
-                                                </Pie>
-                                                <Tooltip />
-                                            </PieChart>
-                                        </ResponsiveContainer>
-                                    </div>
+                                    {loadingDemographics ? (
+                                        <div className="d-flex align-items-center justify-content-center text-muted" style={{ minHeight: 280 }}>
+                                            <div className="text-center">
+                                                <div className="spinner-border mb-2" role="status" /><span className="small">Loading gender data…</span>
+                                            </div>
+                                        </div>
+                                    ) : genderChartData.length > 0 ? (
+                                        <div style={{ width: '100%', height: 300 }}>
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <PieChart>
+                                                    <Pie
+                                                        data={genderChartData}
+                                                        cx="50%"
+                                                        cy="50%"
+                                                        labelLine={false}
+                                                        label={({ name, value, percent }) => `${name} ${formatCount(value)} (${(percent * 100).toFixed(0)}%)`}
+                                                        outerRadius={100}
+                                                        fill="#8884d8"
+                                                        dataKey="value"
+                                                        animationBegin={0}
+                                                        animationDuration={800}
+                                                    >
+                                                        {genderChartData.map((entry, index) => (
+                                                            <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
+                                                        ))}
+                                                    </Pie>
+                                                    <Tooltip />
+                                                </PieChart>
+                                            </ResponsiveContainer>
+                                        </div>
+                                    ) : (
+                                        <div className="text-muted small py-5 text-center">No Instagram gender data for this page. Select a page with Instagram linked to see gender distribution.</div>
+                                    )}
                                 </motion.div>
                             )}
 
@@ -794,24 +1043,78 @@ export default function BestPerformingReel() {
                                 >
                                     <div className="chart-header-row">
                                         <div className="chart-legend-custom">
-                                            <div className="fw-bold">Location Distribution</div>
+                                            <div className="fw-bold">Top towns/cities</div>
                                         </div>
                                     </div>
-                                    <div style={{ width: '100%', height: 300 }}>
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <ComposedChart data={locationChartData} layout="vertical">
-                                                <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#f1f5f9" />
-                                                <XAxis type="number" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                                                <YAxis dataKey="location" type="category" width={120} tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                                                <Tooltip />
-                                                <Bar dataKey="value" radius={[0, 8, 8, 0]} animationBegin={0} animationDuration={800}>
-                                                    {locationChartData.map((entry, index) => (
-                                                        <Cell key={`cell-${index}`} fill={entry.color || COLORS[index % COLORS.length]} />
-                                                    ))}
-                                                </Bar>
-                                            </ComposedChart>
-                                        </ResponsiveContainer>
-                                    </div>
+                                    <small className="text-muted d-block mb-3">
+                                        {topTownsCitiesDisplay.length > 0
+                                            ? 'From Instagram audience (city-level)'
+                                            : topRegionsOrCountriesFromAds.list.length > 0
+                                                ? 'Country-level (city data not available for this page). From Meta Ads Insights.'
+                                                : 'Select a page with Instagram linked for city-level data.'}
+                                    </small>
+                                    {igDemographicsError && topTownsCitiesDisplay.length === 0 && (
+                                        <div className="alert alert-warning py-2 small mb-3" role="alert">
+                                            {igDemographicsError} Showing region/country from Ads when available.
+                                        </div>
+                                    )}
+                                    {loadingDemographics && !adsDemographicsData ? (
+                                        <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
+                                    ) : topTownsCitiesDisplay.length > 0 ? (
+                                        <div className="d-flex flex-column gap-4">
+                                            {topTownsCitiesDisplay.map((item, idx) => (
+                                                <motion.div
+                                                    key={idx}
+                                                    initial={{ width: 0 }}
+                                                    whileInView={{ width: '100%' }}
+                                                    viewport={{ once: true }}
+                                                >
+                                                    <div className="d-flex justify-content-between mb-2">
+                                                        <span className="text-dark fw-bold small d-flex align-items-center gap-2">{item.name}</span>
+                                                        <span className="text-muted small fw-bold">{item.val}%</span>
+                                                    </div>
+                                                    <div className="progress" style={{ height: '8px', backgroundColor: '#f3f4f6', borderRadius: '10px', overflow: 'hidden' }}>
+                                                        <motion.div
+                                                            className="progress-bar"
+                                                            role="progressbar"
+                                                            style={{ backgroundColor: '#00bcd4', borderRadius: '10px' }}
+                                                            initial={{ width: 0 }}
+                                                            whileInView={{ width: `${item.val}%` }}
+                                                            transition={{ duration: 1.5, delay: idx * 0.1, ease: "easeOut" }}
+                                                        />
+                                                    </div>
+                                                </motion.div>
+                                            ))}
+                                        </div>
+                                    ) : topRegionsOrCountriesFromAds.list.length > 0 ? (
+                                        <div className="d-flex flex-column gap-4">
+                                            {topRegionsOrCountriesFromAds.list.map((item, idx) => (
+                                                <motion.div
+                                                    key={idx}
+                                                    initial={{ width: 0 }}
+                                                    whileInView={{ width: '100%' }}
+                                                    viewport={{ once: true }}
+                                                >
+                                                    <div className="d-flex justify-content-between mb-2">
+                                                        <span className="text-dark fw-bold small d-flex align-items-center gap-2">{item.name}</span>
+                                                        <span className="text-muted small fw-bold">{item.val}%</span>
+                                                    </div>
+                                                    <div className="progress" style={{ height: '8px', backgroundColor: '#f3f4f6', borderRadius: '10px', overflow: 'hidden' }}>
+                                                        <motion.div
+                                                            className="progress-bar"
+                                                            role="progressbar"
+                                                            style={{ backgroundColor: '#00bcd4', borderRadius: '10px' }}
+                                                            initial={{ width: 0 }}
+                                                            whileInView={{ width: `${item.val}%` }}
+                                                            transition={{ duration: 1.5, delay: idx * 0.1, ease: "easeOut" }}
+                                                        />
+                                                    </div>
+                                                </motion.div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="text-muted small py-3">No location data for this page/period. Select a page with Instagram linked for city-level data, or ensure Ads Insights has region/country data.</div>
+                                    )}
                                 </motion.div>
                             )}
                         </motion.div>
@@ -829,26 +1132,30 @@ export default function BestPerformingReel() {
                             <i className="fas fa-ellipsis-h text-muted"></i>
                         </div>
                         <div style={{ width: '100%', height: 250 }}>
-                            <ResponsiveContainer width="100%" height="100%">
-                                <ComposedChart data={viewsData}>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} interval={6} axisLine={false} tickLine={false} />
-                                    <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} domain={[0, 4000]} />
-                                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} domain={[0, 100]} />
-                                    <Tooltip />
-                                    <Bar yAxisId="left" dataKey="views" fill="#0369a1" barSize={8} radius={[2, 2, 0, 0]} />
-                                    <Line yAxisId="right" type="monotone" dataKey="eng" stroke="#38bdf8" strokeWidth={2} dot={false} />
-                                </ComposedChart>
-                            </ResponsiveContainer>
+                            {viewsData.length > 0 ? (
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <ComposedChart data={viewsData} margin={{ top: 10, right: 10, left: 10, bottom: 28 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} interval={0} axisLine={false} tickLine={false} />
+                                        <YAxis yAxisId="left" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} domain={[0, 4000]} />
+                                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} domain={[0, 100]} />
+                                        <Tooltip />
+                                        <Bar yAxisId="left" dataKey="views" fill="#0369a1" barSize={8} radius={[2, 2, 0, 0]} />
+                                        <Line yAxisId="right" type="monotone" dataKey="eng" stroke="#38bdf8" strokeWidth={2} dot={false} />
+                                    </ComposedChart>
+                                </ResponsiveContainer>
+                            ) : (
+                                <div className="d-flex align-items-center justify-content-center h-100 text-muted small">No daily views &amp; engagements for this period. Select a page and time range with data.</div>
+                            )}
                         </div>
                     </div>
                     <div className="chart-panel">
                         <div className="chart-header-row"><div className="chart-legend-custom"><div>Subscribers change</div></div></div>
                         <div style={{ width: '100%', height: 250 }}>
                             <ResponsiveContainer width="100%" height="100%">
-                                <ComposedChart data={subData}>
+                                <ComposedChart data={subData} margin={{ top: 10, right: 10, left: 10, bottom: 28 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} interval={6} axisLine={false} tickLine={false} />
+                                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} interval={0} axisLine={false} tickLine={false} />
                                     <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} domain={[0, 25]} />
                                     <Tooltip />
                                     <Line type="monotone" dataKey="val" stroke="#0369a1" strokeWidth={2} dot={false} />
@@ -867,14 +1174,29 @@ export default function BestPerformingReel() {
                         <h3 className="top-content-by-views-title">Top content by views</h3>
                     </div>
                     <div className="top-content-by-views-carousel-wrap">
+                        <button
+                            type="button"
+                            className="top-content-scroll-btn"
+                            onClick={scrollTopContentBack}
+                            aria-label="Scroll back"
+                        >
+                            <i className="fas fa-chevron-left"></i>
+                        </button>
                         <div
                             className="top-content-cards-scroll"
                             ref={topContentScrollRef}
                             role="list"
                         >
-                            {contentListForTopContent.map((item, idx) => (
+                            {contentListForTopContent.length === 0 ? (
+                                <div className="text-muted text-center py-5 px-3" style={{ minWidth: '100%' }}>
+                                    {reelPage ? 'No content for this period. Try a different time range or tab.' : 'Select a page to see top content by views.'}
+                                </div>
+                            ) : contentListForTopContent.map((item, idx) => (
                                 <article key={item.id || idx} className="top-content-card" role="listitem">
-                                    <div className="top-content-card-thumb" style={{ backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
+                                    <div className="top-content-card-thumb" style={item.thumbnail_url ? undefined : { backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
+                                        {item.thumbnail_url ? (
+                                            <img src={item.thumbnail_url} alt="" className="top-content-card-thumb-img" />
+                                        ) : null}
                                         <span className="top-content-card-play" aria-hidden>
                                             <i className="fas fa-play"></i>
                                         </span>
@@ -899,6 +1221,14 @@ export default function BestPerformingReel() {
                                         <div className="top-content-metric">
                                             <i className="fas fa-share-alt" aria-hidden></i>
                                             <span>{formatCount(item.shares != null ? item.shares : 0)}</span>
+                                        </div>
+                                        <div className="top-content-metric">
+                                            <i className="far fa-bookmark" aria-hidden></i>
+                                            <span>{formatCount(item.saved != null ? item.saved : 0)}</span>
+                                        </div>
+                                        <div className="top-content-metric">
+                                            <i className="fas fa-user-plus" aria-hidden></i>
+                                            <span>{formatCount(item.follows != null ? item.follows : 0)}</span>
                                         </div>
                                     </div>
                                 </article>

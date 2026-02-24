@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './BestPerformingAd.css';
 import DateRangeFilter from '../components/DateRangeFilter';
-import { PROJECT_ORDER, PROJECT_AD_ACCOUNT_NAMES, buildAdAccountsByProject } from '../constants/projectAdAccounts';
+import { PROJECT_ORDER, ALL_SPECIFIED_ACCOUNT_IDS, buildAdAccountsByProject, normalizeAccountId } from '../constants/projectAdAccounts';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
     Bar, Line, ComposedChart, Legend
@@ -99,7 +99,8 @@ const getDefaultDates = () => {
 };
 
 // Fetch ad accounts from Meta API (same as Dashboards)
-const fetchAdAccounts = async () => {
+// forceRefresh: when true, asks server to re-fetch from Meta (pagination, all accounts)
+const fetchAdAccounts = async (forceRefresh = false) => {
     try {
         const token = getAuthToken();
         const headers = { "Content-Type": "application/json" };
@@ -107,7 +108,8 @@ const fetchAdAccounts = async () => {
             headers["Authorization"] = `Bearer ${token}`;
         }
 
-        const res = await fetch(`${API_BASE}/api/meta/ad-accounts`, { headers });
+        const url = `${API_BASE}/api/meta/ad-accounts${forceRefresh ? '?refresh=true' : ''}`;
+        const res = await fetch(url, { headers });
         if (!res.ok) {
             const errorData = await res.json().catch(() => ({}));
             console.error("[fetchAdAccounts] API error:", errorData);
@@ -208,7 +210,10 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
                 cpm: cpm,
                 conversionRate: conversionRate,
                 actions: aggs,
-                action_values: values
+                action_values: values,
+                // Video metrics for hook/hold: Hold Rate = video_p100_watched_actions / video_play × 100
+                video_play: aggs['video_play'] || aggs['video_view'] || 0,
+                video_p100_watched: values['video_p100_watched_actions'] || aggs['video_p100_watched_actions'] || values['video_p100_watched'] || aggs['video_p100_watched'] || 0
             };
         });
     } catch (e) {
@@ -271,14 +276,14 @@ export default function BestPerformingAd() {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [projectsDropdownOpen]);
 
-    // Comma-separated ad account IDs for the selected project (null = All Projects = no filter)
+    const adAccountsByProject = useMemo(() => buildAdAccountsByProject(adAccounts), [adAccounts]);
+    // Comma-separated ad account IDs for the selected project (null = All Projects = no filter). Normalized so API comparison is consistent.
     const selectedProjectAdAccountIds = useMemo(() => {
         if (!selectedProject) return null;
-        const byProject = buildAdAccountsByProject(adAccounts);
-        const accounts = byProject[selectedProject] || [];
-        const ids = accounts.map((a) => a.value).filter(Boolean);
+        const accounts = adAccountsByProject[selectedProject] || [];
+        const ids = accounts.map((a) => normalizeAccountId(a.value)).filter(Boolean);
         return ids.length > 0 ? ids.join(',') : null;
-    }, [selectedProject, adAccounts]);
+    }, [selectedProject, adAccountsByProject]);
 
     // Fetch insights: when "All Projects" is selected, always use Meta live data; otherwise DB first then live refresh. Project selection filters by that project's ad accounts.
     useEffect(() => {
@@ -290,11 +295,12 @@ export default function BestPerformingAd() {
         const loadInsights = async () => {
             try {
                 if (isAllProjects) {
-                    // All Projects: fetch only live Meta data so KPIs/charts always show fresh data (no ad_account_id filter)
+                    // All Projects: fetch only for specified ad account IDs (strict ID-based)
+                    const allSpecifiedIds = ALL_SPECIFIED_ACCOUNT_IDS.length > 0 ? ALL_SPECIFIED_ACCOUNT_IDS.join(',') : undefined;
                     const liveData = await fetchInsightsData({
                         startDate: filters.startDate,
                         endDate: filters.endDate,
-                        adAccountId: selectedProjectAdAccountIds || undefined,
+                        adAccountId: allSpecifiedIds,
                         live: true
                     });
                     if (cancelled) return;
@@ -484,7 +490,9 @@ export default function BestPerformingAd() {
                     impressions: 0,
                     clicks: 0,
                     leads: 0,
-                    conversions: 0
+                    conversions: 0,
+                    video_play: 0,
+                    video_p100_watched: 0
                 };
             }
 
@@ -494,6 +502,8 @@ export default function BestPerformingAd() {
             campaignMap[key].clicks += r.clicks || 0;
             campaignMap[key].leads += r.leads || 0;
             campaignMap[key].conversions += r.conversions || 0;
+            campaignMap[key].video_play += r.video_play || 0;
+            campaignMap[key].video_p100_watched += r.video_p100_watched || 0;
         });
 
         const result = Object.values(campaignMap)
@@ -504,6 +514,10 @@ export default function BestPerformingAd() {
                 const conversionRate = item.leads > 0 ? (item.conversions / item.leads) * 100 : 0;
                 const roas = item.spend > 0 ? (item.conversions * REVENUE_PER_CONVERSION) / item.spend : null;
                 const ad_account_display = getAdAccountDisplay(item.ad_account_id, item.ad_account_name);
+                const plays = item.video_play || 0;
+                const hookRate = item.impressions > 0 && plays > 0 ? Math.round((plays / item.impressions) * 10000) / 100 : null;
+                // Hold Rate = video_p100_watched_actions / video_play × 100; show 0% when plays > 0 but no 100% watches
+                const holdRate = plays > 0 ? Math.round(((item.video_p100_watched || 0) / plays) * 10000) / 100 : null;
                 return {
                     ...item,
                     ad_account_display,
@@ -512,8 +526,8 @@ export default function BestPerformingAd() {
                     cpl,
                     conversionRate,
                     roas,
-                    hookRate: null,
-                    holdRate: null
+                    hookRate,
+                    holdRate
                 };
             })
             .sort((a, b) => {
@@ -671,16 +685,16 @@ export default function BestPerformingAd() {
                                     {(hoveredProject === '' || (hoveredProject === null && selectedProject === '')) ? (
                                         <div className="projects-dropdown-all-accounts">
                                             {PROJECT_ORDER.map((projectName) => {
-                                                const accounts = PROJECT_AD_ACCOUNT_NAMES[projectName] || [];
+                                                const accounts = adAccountsByProject[projectName] || [];
                                                 return (
                                                     <div key={projectName} className="projects-dropdown-project-group">
                                                         <div className="projects-dropdown-group-label">{projectName}</div>
                                                         {accounts.length === 0 ? (
-                                                            <span className="projects-dropdown-placeholder small">No accounts</span>
+                                                            <span className="projects-dropdown-placeholder small">No accounts matched</span>
                                                         ) : (
                                                             <ul className="projects-dropdown-account-list">
-                                                                {accounts.map((name, idx) => (
-                                                                    <li key={`${projectName}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                                                                {accounts.map((acct, idx) => (
+                                                                    <li key={`${projectName}-${acct.value}-${idx}`} className="projects-dropdown-account-item">{acct.displayName}</li>
                                                                 ))}
                                                             </ul>
                                                         )}
@@ -690,12 +704,12 @@ export default function BestPerformingAd() {
                                         </div>
                                     ) : hoveredProject === null ? (
                                         <span className="projects-dropdown-placeholder">Select a project to see accounts</span>
-                                    ) : (PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).length === 0 ? (
-                                        <span className="projects-dropdown-placeholder">No accounts</span>
+                                    ) : (adAccountsByProject[hoveredProject] || []).length === 0 ? (
+                                        <span className="projects-dropdown-placeholder">No accounts matched</span>
                                     ) : (
                                         <ul className="projects-dropdown-account-list">
-                                            {(PROJECT_AD_ACCOUNT_NAMES[hoveredProject] || []).map((name, idx) => (
-                                                <li key={`${hoveredProject}-${idx}`} className="projects-dropdown-account-item">{name}</li>
+                                            {(adAccountsByProject[hoveredProject] || []).map((acct, idx) => (
+                                                <li key={`${hoveredProject}-${acct.value}-${idx}`} className="projects-dropdown-account-item">{acct.displayName}</li>
                                             ))}
                                         </ul>
                                     )}

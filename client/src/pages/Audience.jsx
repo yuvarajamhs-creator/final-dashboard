@@ -69,7 +69,7 @@ const fetchDemographicInsights = async (from, to) => {
     const token = getAuthToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country,region`, { headers });
+    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country`, { headers });
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.details || err.error || res.statusText);
@@ -117,7 +117,7 @@ const fetchInstagramReachByFollowType = async (pageId, from, to) => {
         throw new Error(err.details || err.error || res.statusText);
     }
     const json = await res.json();
-    return json.data || null;
+    return { data: json.data || null, message: json.message || null };
 };
 
 // Instagram online_followers — best posting times (heatmap, peak hours, recommendation)
@@ -192,6 +192,7 @@ export default function Audience() {
     const [igAudienceLoading, setIgAudienceLoading] = useState(false);
     const [igAudienceError, setIgAudienceError] = useState(null);
     const [reachByFollowTypeData, setReachByFollowTypeData] = useState(null);
+    const [reachByFollowTypeMessage, setReachByFollowTypeMessage] = useState(null);
     const [reachByFollowTypeLoading, setReachByFollowTypeLoading] = useState(false);
     const [reachByFollowTypeError, setReachByFollowTypeError] = useState(null);
     const [onlineFollowersInsight, setOnlineFollowersInsight] = useState(null);
@@ -280,14 +281,20 @@ export default function Audience() {
     useEffect(() => {
         if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
             setReachByFollowTypeData(null);
+            setReachByFollowTypeMessage(null);
             setReachByFollowTypeError(null);
             return;
         }
         let cancelled = false;
         setReachByFollowTypeLoading(true);
         setReachByFollowTypeError(null);
+        setReachByFollowTypeMessage(null);
         fetchInstagramReachByFollowType(audiencePage, contentFilters.startDate, contentFilters.endDate)
-            .then((data) => { if (!cancelled) setReachByFollowTypeData(data); })
+            .then((res) => {
+                if (cancelled) return;
+                setReachByFollowTypeData(res?.data ?? null);
+                setReachByFollowTypeMessage(res?.message ?? null);
+            })
             .catch((err) => {
                 if (!cancelled) setReachByFollowTypeError(err?.message || 'Failed to load reach by follow type');
             })
@@ -818,6 +825,18 @@ export default function Audience() {
                                     <span className="audience-followers-pct">{formatReachNum(followersNonFollowersData.non_follower_value)}</span>
                                 </div>
                             </div>
+                            {!reachByFollowTypeLoading && followersNonFollowersData.total_value === 0 && reachByFollowTypeMessage && (
+                                <div className="mt-2">
+                                    <p className="small text-muted mb-0" title={reachByFollowTypeMessage}>
+                                        {reachByFollowTypeMessage}
+                                    </p>
+                                    {reachByFollowTypeMessage.includes('Page not accessible') && (
+                                        <p className="small text-muted mb-0 mt-1">
+                                            To fix: Add this page in Meta Business Suite (Business Settings → Accounts → Pages) and ensure your app has access. Use a Page that is connected to your app for full data.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </motion.div>
                 </div>
