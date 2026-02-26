@@ -156,7 +156,7 @@ const transformActions = (actions = []) => {
 
 const num = (v) => Number(v) || 0;
 
-const fetchAdAccounts = async () => {
+const _fetchAdAccounts = async () => {
     try {
         const token = getAuthToken();
         const headers = { 'Content-Type': 'application/json' };
@@ -397,7 +397,7 @@ export default function AIInsights() {
         } finally {
             setLoading(false);
         }
-    }, [datePreset]);
+    }, [datePreset, ageFilter, locationFilter, platformFilter]);
 
     useEffect(() => {
         fetchAIInsights();

@@ -32,7 +32,18 @@ const MultiSelectFilter = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [openAbove, setOpenAbove] = useState(false);
   const dropdownRef = useRef(null);
+
+  // When opening, decide whether to show dropdown above or below to avoid viewport cut-off
+  useEffect(() => {
+    if (!isOpen || !dropdownRef.current) return;
+    const el = dropdownRef.current;
+    const rect = el.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const estimatedMenuHeight = 360;
+    setOpenAbove(spaceBelow < estimatedMenuHeight && rect.top > spaceBelow);
+  }, [isOpen]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -128,7 +139,9 @@ const MultiSelectFilter = ({
         </button>
 
         {isOpen && (
-          <div className="multi-select-dropdown-menu">
+          <div
+            className={`multi-select-dropdown-menu ${openAbove ? 'open-above' : ''}`}
+          >
             {/* Search Input */}
             <div className="multi-select-search">
               <i className="fas fa-search multi-select-search-icon"></i>

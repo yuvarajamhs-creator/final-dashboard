@@ -130,13 +130,8 @@ export default function BestPerformingReel() {
     const [contentDateRangeFilterValue, setContentDateRangeFilterValue] = useState(null);
 
     const platformFilterOptions = [
-        { id: 'all', name: 'All Platforms' },
         { id: 'facebook', name: 'Facebook' },
         { id: 'instagram', name: 'Instagram' },
-        { id: 'audience_network', name: 'Audience Network' },
-        { id: 'messenger', name: 'Messenger' },
-        { id: 'threads', name: 'Threads' },
-        { id: 'whatsapp', name: 'WhatsApp' },
     ];
     const [platformFilters, setPlatformFilters] = useState([]);
     const [pages, setPages] = useState([]);
@@ -399,7 +394,7 @@ export default function BestPerformingReel() {
             permalink: m.permalink,
         }));
 
-    const loadingAny = loadingInsights || loadingMedia;
+    const _loadingAny = loadingInsights || loadingMedia;
     const hasLiveData = reelPage && (igInsights || mediaInsights);
     const displayError = insightsError || mediaError || error;
 
@@ -501,7 +496,7 @@ export default function BestPerformingReel() {
         { age: '55+', value: 8, color: '#fde047' },
     ];
 
-    const genderData = [
+    const _genderData = [
         { name: 'Male', value: 55, color: '#0369a1' },
         { name: 'Female', value: 42, color: '#ec4899' },
         { name: 'Other', value: 3, color: '#8b5cf6' },
@@ -527,7 +522,7 @@ export default function BestPerformingReel() {
     const genderChartData = hasLiveData && genderBreakdown.length > 0
         ? genderBreakdown.map((r, i) => ({ name: r.gender || String(r.name || 'N/A'), value: r.value, color: COLORS[i % COLORS.length] }))
         : [];
-    const locationChartData = hasLiveData && countryBreakdown.length > 0
+    const _locationChartData = hasLiveData && countryBreakdown.length > 0
         ? countryBreakdown.map((r, i) => ({ location: r.country || r.location || 'N/A', value: r.value, color: COLORS[i % COLORS.length] }))
         : locationData;
 
@@ -609,32 +604,32 @@ export default function BestPerformingReel() {
 
     // LOGIC TO SWITCH CONTENT — live data only when page selected and media available
     let currentList = emptyList;
-    let tableTitle = 'All Content Performance';
+    let _tableTitle = 'All Content Performance';
     let animClass = 'anim-fade-in';
 
     if (hasLiveData && mediaInsights?.media?.length > 0) {
         if (activeTab === 'posts') {
             currentList = livePostsList;
-            tableTitle = 'Posts Performance';
+            _tableTitle = 'Posts Performance';
             animClass = 'anim-slide-in';
         } else if (activeTab === 'stories') {
             currentList = liveStoriesList;
-            tableTitle = 'Stories Performance';
+            _tableTitle = 'Stories Performance';
             animClass = 'anim-zoom-in';
         } else if (activeTab === 'reels') {
             currentList = liveReelsList;
-            tableTitle = 'Reels Performance';
+            _tableTitle = 'Reels Performance';
             animClass = 'anim-fade-in';
         } else {
             currentList = liveAllList;
-            tableTitle = 'All Content Performance';
+            _tableTitle = 'All Content Performance';
             animClass = 'anim-fade-in';
         }
     } else {
-        if (activeTab === 'posts') tableTitle = 'Posts Performance';
-        else if (activeTab === 'stories') tableTitle = 'Stories Performance';
-        else if (activeTab === 'reels') tableTitle = 'Reels Performance';
-        else tableTitle = 'All Content Performance';
+        if (activeTab === 'posts') _tableTitle = 'Posts Performance';
+        else if (activeTab === 'stories') _tableTitle = 'Stories Performance';
+        else if (activeTab === 'reels') _tableTitle = 'Reels Performance';
+        else _tableTitle = 'All Content Performance';
     }
 
     const totals = calculateTotals(currentList);
@@ -665,6 +660,8 @@ export default function BestPerformingReel() {
     const contentListForTopContent = hasLiveData && topContentByViews.length > 0
         ? topContentByViews
         : currentList;
+
+    const isStories = activeTab === "stories";
 
     const topContentScrollRef = useRef(null);
     const scrollTopContent = () => {
@@ -1171,7 +1168,9 @@ export default function BestPerformingReel() {
                         <span className="top-content-by-views-icon">
                             <i className="fab fa-instagram" aria-hidden></i>
                         </span>
-                        <h3 className="top-content-by-views-title">Top content by views</h3>
+                        <h3 className="top-content-by-views-title">
+                            {isStories ? "Top Stories by Views" : "Top Content by Views"}
+                        </h3>
                     </div>
                     <div className="top-content-by-views-carousel-wrap">
                         <button
@@ -1189,20 +1188,28 @@ export default function BestPerformingReel() {
                         >
                             {contentListForTopContent.length === 0 ? (
                                 <div className="text-muted text-center py-5 px-3" style={{ minWidth: '100%' }}>
-                                    {reelPage ? 'No content for this period. Try a different time range or tab.' : 'Select a page to see top content by views.'}
+                                    {!reelPage
+                                        ? 'Select a page to see top content by views.'
+                                        : activeTab === 'stories'
+                                            ? 'No stories for this period. Stories are available for about 24 hours after posting—post a story and check back within 24 hours.'
+                                            : 'No content for this period. Try a different time range or tab.'}
                                 </div>
                             ) : contentListForTopContent.map((item, idx) => (
-                                <article key={item.id || idx} className="top-content-card" role="listitem">
-                                    <div className="top-content-card-thumb" style={item.thumbnail_url ? undefined : { backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
-                                        {item.thumbnail_url ? (
-                                            <img src={item.thumbnail_url} alt="" className="top-content-card-thumb-img" />
+                                <article key={item.id || idx} className={`top-content-card ${activeTab === 'stories' ? 'top-content-card--story' : ''}`} role="listitem">
+                                    <div className="top-content-card-thumb" style={(item.thumbnail_url || item.media_url) ? undefined : { backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
+                                        {(item.thumbnail_url || item.media_url) ? (
+                                            <img src={item.thumbnail_url || item.media_url || ''} alt="" className="top-content-card-thumb-img" />
                                         ) : null}
-                                        <span className="top-content-card-play" aria-hidden>
-                                            <i className="fas fa-play"></i>
-                                        </span>
+                                        {activeTab !== 'stories' && (
+                                            <span className="top-content-card-play" aria-hidden>
+                                                <i className="fas fa-play"></i>
+                                            </span>
+                                        )}
                                     </div>
                                     <h4 className="top-content-card-title" title={item.title}>
-                                        {(item.title || '').length > 35 ? `${(item.title || '').slice(0, 35)}...` : (item.title || 'Reel')}
+                                        {activeTab === 'stories'
+                                            ? (item.title || 'Story').slice(0, 35) + ((item.title || '').length > 35 ? '...' : '')
+                                            : (item.title || '').length > 35 ? `${(item.title || '').slice(0, 35)}...` : (item.title || 'Reel')}
                                     </h4>
                                     <p className="top-content-card-date">{getPublishDate(item)}</p>
                                     <div className="top-content-card-metrics">
@@ -1210,26 +1217,45 @@ export default function BestPerformingReel() {
                                             <i className="far fa-eye" aria-hidden></i>
                                             <span>{formatCount(item.views || 0)}</span>
                                         </div>
-                                        <div className="top-content-metric">
-                                            <i className="far fa-comment" aria-hidden></i>
-                                            <span>{formatCount(item.comments || 0)}</span>
-                                        </div>
-                                        <div className="top-content-metric">
-                                            <i className="far fa-heart" aria-hidden></i>
-                                            <span>{formatCount(item.likes || 0)}</span>
-                                        </div>
-                                        <div className="top-content-metric">
-                                            <i className="fas fa-share-alt" aria-hidden></i>
-                                            <span>{formatCount(item.shares != null ? item.shares : 0)}</span>
-                                        </div>
-                                        <div className="top-content-metric">
-                                            <i className="far fa-bookmark" aria-hidden></i>
-                                            <span>{formatCount(item.saved != null ? item.saved : 0)}</span>
-                                        </div>
-                                        <div className="top-content-metric">
-                                            <i className="fas fa-user-plus" aria-hidden></i>
-                                            <span>{formatCount(item.follows != null ? item.follows : 0)}</span>
-                                        </div>
+                                        {activeTab === 'stories' ? (
+                                            <>
+                                                <div className="top-content-metric">
+                                                    <i className="far fa-heart" aria-hidden></i>
+                                                    <span>{formatCount(item.likes || 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="far fa-comment" aria-hidden></i>
+                                                    <span>{formatCount(item.comments || 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="fas fa-share-alt" aria-hidden></i>
+                                                    <span>{formatCount(item.shares != null ? item.shares : 0)}</span>
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <div className="top-content-metric">
+                                                    <i className="far fa-comment" aria-hidden></i>
+                                                    <span>{formatCount(item.comments || 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="far fa-heart" aria-hidden></i>
+                                                    <span>{formatCount(item.likes || 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="fas fa-share-alt" aria-hidden></i>
+                                                    <span>{formatCount(item.shares != null ? item.shares : 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="far fa-bookmark" aria-hidden></i>
+                                                    <span>{formatCount(item.saved != null ? item.saved : 0)}</span>
+                                                </div>
+                                                <div className="top-content-metric">
+                                                    <i className="fas fa-user-plus" aria-hidden></i>
+                                                    <span>{formatCount(item.follows != null ? item.follows : 0)}</span>
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 </article>
                             ))}

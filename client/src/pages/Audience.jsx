@@ -196,6 +196,7 @@ export default function Audience() {
     const [reachByFollowTypeLoading, setReachByFollowTypeLoading] = useState(false);
     const [reachByFollowTypeError, setReachByFollowTypeError] = useState(null);
     const [onlineFollowersInsight, setOnlineFollowersInsight] = useState(null);
+    const [onlineFollowersMessage, setOnlineFollowersMessage] = useState(null); // backend message when sample/empty
     const [onlineFollowersLoading, setOnlineFollowersLoading] = useState(false);
     const [onlineFollowersError, setOnlineFollowersError] = useState(null);
     const [heatmapTooltip, setHeatmapTooltip] = useState(null); // { dayIndex, hour, x, y }
@@ -308,14 +309,21 @@ export default function Audience() {
     useEffect(() => {
         if (!audiencePage) {
             setOnlineFollowersInsight(null);
+            setOnlineFollowersMessage(null);
             setOnlineFollowersError(null);
             return;
         }
         let cancelled = false;
         setOnlineFollowersLoading(true);
         setOnlineFollowersError(null);
-        fetchInstagramOnlineFollowers(audiencePage)
-            .then((data) => { if (!cancelled) setOnlineFollowersInsight(data); })
+        setOnlineFollowersMessage(null);
+        fetchInstagramOnlineFollowers(audiencePage?.id ?? audiencePage)
+            .then((data) => {
+                if (!cancelled) {
+                    setOnlineFollowersInsight(data);
+                    setOnlineFollowersMessage(data?.message ?? null);
+                }
+            })
             .catch((err) => {
                 if (!cancelled) setOnlineFollowersError(err?.message || 'Failed to load best posting times');
             })
@@ -355,7 +363,7 @@ export default function Audience() {
     }, [contentFilters.startDate, contentFilters.endDate]);
 
     // --- MOCK DATA (fallbacks when API has no data) ---
-    const initialData = [
+    const _initialData = [
         { age: '18-24', men: 9, women: 4 },
         { age: '25-34', men: 31, women: 18 },
         { age: '35-44', men: 17, women: 9 },
@@ -417,6 +425,9 @@ export default function Audience() {
         { name: 'WhatsApp', reach: 0, results: 0 },
         { name: 'WhatsApp Bus', reach: 0, results: 0 },
     ];
+
+    // Selected page display name for "When your viewers are on Instagram" title
+    const selectedPageName = audiencePage && pages?.length ? (pages.find((p) => p.id === audiencePage)?.name ?? null) : null;
 
     // When your viewers are on Instagram — use online_followers API data or fallback mock 7×24 grid
     const HEATMAP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -504,11 +515,37 @@ export default function Audience() {
         return sorted.length ? sorted : null;
     })();
 
-    // Age & Gender chart: build from demographics age_gender_breakdown (aggregate by age bucket, male/female)
-    // Match Meta Audience: 18-24 through 65+ (Meta does not show 13-17 in Instagram Audience)
+    // Age & Gender chart: when a page is selected, use Instagram audience (age_breakdown + gender_breakdown) so data is per-page; else use Ads demographics (single ad account).
     const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const ageGenderBreakdownForChart = (() => {
+        if (audiencePage && igAudienceData?.age_breakdown?.length && igAudienceData?.gender_breakdown?.length) {
+            const ageRows = igAudienceData.age_breakdown;
+            const genderRows = igAudienceData.gender_breakdown;
+            let totalMale = 0;
+            let totalFemale = 0;
+            genderRows.forEach((r) => {
+                const v = Number(r.value) || 0;
+                const g = (r.gender || '').toString().toLowerCase();
+                if (g === 'm' || g === 'male') totalMale += v;
+                else if (g === 'f' || g === 'female') totalFemale += v;
+            });
+            const totalGender = totalMale + totalFemale;
+            const maleRatio = totalGender > 0 ? totalMale / totalGender : 0.5;
+            const femaleRatio = totalGender > 0 ? totalFemale / totalGender : 0.5;
+            const out = [];
+            ageRows.forEach((r) => {
+                const age = (r.age || '').toString().trim();
+                if (!age) return;
+                const val = Number(r.value) || 0;
+                out.push({ age, gender: 'male', reach: Math.round(val * maleRatio) });
+                out.push({ age, gender: 'female', reach: Math.round(val * femaleRatio) });
+            });
+            return out.length ? out : null;
+        }
+        return demographicsData?.age_gender_breakdown || null;
+    })();
     const ageGenderChartData = (() => {
-        const rows = demographicsData?.age_gender_breakdown || [];
+        const rows = ageGenderBreakdownForChart || [];
         if (!rows.length) return null;
         const byAge = {};
         AGE_BUCKETS.forEach((b) => { byAge[b] = { age: b, men: 0, women: 0 }; });
@@ -1128,6 +1165,7 @@ export default function Audience() {
                                     transition={{ duration: 0.35, delay: 0.05 }}
                                 >
                                     When your viewers are on Instagram
+                                    {selectedPageName && <span className="text-muted fw-normal"> — {selectedPageName}</span>}
                                     {onlineFollowersLoading && <span className="ms-2 text-muted small fw-normal">Loading...</span>}
                                     {onlineFollowersError && !onlineFollowersLoading && <span className="ms-2 text-danger small fw-normal" title={onlineFollowersError}>Error</span>}
                                 </motion.h6>
@@ -1141,7 +1179,11 @@ export default function Audience() {
                                 </motion.small>
                                 {onlineFollowersInsight?.is_sample_data && (
                                     <div className="alert alert-info py-2 px-3 mb-3 small">
-                                        Sample pattern — connect Instagram or check permissions for real data.
+                                        {onlineFollowersMessage ? (
+                                            <>Sample pattern — {onlineFollowersMessage}</>
+                                        ) : (
+                                            'Sample pattern — connect Instagram or check permissions for real data.'
+                                        )}
                                     </div>
                                 )}
                                 {onlineFollowersInsight?.best_times?.length > 0 && (
@@ -1157,6 +1199,8 @@ export default function Audience() {
                                         <div className="small text-muted">{onlineFollowersInsight.recommendation_text}</div>
                                     </motion.div>
                                 )}
+                                {onlineFollowersInsight?.heatmap_data?.length > 0 && (
+                                <>
                                 <motion.div
                                     className="audience-heatmap-wrapper"
                                     initial={{ opacity: 0 }}
@@ -1236,7 +1280,9 @@ export default function Audience() {
                                         {getHeatmapTooltipLabel(heatmapTooltip.value, heatmapTooltip.hour)} of your viewers are on Instagram
                                     </motion.div>
                                 )}
-                            </motion.div>
+                                </>
+                                )}
+                        </motion.div>
                         </>
                     ) : (
                         /* ================= PLATFORM VIEW ================= */

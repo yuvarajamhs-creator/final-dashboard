@@ -117,7 +117,7 @@ export default function Layout({ children }) {
             </NavLink>
           </li>
 
-          {/* 4. Plan */}
+          {/* 4. Plan (includes Team Performance & Goals) */}
           <li className="nav-item mb-2">
             <NavLink
               to="/plan"

@@ -49,6 +49,12 @@
     min-width: 160px;
 }
 
+/* Ad Account dropdown: limit width so dropdown has spacing from page edge */
+.filter-block.filter-block-ad-account {
+    max-width: 320px;
+    min-width: 200px;
+}
+
 .filter-label {
     font-size: 0.75rem;
     font-weight: 600;
@@ -76,6 +82,51 @@
 
 .filter-emoji {
     margin-right: 4px;
+}
+
+/* ===== Empty state (no insights data) ===== */
+.best-ad-empty-state {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 28px 32px;
+    margin-bottom: 24px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+.best-ad-empty-state-icon {
+    font-size: 2.5rem;
+    margin-bottom: 12px;
+    opacity: 0.9;
+}
+.best-ad-empty-state-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #334155;
+    margin: 0 0 8px 0;
+}
+.best-ad-empty-state-text {
+    color: #64748b;
+    font-size: 0.9rem;
+    margin: 0 0 12px 0;
+}
+.best-ad-empty-state-list {
+    text-align: left;
+    max-width: 480px;
+    margin: 0 auto;
+    padding-left: 1.25rem;
+    color: #475569;
+    font-size: 0.875rem;
+    line-height: 1.6;
+}
+.best-ad-empty-state-list li {
+    margin-bottom: 6px;
+}
+.best-ad-empty-state-list code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.8em;
 }
 
 .custom-select-wrapper {
@@ -626,6 +677,19 @@
     border-bottom: 1px solid #f1f5f9;
     color: #334155;
     font-weight: 500;
+}
+
+/* Campaign performance table: scroll within container (like Total Leads) */
+.campaign-table-scroll {
+    max-height: 500px;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    min-width: 800px;
+}
+
+.campaign-table-scroll .performance-table thead th {
+    background-color: #f8f9fa;
 }
 
 .conversion-count-input {

@@ -198,18 +198,19 @@ async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo, for
       query = query.in('page_id', pageIdList);
     }
 
+    // Date filter: use TimeUtc so existing Supabase leads (with TimeUtc populated) are included
     if (dateFrom) {
       const dateFromISO = new Date(dateFrom + 'T00:00:00').toISOString();
-      query = query.gte('created_time', dateFromISO);
+      query = query.gte('TimeUtc', dateFromISO);
     }
 
     if (dateTo) {
       const dateToISO = new Date(dateTo + 'T23:59:59').toISOString();
-      query = query.lte('created_time', dateToISO);
+      query = query.lte('TimeUtc', dateToISO);
     }
 
-    // Order by created_time descending
-    query = query.order('created_time', { ascending: false });
+    // Order by TimeUtc descending (matches common DB column)
+    query = query.order('TimeUtc', { ascending: false });
 
     const { data, error } = await query;
 

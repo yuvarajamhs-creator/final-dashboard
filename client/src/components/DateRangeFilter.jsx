@@ -4,6 +4,7 @@ import './DateRangeFilter.css';
 const PRESETS = [
   { id: 'today', label: 'Today' },
   { id: 'yesterday', label: 'Yesterday' },
+  { id: 'single_day', label: 'Single day' },
   { id: 'today_yesterday', label: 'Today & Yesterday' },
   { id: 'last_7_days', label: 'Last 7 days' },
   { id: 'last_14_days', label: 'Last 14 days' },
@@ -41,9 +42,6 @@ const formatDateIST = (date) => {
 const parseDateIST = (dateString) => {
   if (!dateString) return null;
   const [year, month, day] = dateString.split('-').map(Number);
-  // Create date in local timezone, then adjust for IST
-  const localDate = new Date(year, month - 1, day);
-  // Get IST offset and adjust
   return new Date(year, month - 1, day);
 };
 
@@ -82,6 +80,11 @@ const getPresetDates = (presetId) => {
       startDate = new Date(today);
       startDate.setDate(startDate.getDate() - 1);
       endDate = new Date(startDate);
+      break;
+    case 'single_day':
+      endDate = new Date(today);
+      endDate.setDate(endDate.getDate() - 1);
+      startDate = new Date(endDate);
       break;
     case 'today_yesterday':
       startDate = new Date(today);
@@ -277,6 +280,12 @@ const DateRangeFilter = ({ isOpen, onClose, onApply, initialValue }) => {
 
     // Main date range selection
     setIsSelectingCompare(false);
+    if (selectedPreset === 'single_day') {
+      setStartDate(date);
+      setEndDate(date);
+      setTempStartDate(null);
+      return;
+    }
     if (!tempStartDate || (tempStartDate && endDate && date < tempStartDate)) {
       setTempStartDate(date);
       setStartDate(date);
@@ -534,8 +543,12 @@ const DateRangeFilter = ({ isOpen, onClose, onApply, initialValue }) => {
           <span className="date-range-filter-title">
             <i className="far fa-calendar-alt"></i>
             {selectedPreset === 'custom' && startDate && endDate
-              ? `${formatDateIST(startDate)} - ${formatDateIST(endDate)}`
-              : PRESETS.find(p => p.id === selectedPreset)?.label || 'Select Date Range'}
+              ? (formatDateIST(startDate) === formatDateIST(endDate)
+                  ? formatDateIST(startDate)
+                  : `${formatDateIST(startDate)} - ${formatDateIST(endDate)}`)
+              : selectedPreset === 'single_day' && startDate && endDate
+                ? formatDateIST(startDate)
+                : PRESETS.find(p => p.id === selectedPreset)?.label || 'Select Date Range'}
           </span>
           <button type="button" className="date-range-filter-close" onClick={onClose}>×</button>
         </div>

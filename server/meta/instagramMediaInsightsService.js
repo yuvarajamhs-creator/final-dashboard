@@ -21,6 +21,7 @@ const {
   resolveIgAccountsFromPages,
   getDateRangeFromPeriod,
 } = require("./instagramInsightsService");
+const storySnapshots = require("../repositories/instagramStorySnapshotsRepository");
 
 function getSystemToken() {
   const token = (
@@ -435,6 +436,68 @@ function buildByContentTypeAggregates(media) {
 /** Max number of media items to fetch insights for (reduces API calls and load time). */
 const MEDIA_INSIGHTS_LIMIT = 50;
 
+/** Max stories to fetch when using the dedicated /stories endpoint (limits per-account API calls). */
+const STORY_FETCH_LIMIT = 25;
+
+/**
+ * Fetch story IDs from the dedicated stories edge.
+ * GET /{ig-user-id}/stories — returns only IDs; stories are available ~24h after posting.
+ * @param {string} igAccountId - IG Business Account ID
+ * @param {string} accessToken - Page or system access token
+ * @returns {Promise<Array<{ id: string }>>}
+ */
+async function fetchStoryIds(igAccountId, accessToken) {
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/stories`;
+  const data = await rateLimiter.schedule(() =>
+    graphApiGet(url, { access_token: accessToken })
+  );
+  if (!data || !Array.isArray(data.data)) return [];
+  return (data.data || []).map((item) => ({ id: item.id }));
+}
+
+/**
+ * Fetch a single media object by ID (for story details: thumbnail, timestamp, etc.).
+ * @param {string} mediaId - IG Media ID
+ * @param {string} accessToken
+ * @returns {Promise<object|null>} Normalized media object or null
+ */
+async function fetchMediaById(mediaId, accessToken) {
+  const fields = "id,media_type,product_type,video_duration,permalink,timestamp,caption,thumbnail_url,media_url";
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}`;
+  const item = await rateLimiter.schedule(() =>
+    graphApiGet(url, { fields, access_token: accessToken })
+  );
+  if (!item || !item.id) return null;
+  return {
+    id: item.id,
+    media_type: item.media_type || null,
+    product_type: "STORY",
+    video_duration: item.video_duration != null ? Number(item.video_duration) : null,
+    permalink: item.permalink || null,
+    timestamp: item.timestamp || null,
+    caption: (item.caption && typeof item.caption === "string") ? item.caption : null,
+    thumbnail_url: item.thumbnail_url || null,
+    media_url: item.media_url || null,
+  };
+}
+
+/**
+ * Fetch story list using the dedicated /stories endpoint, then resolve each to full media shape.
+ * Use when contentType is 'stories' to maximize stories returned (API exposes them ~24h).
+ * @param {string} igAccountId - IG Business Account ID
+ * @param {string} accessToken - Page or system access token
+ * @returns {Promise<Array>} Array of media objects (same shape as fetchMediaList items) with product_type STORY
+ */
+async function fetchStoryList(igAccountId, accessToken) {
+  const ids = await fetchStoryIds(igAccountId, accessToken);
+  if (ids.length === 0) return [];
+  const limited = ids.slice(0, STORY_FETCH_LIMIT);
+  const list = await Promise.all(
+    limited.map(({ id }) => fetchMediaById(id, accessToken))
+  );
+  return list.filter(Boolean);
+}
+
 /**
  * Fetch media insights for one IG account: media list then conditional insights per media (parallel, rate-limited).
  * Limited to most recent MEDIA_INSIGHTS_LIMIT items to keep response time acceptable.
@@ -445,14 +508,34 @@ const MEDIA_INSIGHTS_LIMIT = 50;
  * @returns {Promise<Array>}
  */
 async function fetchAccountMediaInsights(igAccountId, accessToken, opts = {}) {
-  const mediaList = await fetchMediaList(igAccountId, accessToken);
-  if (mediaList.length === 0) return [];
-
   const productType = contentTypeToProductType(opts.contentType);
-  let filtered = filterMediaByContentTypeAndDate(mediaList, productType, {
-    from: opts.from,
-    to: opts.to,
-  });
+  let filtered = [];
+
+  // For stories, use the dedicated /stories endpoint first to get all available stories (~24h window).
+  if (opts.contentType === "stories") {
+    const storyList = await fetchStoryList(igAccountId, accessToken);
+    if (storyList.length > 0) {
+      filtered = [...storyList].sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
+    }
+  }
+
+  if (filtered.length === 0) {
+    const mediaList = await fetchMediaList(igAccountId, accessToken);
+    if (mediaList.length === 0) return [];
+    filtered = filterMediaByContentTypeAndDate(mediaList, productType, {
+      from: opts.from,
+      to: opts.to,
+    });
+    // When date filter returns empty but we have a range, show latest content (no date filter) so Top Content by Views is not blank.
+    if (filtered.length === 0 && opts.from && opts.to) {
+      filtered = filterMediaByContentTypeAndDate(mediaList, productType, {});
+    }
+  }
+
   if (filtered.length === 0) return [];
 
   // Sort by timestamp descending (most recent first) and cap to limit
@@ -517,7 +600,7 @@ async function fetchInstagramMediaInsights(opts = {}) {
   }
 
   const warnings = [];
-  const allMedia = [];
+  let allMedia = [];
 
   for (const accountId of accountIds) {
     try {
@@ -527,8 +610,29 @@ async function fetchInstagramMediaInsights(opts = {}) {
         to: opts.to,
       });
       allMedia.push(...list);
+      if (opts.contentType === "stories" && list.length > 0) {
+        try {
+          await storySnapshots.saveStories(accountId, list);
+        } catch (_) {
+          // Table may not exist; don't fail the request
+        }
+      }
     } catch (err) {
       warnings.push(`Account ${accountId}: ${err?.message || err}`);
+    }
+  }
+
+  if (opts.contentType === "stories" && accountIds.length > 0) {
+    try {
+      const stored = await storySnapshots.getStoriesByAccountIds(accountIds, MEDIA_INSIGHTS_LIMIT);
+      const byId = new Map();
+      for (const m of allMedia) byId.set(m.media_id, m);
+      for (const m of stored) if (!byId.has(m.media_id)) byId.set(m.media_id, m);
+      allMedia = [...byId.values()]
+        .sort((a, b) => (b.views || b.video_views || 0) - (a.views || a.video_views || 0))
+        .slice(0, MEDIA_INSIGHTS_LIMIT);
+    } catch (_) {
+      // Table may not exist; keep live-only
     }
   }
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './BestPerformingAd.css';
 import DateRangeFilter from '../components/DateRangeFilter';
+import MultiSelectFilter from '../components/MultiSelectFilter';
 import { PROJECT_ORDER, ALL_SPECIFIED_ACCOUNT_IDS, buildAdAccountsByProject, normalizeAccountId } from '../constants/projectAdAccounts';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -24,7 +25,8 @@ const getAuthToken = () => {
 
 const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
 
-// USD to INR conversion rate (update as needed)
+// USD to INR conversion rate (update as needed; reserved for future use)
+// eslint-disable-next-line no-unused-vars
 const USD_TO_INR = 83;
 
 // Revenue per conversion (₹) used for ROAS: (Conversion Count * REVENUE_PER_CONVERSION) / Amount spend
@@ -213,13 +215,71 @@ const fetchInsightsData = async ({ campaignId = '', adId = '', startDate = '', e
                 action_values: values,
                 // Video metrics for hook/hold: Hold Rate = video_p100_watched_actions / video_play × 100
                 video_play: aggs['video_play'] || aggs['video_view'] || 0,
-                video_p100_watched: values['video_p100_watched_actions'] || aggs['video_p100_watched_actions'] || values['video_p100_watched'] || aggs['video_p100_watched'] || 0
+                video_p100_watched: values['video_p100_watched_actions'] || aggs['video_p100_watched_actions'] || values['video_p100_watched'] || aggs['video_p100_watched'] || 0,
+                campaign_status: d.campaign_status || d.status || null,
+                ad_status: d.ad_status || d.effective_status || null
             };
         });
     } catch (e) {
         console.error("Failed to fetch insights data", e);
         return [];
     }
+};
+
+// Fetch Wix analytics (same as Dashboard). Returns { rows: [...] }. Rows have platform: 'wix'.
+const fetchWixAnalytics = async ({ from, to }) => {
+    if (!from || !to) return { rows: [], error: 'Missing date range' };
+    try {
+        const token = getAuthToken();
+        const headers = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const url = `${API_BASE}/api/wix/analytics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+        const res = await fetch(url, { headers });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (res.status === 503) return { rows: [], error: data.error || 'Wix not configured' };
+            return { rows: data.rows || [], error: data.error || data.details || `Request failed (${res.status})` };
+        }
+        if (Array.isArray(data)) return { rows: data };
+        return { rows: data.rows || [], error: data.error || null };
+    } catch (e) {
+        console.error("Failed to fetch Wix analytics", e);
+        return { rows: [], error: e.message || 'Failed to fetch Wix analytics' };
+    }
+};
+
+// Filter to only ACTIVE campaign and ad (same as Dashboard). Keep rows with null status (e.g. Wix).
+const filterByActiveStatus = (rows) => {
+    if (!Array.isArray(rows)) return [];
+    return rows.filter((r) => {
+        const campaignStatus = r.campaign_status || r.status;
+        const adStatus = r.ad_status || r.effective_status;
+        if (campaignStatus && campaignStatus !== 'ACTIVE') return false;
+        if (adStatus && adStatus !== 'ACTIVE') return false;
+        return true;
+    });
+};
+
+// Fetch insights from multiple ad accounts (one request per account) and combine. Same pattern as Dashboard fetchAllAccountsDashboardData.
+const fetchAllAccountsInsightsData = async ({ startDate, endDate, accounts, live = false }) => {
+    if (!accounts || accounts.length === 0) return [];
+    const promises = accounts.map((account) =>
+        fetchInsightsData({
+            startDate,
+            endDate,
+            adAccountId: (account.account_id || account.id || '').toString().replace(/^act_/, ''),
+            live
+        })
+    );
+    const settled = await Promise.allSettled(promises);
+    const results = settled.map((s, i) => {
+        if (s.status === 'fulfilled') return s.value || [];
+        const acc = accounts[i];
+        const name = acc?.account_name || acc?.name || acc?.account_id || acc?.id || 'unknown';
+        console.warn(`[BestPerformingAd] Ad account "${name}" failed:`, s.reason?.message || s.reason);
+        return [];
+    });
+    return results.flat();
 };
 
 export default function BestPerformingAd() {
@@ -248,6 +308,7 @@ export default function BestPerformingAd() {
     const [dataLoading, setDataLoading] = useState(false);
     const [error, setError] = useState(null);
     const [manualConversionByCampaign, setManualConversionByCampaign] = useState({});
+    const [selectedAdAccounts, setSelectedAdAccounts] = useState([]);
 
     // Load ad accounts on mount
     useEffect(() => {
@@ -277,57 +338,98 @@ export default function BestPerformingAd() {
     }, [projectsDropdownOpen]);
 
     const adAccountsByProject = useMemo(() => buildAdAccountsByProject(adAccounts), [adAccounts]);
-    // Comma-separated ad account IDs for the selected project (null = All Projects = no filter). Normalized so API comparison is consistent.
+    // Same as Dashboard: only accounts that are in our project list AND returned by the API (token can access).
+    const specifiedAccountIdSet = useMemo(() => new Set(ALL_SPECIFIED_ACCOUNT_IDS.map((id) => normalizeAccountId(id))), []);
+    const specifiedAdAccounts = useMemo(
+        () => adAccounts.filter((acc) => specifiedAccountIdSet.has(normalizeAccountId(acc.account_id || acc.id))),
+        [adAccounts, specifiedAccountIdSet]
+    );
+    // Account IDs for the selected project (for comma-separated fallback).
     const selectedProjectAdAccountIds = useMemo(() => {
         if (!selectedProject) return null;
         const accounts = adAccountsByProject[selectedProject] || [];
         const ids = accounts.map((a) => normalizeAccountId(a.value)).filter(Boolean);
         return ids.length > 0 ? ids.join(',') : null;
     }, [selectedProject, adAccountsByProject]);
+    // Account objects for the selected project (same as Dashboard accountsForProject).
+    const accountsForProject = useMemo(() => {
+        if (!selectedProjectAdAccountIds) return [];
+        const idSet = new Set(selectedProjectAdAccountIds.split(',').map((s) => s.trim()).filter(Boolean));
+        return adAccounts.filter((acc) => idSet.has(normalizeAccountId(acc.account_id || acc.id)));
+    }, [adAccounts, selectedProjectAdAccountIds]);
+    // Array of account IDs for the selected project (for project-restrict effect).
+    const selectedProjectAccountIds = useMemo(() => {
+        if (!selectedProject) return [];
+        const list = adAccountsByProject[selectedProject] || [];
+        return list.map((a) => normalizeAccountId(a.value)).filter(Boolean);
+    }, [selectedProject, adAccountsByProject]);
+    // When specific ad accounts are selected, the account objects (same as Dashboard accountsForSelectedAdAccounts).
+    const accountsForSelectedAdAccounts = useMemo(() => {
+        if (selectedAdAccounts.length === 0) return [];
+        const baseList = selectedProject ? accountsForProject : specifiedAdAccounts;
+        const idSet = new Set(selectedAdAccounts.map((id) => normalizeAccountId(id)));
+        return baseList.filter((acc) => idSet.has(normalizeAccountId(acc.account_id || acc.id)));
+    }, [selectedAdAccounts, selectedProject, accountsForProject, specifiedAdAccounts]);
+    // Which accounts to fetch: specific selection or "all" for current project (same as Dashboard accountsForFetch).
+    const accountsForFetch = useMemo(() => {
+        if (selectedAdAccounts.length > 0) return accountsForSelectedAdAccounts;
+        return selectedProject ? accountsForProject : specifiedAdAccounts;
+    }, [selectedAdAccounts, selectedProject, accountsForSelectedAdAccounts, accountsForProject, specifiedAdAccounts]);
 
-    // Fetch insights: when "All Projects" is selected, always use Meta live data; otherwise DB first then live refresh. Project selection filters by that project's ad accounts.
+    // When project changes, restrict Ad Accounts to those in the selected project (same as Dashboard).
+    useEffect(() => {
+        if (selectedAdAccounts.length === 0) return;
+        if (!selectedProject || selectedProjectAccountIds.length === 0) return;
+        const projectIdSet = new Set(selectedProjectAccountIds.map((id) => normalizeAccountId(id)));
+        const filtered = selectedAdAccounts.filter((id) => projectIdSet.has(normalizeAccountId(id)));
+        if (filtered.length !== selectedAdAccounts.length) setSelectedAdAccounts(filtered);
+    }, [selectedProject, selectedProjectAccountIds, selectedAdAccounts]);
+
+    // Fetch insights: same logic as Dashboard — Date Range + Project + Ad Account; one request per account when multiple accounts.
     useEffect(() => {
         let cancelled = false;
         setDataLoading(true);
         setError(null);
-        const isAllProjects = selectedProject === '';
 
         const loadInsights = async () => {
             try {
-                if (isAllProjects) {
-                    // All Projects: fetch only for specified ad account IDs (strict ID-based)
-                    const allSpecifiedIds = ALL_SPECIFIED_ACCOUNT_IDS.length > 0 ? ALL_SPECIFIED_ACCOUNT_IDS.join(',') : undefined;
-                    const liveData = await fetchInsightsData({
-                        startDate: filters.startDate,
-                        endDate: filters.endDate,
-                        adAccountId: allSpecifiedIds,
-                        live: true
+                const opts = {
+                    startDate: filters.startDate,
+                    endDate: filters.endDate,
+                    live: true
+                };
+                let metaRows = [];
+                if (accountsForFetch.length > 0) {
+                    metaRows = await fetchAllAccountsInsightsData({
+                        ...opts,
+                        accounts: accountsForFetch
                     });
                     if (cancelled) return;
-                    setInsightsData(liveData || []);
-                    setDataLoading(false);
-                    return;
+                } else if (selectedProject === '' && specifiedAdAccounts.length === 0) {
+                    metaRows = await fetchInsightsData({
+                        ...opts,
+                        adAccountId: undefined
+                    });
+                    if (cancelled) return;
+                } else if (selectedProject && selectedProjectAdAccountIds) {
+                    metaRows = await fetchInsightsData({
+                        ...opts,
+                        adAccountId: selectedProjectAdAccountIds
+                    });
+                    if (cancelled) return;
                 }
-                // Specific project: filter by that project's ad account IDs; Phase 1 from DB cache, then Phase 2 live refresh
-                const cachedData = await fetchInsightsData({
-                    startDate: filters.startDate,
-                    endDate: filters.endDate,
-                    adAccountId: selectedProjectAdAccountIds || undefined,
-                    live: false
-                });
-                if (cancelled) return;
-                if (cachedData && cachedData.length > 0) {
-                    setInsightsData(cachedData);
-                    setDataLoading(false);
+                // Merge Wix analytics (same as Dashboard) so card values match
+                const fromDate = filters.startDate || null;
+                const toDate = filters.endDate || null;
+                if (fromDate && toDate) {
+                    const wixResult = await fetchWixAnalytics({ from: fromDate, to: toDate });
+                    const wixRows = wixResult.rows || [];
+                    if (wixRows.length > 0) metaRows = [...(metaRows || []), ...wixRows];
+                    if (cancelled) return;
                 }
-                const liveData = await fetchInsightsData({
-                    startDate: filters.startDate,
-                    endDate: filters.endDate,
-                    adAccountId: selectedProjectAdAccountIds || undefined,
-                    live: true
-                });
-                if (cancelled) return;
-                setInsightsData(liveData || []);
+                // Filter to ACTIVE campaign/ad only (same as Dashboard)
+                const filtered = filterByActiveStatus(metaRows || []);
+                setInsightsData(filtered);
                 setDataLoading(false);
             } catch (e) {
                 if (!cancelled) {
@@ -339,7 +441,7 @@ export default function BestPerformingAd() {
         };
         loadInsights();
         return () => { cancelled = true; };
-    }, [filters.startDate, filters.endDate, selectedProject, selectedProjectAdAccountIds]);
+    }, [filters.startDate, filters.endDate, selectedProject, selectedProjectAdAccountIds, specifiedAdAccounts, accountsForFetch]);
 
     // Calculate totals from insights data
     const totals = useMemo(() => {
@@ -536,7 +638,17 @@ export default function BestPerformingAd() {
                 return (b.spend || 0) - (a.spend || 0);
             });
         return result;
-    }, [insightsData, adAccounts]);
+    }, [insightsData, adAccounts, getAdAccountDisplay]);
+
+    // Total conversion count for KPI: sum of manual overrides (when set) or API conversions per campaign
+    const totalConversionCount = useMemo(() => {
+        return campaignData.reduce((sum, row) => {
+            const effective = manualConversionByCampaign[row.id] !== undefined
+                ? manualConversionByCampaign[row.id]
+                : row.conversions;
+            return sum + (Number(effective) || 0);
+        }, 0);
+    }, [campaignData, manualConversionByCampaign]);
 
     // Total conversion count for KPI: sum of manual overrides (when set) or API conversions per campaign
     const totalConversionCount = useMemo(() => {
@@ -717,6 +829,22 @@ export default function BestPerformingAd() {
                             </div>
                         )}
                     </div>
+                </div>
+
+                {/* 3. Ad Account - same as Ads Analytics Dashboard */}
+                <div className="filter-block filter-block-ad-account">
+                    <MultiSelectFilter
+                        label="Ad Account"
+                        emoji="🏢"
+                        options={selectedProject ? accountsForProject : (specifiedAdAccounts || [])}
+                        selectedValues={selectedAdAccounts}
+                        onChange={(values) => setSelectedAdAccounts(values)}
+                        placeholder="All Ad Accounts"
+                        getOptionLabel={(opt) => opt.account_name || opt.name || `Account ${opt.account_id || opt.id}`}
+                        getOptionValue={(opt) => normalizeAccountId(opt.account_id || opt.id)}
+                        disabled={adAccountsLoading}
+                        loading={adAccountsLoading}
+                    />
                 </div>
             </div>
 
@@ -964,8 +1092,9 @@ export default function BestPerformingAd() {
                 <div className="chart-header mb-3">
                     <div className="chart-title-text">Campaign performance</div>
                 </div>
+                <div className="campaign-table-scroll">
                 <table className="performance-table">
-                    <thead>
+                    <thead style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: '#f8fafc' }}>
                         <tr>
                             <th>Ad account</th>
                             <th>Campaign name</th>
@@ -1060,6 +1189,7 @@ export default function BestPerformingAd() {
                         )}
                     </tbody>
                 </table>
+                </div>
                 <div className="d-flex justify-content-end mt-3 text-muted small">
                     {campaignData.length > 0 ? (
                         <>

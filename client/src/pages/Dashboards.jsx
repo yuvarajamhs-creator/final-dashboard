@@ -57,6 +57,17 @@ const transformActions = (actions = []) => {
   return map;
 };
 
+// Get numeric value for Hold Rate: from named array (e.g. video_play_actions?.[0]?.value) or from actions/action_values by action_type
+const getActionValue = (row, actionType) => {
+  if (!row) return 0;
+  for (const arr of [row.actions, row.action_values]) {
+    if (!Array.isArray(arr)) continue;
+    const entry = arr.find((a) => a && a.action_type === actionType);
+    if (entry != null && entry.value != null) return Number(entry.value) || 0;
+  }
+  return 0;
+};
+
 // Helper: safe number
 const num = (v) => Number(v) || 0;
 
@@ -358,10 +369,25 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       const cpl = leadCount > 0 ? spend / leadCount : 0;
       
       // Video metrics for Hook Rate and Hold Rate
-      // Meta returns these in actions array; support all known action_type variants
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
       const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || 0;
       const videoThruPlays = aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+
+      // Prefer server-enriched values when present (from insightsService.enrichInsightsRow), else compute client-side
+      const plays = (d.videoPlays != null && d.videoPlays !== '') ? num(d.videoPlays) : (Number(d.video_play_actions?.[0]?.value || 0) || getActionValue(d, 'video_play_actions') || getActionValue(d, 'video_play') || getActionValue(d, 'video_view') || 0);
+      const fullViews = (d.videoP100Watched != null && d.videoP100Watched !== '') ? num(d.videoP100Watched) : (Number(d.video_p100_watched_actions?.[0]?.value || 0) || getActionValue(d, 'video_p100_watched_actions') || getActionValue(d, 'video_p100_watched') || (aggs['video_p100_watched'] ?? values['video_p100_watched'] ?? 0) || 0);
+      const serverHoldRate = (d.hold_rate != null && d.hold_rate !== '') || (d.holdRate != null && d.holdRate !== '') ? num(d.hold_rate ?? d.holdRate) : null;
+      let holdRate = serverHoldRate;
+      if (holdRate == null || (typeof holdRate === 'number' && Number.isNaN(holdRate))) {
+        holdRate = 0;
+        if (plays > 0 && fullViews >= 0) {
+          holdRate = parseFloat(((fullViews / plays) * 100).toFixed(2));
+        } else if (videoViews > 0 && videoThruPlays >= 0) {
+          holdRate = parseFloat(((videoThruPlays / videoViews) * 100).toFixed(2));
+        } else if (video3sViews > 0 && videoThruPlays >= 0) {
+          holdRate = parseFloat(((videoThruPlays / video3sViews) * 100).toFixed(2));
+        }
+      }
 
       // Hook Rate: 3s views / impressions * 100 (or direct hook_rate from Meta if present)
       let hookRate = 0;
@@ -369,18 +395,6 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         hookRate = num(d.hook_rate);
       } else {
         hookRate = impressions > 0 ? (video3sViews / impressions) * 100 : 0;
-      }
-
-      // Hold Rate: ThruPlays / video views * 100 (or ThruPlays / 3s views if video views missing; or direct hold_rate)
-      let holdRate = 0;
-      if ((d.Hold_rate !== undefined && d.Hold_rate !== null && d.Hold_rate !== '') ||
-          (d.hold_rate !== undefined && d.hold_rate !== null && d.hold_rate !== '')) {
-        holdRate = num(d.Hold_rate || d.hold_rate);
-      } else if (videoViews > 0) {
-        holdRate = (videoThruPlays / videoViews) * 100;
-      } else if (video3sViews > 0) {
-        // Ads Manager sometimes defines Hold as ThruPlays / 3s views
-        holdRate = (videoThruPlays / video3sViews) * 100;
       }
 
       return {
@@ -398,6 +412,8 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         cpl: cpl,
         hookRate: hookRate,
         holdRate: holdRate,
+        videoPlays: plays,
+        videoP100Watched: fullViews,
         videoViews: videoViews,
         video3sViews: video3sViews,
         videoThruPlays: videoThruPlays,
@@ -1216,6 +1232,8 @@ export default function AdsDashboardBootstrap() {
   const [unfollowsLast28Days, setUnfollowsLast28Days] = useState(null);
   const [unfollowsLast28Loading, setUnfollowsLast28Loading] = useState(false);
   const [unfollowsLast28Error, setUnfollowsLast28Error] = useState(null);
+  const [unfollowsReportDaily, setUnfollowsReportDaily] = useState([]);
+  const [showUnfollowsReport, setShowUnfollowsReport] = useState(false);
   
   // Platform-specific metrics (Content Marketing - shown when Platform filter is selected)
   const [contentPlatformMetricsLoading, setContentPlatformMetricsLoading] = useState(false);
@@ -2169,6 +2187,7 @@ export default function AdsDashboardBootstrap() {
             total_unfollows: igData.total_unfollows ?? 0,
             unfollowsChange: igData.unfollowsChange ?? 0,
           });
+          setUnfollowsReportDaily(Array.isArray(igData.unfollows_report_daily) ? igData.unfollows_report_daily : []);
           return;
         }
         return fetchPerformanceInsights({
@@ -2180,12 +2199,14 @@ export default function AdsDashboardBootstrap() {
             total_unfollows: pageData?.total_unfollows ?? 0,
             unfollowsChange: pageData?.unfollowsChange ?? 0,
           });
+          setUnfollowsReportDaily([]);
         });
       })
       .catch((error) => {
         console.error("Error fetching unfollows (last 28 days):", error);
         setUnfollowsLast28Error(error?.message || "Failed to fetch unfollows");
         setUnfollowsLast28Days(null);
+        setUnfollowsReportDaily([]);
       })
       .finally(() => {
         setUnfollowsLast28Loading(false);
@@ -2567,19 +2588,18 @@ export default function AdsDashboardBootstrap() {
         totalHookRateWeight += r.impressions;
       }
       
-      // For Hold Rate: weight by videoViews
-      if (r.holdRate !== undefined && r.holdRate !== null && r.videoViews > 0) {
-        weightedHoldRate += r.holdRate * r.videoViews;
-        totalHoldRateWeight += r.videoViews;
+      // For Hold Rate: weight by videoPlays (video_play_actions)
+      const plays = r.videoPlays || 0;
+      if (r.holdRate !== undefined && r.holdRate !== null && plays > 0) {
+        weightedHoldRate += r.holdRate * plays;
+        totalHoldRateWeight += plays;
       }
     });
     
     // Calculate weighted averages
-    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight : 
+    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
                  (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
-    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                 (t.videoViews > 0 ? (t.videoThruPlays / t.videoViews) * 100 :
-                  (t.video3sViews > 0 ? (t.videoThruPlays / t.video3sViews) * 100 : 0));
+    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight : 0;
     
     t.roas = t.spend ? t.totalRevenue / t.spend : 0;
 
@@ -2612,131 +2632,104 @@ export default function AdsDashboardBootstrap() {
   }, [data]);
 
   // Aggregate data by Ad for detailed table view
-  // Show all ads from filtered data (Time Range, Ad Account, Campaign filters)
-  // This table always shows all ads, not filtered by "Ad Name" selection
+  // Build from insights only; leads in table = same as cards (aggregated row.leads from Meta API).
   const adBreakdown = useMemo(() => {
-    // Aggregate leads from Total Leads data by ad_id
-    // Only count leads from active campaigns
-    const leadsByAdId = new Map();
-    leads.forEach(lead => {
-      const adId = lead.ad_id;
-      const campaignId = lead.campaign_id;
-      
-      // Only count leads from active campaigns
-      // Normalize campaign ID to string for comparison (consistent with other filters)
-      if (adId && campaignId && activeCampaignIds.has(String(campaignId))) {
-        const existing = leadsByAdId.get(adId) || {
-          ad_id: adId,
-          ad_name: lead.ad_name || 'N/A',
-          campaign_id: campaignId,
-          campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
-          leads: 0
-        };
-        existing.leads += 1;
-        leadsByAdId.set(adId, existing);
-      }
-    });
-    
-    // Merge with insights data (spend, impressions, clicks, etc.)
-    // API returns campaigns with all effective statuses
-    const insightsByAdId = new Map();
     const sourceData = allAdsData.length > 0 ? allAdsData : data;
+    // Aggregate insights by ad_id (sum spend/impressions/clicks; weighted hook/hold)
+    const adAgg = new Map();
     sourceData.forEach(row => {
-      if (row.ad_id) {
-        // Only exclude if explicitly not active
-        const campaignStatus = row.campaign_status || row.status;
-        const adStatus = row.ad_status || row.effective_status;
-        if (campaignStatus && campaignStatus !== 'ACTIVE') return;
-        if (adStatus && adStatus !== 'ACTIVE') return;
-        // Include if status is null (API filtered) or ACTIVE
-        insightsByAdId.set(row.ad_id, row);
+      if (!row.ad_id) return;
+      const campaignStatus = row.campaign_status || row.status;
+      const adStatus = row.ad_status || row.effective_status;
+      if (campaignStatus && campaignStatus !== 'ACTIVE') return;
+      if (adStatus && adStatus !== 'ACTIVE') return;
+
+      const id = row.ad_id;
+      const cur = adAgg.get(id) || {
+        ad_id: id,
+        ad_name: row.ad_name || 'Unnamed Ad',
+        campaign_id: row.campaign_id,
+        campaign_name: row.campaign || row.campaign_name || 'N/A',
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        leads: 0,
+        videoViews: 0,
+        video3sViews: 0,
+        videoThruPlays: 0,
+        videoPlays: 0,
+        videoP100Watched: 0,
+        ad_status: row.ad_status || row.effective_status || 'ACTIVE',
+        campaign_status: row.campaign_status || row.status || 'ACTIVE',
+        hookRateSum: 0,
+        hookRateWeight: 0,
+        holdRateSum: 0,
+        holdRateWeight: 0
+      };
+      cur.spend += row.spend || 0;
+      cur.impressions += row.impressions || 0;
+      cur.clicks += row.clicks || 0;
+      cur.conversions += row.conversions || 0;
+      cur.leads += row.leads || 0;
+      cur.videoViews += row.videoViews || 0;
+      cur.video3sViews += row.video3sViews || 0;
+      cur.videoThruPlays += row.videoThruPlays || 0;
+      cur.videoPlays += row.videoPlays || 0;
+      cur.videoP100Watched += row.videoP100Watched || 0;
+      if (row.hookRate != null && row.impressions > 0) {
+        cur.hookRateSum += row.hookRate * row.impressions;
+        cur.hookRateWeight += row.impressions;
       }
+      // Hold Rate: weight by videoPlays (holdRate is always a number now)
+      if ((row.holdRate ?? 0) >= 0 && (row.videoPlays || 0) > 0) {
+        cur.holdRateSum += row.holdRate * (row.videoPlays || 0);
+        cur.holdRateWeight += row.videoPlays || 0;
+      }
+      adAgg.set(id, cur);
     });
-    
-    // Combine leads data with insights data
-    const combinedAds = Array.from(leadsByAdId.values()).map(leadAd => {
-      const insights = insightsByAdId.get(leadAd.ad_id) || {};
+
+    let combinedAds = Array.from(adAgg.values()).map(ad => {
+      // Use same leads as cards: aggregated from insights (row.leads per ad). Table and cards show same data.
+      const leadsCount = ad.leads || 0;
+      const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
+      // Hold Rate = (video_p100_watched_actions / video_play_actions) * 100; show null when no plays
+      const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0));
       return {
-        ...leadAd,
-        spend: insights.spend || 0,
-        impressions: insights.impressions || 0,
-        clicks: insights.clicks || 0,
-        conversions: insights.conversions || 0,
-        videoViews: insights.videoViews || 0,
-        video3sViews: insights.video3sViews || 0,
-        videoThruPlays: insights.videoThruPlays || 0,
-        ad_status: insights.ad_status || 'ACTIVE',
-        campaign_status: insights.campaign_status || 'ACTIVE',
-        hookRate: insights.hookRate,
-        holdRate: insights.holdRate
+        ad_id: ad.ad_id,
+        ad_name: ad.ad_name,
+        campaign_id: ad.campaign_id,
+        campaign_name: ad.campaign_name,
+        campaign: ad.campaign_name,
+        spend: ad.spend,
+        impressions: ad.impressions,
+        clicks: ad.clicks,
+        conversions: ad.conversions,
+        leads: leadsCount,
+        ad_status: ad.ad_status,
+        campaign_status: ad.campaign_status,
+        videoPlays: ad.videoPlays || 0,
+        hookRate,
+        holdRate
       };
     });
-    
+
     // Filter by selected campaigns if any are selected
-    let filteredAds = combinedAds;
-    const allCampaignsSelected = selectedCampaigns.length === 0 || 
-      (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
-    
+    const allCampaignsSelected = selectedCampaigns.length === 0 || (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
     if (!allCampaignsSelected && selectedCampaigns.length > 0) {
-      filteredAds = combinedAds.filter(ad => {
-        // Handle both string and number comparison
-        const adCampaignId = String(ad.campaign_id);
-        return selectedCampaigns.some(selectedId => String(selectedId) === adCampaignId);
-      });
+      combinedAds = combinedAds.filter(ad => selectedCampaigns.some(sid => String(sid) === String(ad.campaign_id)));
     }
-    
-    // Calculate metrics for each ad
-    // For hookRate and holdRate, we need to aggregate from sourceData for each ad
-    const result = filteredAds.map(ad => {
-      // Find all rows for this ad to aggregate hookRate and holdRate properly
-      const adRows = sourceData.filter(r => r.ad_id === ad.ad_id);
-      
-      // Calculate weighted average for Hook Rate (weight by impressions)
-      let totalHookRateWeight = 0;
-      let weightedHookRate = 0;
-      
-      // Calculate weighted average for Hold Rate (weight by videoViews)
-      let totalHoldRateWeight = 0;
-      let weightedHoldRate = 0;
-      
-      adRows.forEach(row => {
-        if (row.hookRate !== undefined && row.hookRate !== null && row.impressions > 0) {
-          weightedHookRate += row.hookRate * row.impressions;
-          totalHookRateWeight += row.impressions;
-        }
-        if (row.holdRate !== undefined && row.holdRate !== null && row.videoViews > 0) {
-          weightedHoldRate += row.holdRate * row.videoViews;
-          totalHoldRateWeight += row.videoViews;
-        }
-      });
-      
-      const hookRate = ad.hookRate !== undefined ? ad.hookRate :
-                      (totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
-                      (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0));
-      
-      const holdRate = ad.holdRate !== undefined ? ad.holdRate :
-                      (totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                      (ad.videoViews > 0 ? (ad.videoThruPlays / ad.videoViews) * 100 : 0));
-      
+
+    const result = combinedAds.map(ad => {
       const ctr = ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0;
       const cpl = ad.leads > 0 ? ad.spend / ad.leads : 0;
       const conversionRate = ad.clicks > 0 ? (ad.conversions / ad.clicks) * 100 : 0;
-      
-      return {
-        ...ad,
-        campaign: ad.campaign_name || ad.campaign || 'N/A',
-        ctr,
-        cpl,
-        hookRate,
-        holdRate,
-        conversionRate
-      };
+      return { ...ad, ctr, cpl, conversionRate };
     });
-    
-    // Sort by leads count (descending) as default ranking
+
     result.sort((a, b) => b.leads - a.leads);
     return result;
-  }, [leads, data, allAdsData, selectedCampaigns, campaigns.length, activeCampaignIds]);
+  }, [data, allAdsData, selectedCampaigns, campaigns.length]);
     
   // Sort helper function
   const sortData = (data, field, direction) => {
@@ -3512,16 +3505,20 @@ export default function AdsDashboardBootstrap() {
   // Helper to get display text for content date range
   const getContentDateRangeDisplay = () => {
     if (contentDateRangeFilterValue) {
-      if (contentDateRangeFilterValue.range_type === 'custom') {
+      if (contentDateRangeFilterValue.range_type === 'custom' || contentDateRangeFilterValue.range_type === 'single_day') {
         const start = new Date(contentDateRangeFilterValue.start_date);
         const end = new Date(contentDateRangeFilterValue.end_date);
         const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (contentDateRangeFilterValue.start_date === contentDateRangeFilterValue.end_date) {
+          return startDisplay;
+        }
         return `${startDisplay} - ${endDisplay}`;
       }
       const presetLabels = {
         'today': 'Today',
         'yesterday': 'Yesterday',
+        'single_day': 'Single day',
         'today_yesterday': 'Today & Yesterday',
         'last_7_days': 'Last 7 days',
         'last_14_days': 'Last 14 days',
@@ -3714,7 +3711,6 @@ export default function AdsDashboardBootstrap() {
     { id: 'facebook', name: 'Facebook' },
     { id: 'instagram', name: 'Instagram' },
     { id: 'youtube', name: 'YouTube' },
-    { id: 'wix', name: 'Wix' },
   ];
 
   // New data for content marketing charts
@@ -4260,7 +4256,7 @@ export default function AdsDashboardBootstrap() {
             <div className="kpi-card-body">
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
-              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate)}</div>
+              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</div>
               <small className="kpi-subtitle">100% Watched / Video Play</small>
             </div>
           </div>
@@ -5107,10 +5103,10 @@ export default function AdsDashboardBootstrap() {
                     <small className="text-muted">Real-time insights from Meta Ads API</small>
                   </div>
                 </div>
-                <div className="table-responsive">
+                <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', minWidth: '800px' }}>
                 {sortedAdBreakdown.length > 0 ? (
-                  <table className="table table-hover align-middle mb-0">
-                    <thead className="table-light">
+                  <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
+                    <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: '#f8f9fa' }}>
                       <tr>
                         <SortableHeader
                           field="ad_name"
@@ -5343,7 +5339,7 @@ export default function AdsDashboardBootstrap() {
                           <td className="text-end fw-medium">{formatMoney(ad.cpl)}</td>
                           <td className="text-end">{formatNum(ad.conversions)}</td>
                           <td className="text-end">{formatPerc(ad.hookRate)}</td>
-                          <td className="text-end">{formatPerc(ad.holdRate)}</td>
+                          <td className="text-end">{formatPerc(ad.holdRate ?? 0)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -5359,13 +5355,13 @@ export default function AdsDashboardBootstrap() {
                         <td className="text-end">{formatMoney(totals.cpl)}</td>
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.conversions, 0))}</td>
                         <td className="text-end">{formatPerc(videoPerformanceTotals?.hookRate ?? totals.hookRate)}</td>
-                        <td className="text-end">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate)}</td>
+                        <td className="text-end">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</td>
                       </tr>
                     </tfoot>
                   </table>
                 ) : (
                   <div className="text-center py-5" style={{ color: '#64748b' }}>
-                    <p className="mb-0">No ad data available. Please select a Campaign filter and ensure leads are loaded, or check your Meta API connection.</p>
+                    <p className="mb-0">No ad data available. Check your Time Range, Project, and Ad Account filters, or verify your Meta API connection.</p>
                 </div>
                 )}
               </div>
@@ -5795,10 +5791,88 @@ export default function AdsDashboardBootstrap() {
                   </small>
                 )}
                 <small className="kpi-subtitle">Last 28 days</small>
+                {unfollowsReportDaily.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-link btn-sm p-0 mt-1 text-muted"
+                    style={{ fontSize: '0.75rem' }}
+                    onClick={() => setShowUnfollowsReport((v) => !v)}
+                  >
+                    {showUnfollowsReport ? 'Hide report' : 'View report'}
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
+
+        {/* Unfollows daily report (last 28 days derivation) */}
+        {showUnfollowsReport && unfollowsReportDaily.length > 0 && (
+          <div className="mb-4">
+            <div className="card">
+              <div className="card-body p-3">
+                <h6 className="mb-2">Unfollows report (last 28 days)</h6>
+                <p className="text-muted small mb-2">
+                  Daily follower count and how total unfollows are derived. Negative daily change = unfollows; positive = follows. Total row: Follower count = sum of all daily counts; Follows/Unfollows = sum over 28 days.
+                </p>
+                <div className="table-responsive" style={{ maxHeight: 400, overflow: 'auto' }}>
+                  <table className="table table-sm table-bordered mb-0">
+                    <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                      <tr>
+                        <th>Date</th>
+                        <th>Follower count</th>
+                        <th>Daily change</th>
+                        <th>Follows</th>
+                        <th>Unfollows</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unfollowsReportDaily.map((row, i) => (
+                        <tr key={i}>
+                          <td>{row.date}</td>
+                          <td>{formatNum(row.follower_count)}</td>
+                          <td>{row.daily_change != null ? (row.daily_change >= 0 ? '+' : '') + formatNum(row.daily_change) : '–'}</td>
+                          <td>{row.follows != null ? formatNum(row.follows) : '–'}</td>
+                          <td>{row.unfollows != null ? formatNum(row.unfollows) : '–'}</td>
+                        </tr>
+                      ))}
+                      <tr className="table-secondary fw-semibold">
+                        <td>Total</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.follower_count ?? 0), 0))}</td>
+                        <td>–</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.follows ?? 0), 0))}</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.unfollows ?? 0), 0))}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
+                    onClick={() => {
+                      const headers = ['Date', 'Follower count', 'Daily change', 'Follows', 'Unfollows'];
+                      const rows = unfollowsReportDaily.map((r) => [r.date, r.follower_count, r.daily_change ?? '', r.follows ?? '', r.unfollows ?? '']);
+                      const totalFollows = unfollowsReportDaily.reduce((s, r) => s + (r.follows ?? 0), 0);
+                      const totalUnfollows = unfollowsReportDaily.reduce((s, r) => s + (r.unfollows ?? 0), 0);
+                      const totalFollowerCount = unfollowsReportDaily.reduce((s, r) => s + (r.follower_count ?? 0), 0);
+                      rows.push(['Total', totalFollowerCount, '', totalFollows, totalUnfollows]);
+                      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+                      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                      const a = document.createElement('a');
+                      a.href = URL.createObjectURL(blob);
+                      a.download = `unfollows-report-${unfollowsReportDaily[0]?.date || 'start'}-to-${unfollowsReportDaily[unfollowsReportDaily.length - 1]?.date || 'end'}.csv`;
+                      a.click();
+                      URL.revokeObjectURL(a.href);
+                    }}
+                  >
+                    Download CSV
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Platform-Specific Metrics (shown when Platform filter is selected) */}
         {selectedPlatforms && selectedPlatforms.length > 0 && (

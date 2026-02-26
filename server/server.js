@@ -26,6 +26,10 @@ app.use("/api/permissions", permissionsRoutes);
 const aiInsightsRoutes = require("./routes/aiInsights");
 app.use("/api/ai", aiInsightsRoutes);
 
+// Import Plan page routes (teams, targets, aggregates)
+const planRoutes = require("./routes/plan");
+app.use("/api/plan", planRoutes);
+
 app.get("/", (req, res) => {
   res.send("Backend is running...");
 });

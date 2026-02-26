@@ -837,6 +837,66 @@ router.get("/insights/daily", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// INSIGHTS DAILY SPEND — for Team Performance / Ad Spend charts. New endpoint; does not change existing APIs.
+// GET /api/meta/insights/daily-spend?from=YYYY-MM-DD&to=YYYY-MM-DD&ad_account_id=...
+// Returns { data: [ { date, spend } ] } sorted by date.
+// ---------------------------------------------------------------------
+router.get("/insights/daily-spend", optionalAuthMiddleware, async (req, res) => {
+  try {
+    let credentials;
+    try {
+      credentials = getCredentials();
+    } catch (e) {
+      return res.status(400).json({ error: "Meta credentials required", details: e.message });
+    }
+    const { from, to, ad_account_id } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from;
+    let toDate = to;
+    if (!fromDate || !toDate || !dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+      const today = new Date().toISOString().slice(0, 10);
+      const fromD = new Date();
+      fromD.setDate(fromD.getDate() - 7);
+      fromDate = fromD.toISOString().slice(0, 10);
+      toDate = today;
+    }
+    const adAccountId = (ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId || !/^\d+$/.test(adAccountId)) {
+      return res.status(400).json({ error: "Valid Ad Account ID is required", details: "Provide ad_account_id or set META_AD_ACCOUNT_ID" });
+    }
+    const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
+    const timeRange = JSON.stringify({ since: fromDate, until: toDate });
+    const params = {
+      access_token: credentials.accessToken,
+      level: "campaign",
+      time_increment: 1,
+      time_range: timeRange,
+      fields: "date_start,spend",
+      limit: 1000,
+      filtering: JSON.stringify(DAILY_INSIGHTS_STATUS_FILTER),
+    };
+    const { data } = await axios.get(insightsUrl, { params, timeout: 60000 });
+    const rows = Array.isArray(data.data) ? data.data : [];
+    const byDate = new Map();
+    rows.forEach((row) => {
+      const date = row.date_start || null;
+      if (!date) return;
+      const spend = parseFloat(row.spend || 0) || 0;
+      byDate.set(date, (byDate.get(date) || 0) + spend);
+    });
+    const sortedDates = [...byDate.keys()].sort();
+    const result = sortedDates.map((date) => ({ date, spend: byDate.get(date) }));
+    return res.json({ data: result });
+  } catch (err) {
+    console.error("Insights daily-spend error:", err?.message || err);
+    return res.status(500).json({
+      error: "Failed to fetch daily spend",
+      details: err?.response?.data?.error?.message || err?.message || String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
 // INSIGHTS BACKFILL — trigger via Postman: POST body { from, to } (YYYY-MM-DD), optional ad_account_id.
 // If ad_account_id omitted: fetch all ad accounts from Meta and run backfill for each.
 // ---------------------------------------------------------------------
@@ -1611,32 +1671,49 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
 
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    let pageRes;
-    try {
-      pageRes = await axios.get(pageUrl, {
-        params: {
-          access_token: systemToken,
-          fields: "instagram_business_account{id}",
-        },
-        timeout: 10000,
-      });
-    } catch (pageErr) {
-      const code = pageErr?.response?.data?.error?.code;
-      console.warn("[Instagram Audience Demographics] Page not accessible:", pageId, code, pageErr?.response?.data?.error?.message || pageErr.message);
-      return res.status(200).json(emptyData());
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
     }
-    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        const code = pageErr?.response?.data?.error?.code;
+        console.warn("[Instagram Audience Demographics] Page not accessible:", pageId, code, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json(emptyData());
+      }
+    }
     if (!igAccountId) {
       return res.status(200).json({
         ...emptyData(),
         message: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
       });
     }
-
-    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
-    if (tokenError || !pageToken) {
-      console.warn("[Instagram Audience Demographics] Page token not available for page:", pageId, tokenError);
-      return res.status(200).json(emptyData());
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (tokenError || !t) {
+        console.warn("[Instagram Audience Demographics] Page token not available for page:", pageId, tokenError);
+        return res.status(200).json(emptyData());
+      }
+      pageToken = t;
     }
     const { city_breakdown, country_breakdown, age_breakdown, gender_breakdown } = await fetchInstagramAudienceDemographics(
       igAccountId,
@@ -1702,29 +1779,47 @@ router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req
 
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    let pageRes;
-    try {
-      pageRes = await axios.get(pageUrl, {
-        params: { access_token: systemToken, fields: "instagram_business_account{id}" },
-        timeout: 10000,
-      });
-    } catch (pageErr) {
-      console.warn("[Instagram reach-by-follow-type] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
-      return res.status(200).json({
-        data: {
-          total_value: 0,
-          follower_value: 0,
-          non_follower_value: 0,
-          followers_pct: 0,
-          non_followers_pct: 0,
-          name: "reach",
-          period: "day",
-          breakdown: "follow_type",
-        },
-        message: "Page not accessible with current token.",
-      });
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
     }
-    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        console.warn("[Instagram reach-by-follow-type] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json({
+          data: {
+            total_value: 0,
+            follower_value: 0,
+            non_follower_value: 0,
+            followers_pct: 0,
+            non_followers_pct: 0,
+            name: "reach",
+            period: "day",
+            breakdown: "follow_type",
+          },
+          message: "Page not accessible with current token.",
+        });
+      }
+    }
     if (!igAccountId) {
       return res.status(200).json({
         data: {
@@ -1740,23 +1835,25 @@ router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req
         message: "This page does not have a linked Instagram Business account.",
       });
     }
-
-    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
-    if (tokenError || !pageToken) {
-      console.warn("[Instagram reach-by-follow-type] Page token not available:", pageId, tokenError);
-      return res.status(200).json({
-        data: {
-          total_value: 0,
-          follower_value: 0,
-          non_follower_value: 0,
-          followers_pct: 0,
-          non_followers_pct: 0,
-          name: "reach",
-          period: "day",
-          breakdown: "follow_type",
-        },
-        message: "Page not accessible with current token.",
-      });
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (tokenError || !t) {
+        console.warn("[Instagram reach-by-follow-type] Page token not available:", pageId, tokenError);
+        return res.status(200).json({
+          data: {
+            total_value: 0,
+            follower_value: 0,
+            non_follower_value: 0,
+            followers_pct: 0,
+            non_followers_pct: 0,
+            name: "reach",
+            period: "day",
+            breakdown: "follow_type",
+          },
+          message: "Page not accessible with current token.",
+        });
+      }
+      pageToken = t;
     }
     const result = await fetchReachByFollowType(igAccountId, fromDate, toDate, pageToken);
     const total = result.total_value || 0;
@@ -1834,30 +1931,62 @@ router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, re
     const pageId = String(page_id).trim();
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    let pageRes;
-    try {
-      pageRes = await axios.get(pageUrl, {
-        params: { access_token: systemToken, fields: "instagram_business_account{id}" },
-        timeout: 10000,
-      });
-    } catch (pageErr) {
-      console.warn("[Instagram online-followers] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
-      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
     }
-    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    if (!igAccountId) {
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        console.warn("[Instagram online-followers] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+      }
+    }
     if (!igAccountId) {
       return res.status(200).json({
         ...emptyOnlineFollowers(),
         message: "This page does not have a linked Instagram Business account.",
       });
     }
-    const { token: pageToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
-    if (tokenError || !pageToken) {
-      console.warn("[Instagram online-followers] Page token not available:", pageId, tokenError);
-      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (t) {
+        pageToken = t;
+      } else {
+        const systemTokenFallback = getSystemToken();
+        if (systemTokenFallback) {
+          pageToken = systemTokenFallback;
+          console.warn("[Instagram online-followers] Using system token for page:", pageId, tokenError);
+        }
+      }
+      if (!pageToken) {
+        console.warn("[Instagram online-followers] Page token not available:", pageId, tokenError);
+        return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+      }
     }
     const raw = await fetchOnlineFollowers(igAccountId, pageToken);
     const result = processOnlineFollowersResponse(raw);
+    if (result.is_sample_data && !result.message) {
+      result.message = "Meta returned no online_followers data for this account.";
+    }
     return res.json(result);
   } catch (err) {
     const code = err?.response?.data?.error?.code;

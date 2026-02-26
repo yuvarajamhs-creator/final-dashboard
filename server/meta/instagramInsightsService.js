@@ -176,14 +176,24 @@ function extractMetricValue(m) {
 }
 
 /**
+ * Sum all daily values from any metric (views, reach, total_interactions, etc.).
+ * Use so dashboard totals match sum of daily breakdown, same as Follows.
+ * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} metric
+ * @returns {number}
+ */
+function sumDailyMetricValues(metric) {
+  const values = metric?.values || [];
+  return values.reduce((sum, v) => sum + (Number(v?.value) || 0), 0);
+}
+
+/**
  * Sum all daily values from follower_count metric.
  * Use when API returns daily new followers per day (each value = new followers that day).
  * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} followerCountMetric
  * @returns {number}
  */
 function sumFollowerCountValues(followerCountMetric) {
-  const values = followerCountMetric?.values || [];
-  return values.reduce((sum, v) => sum + (Number(v?.value) || 0), 0);
+  return sumDailyMetricValues(followerCountMetric);
 }
 
 /**
@@ -243,6 +253,36 @@ function buildDailySubscriberChange(followerCountMetric) {
 }
 
 /**
+ * Build daily unfollows report: date, follower_count, daily_change, follows, unfollows.
+ * Used for "Last 28 days" report showing how total_unfollows is derived.
+ * @param {{ name: string, values: Array<{ value: number, end_time: string }> }} followerCountMetric
+ * @returns {Array<{ date: string, follower_count: number, daily_change: number, follows: number, unfollows: number }>}
+ */
+function buildUnfollowsReportDaily(followerCountMetric) {
+  const values = followerCountMetric?.values || [];
+  if (values.length < 2) return [];
+  const sorted = [...values]
+    .filter((v) => v && (v.value != null) && v.end_time)
+    .map((v) => ({ value: Number(v.value) || 0, date: (v.end_time || "").split("T")[0] }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const out = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const followerCount = sorted[i].value;
+    const dailyChange = followerCount - sorted[i - 1].value;
+    const follows = dailyChange > 0 ? dailyChange : 0;
+    const unfollows = dailyChange < 0 ? Math.abs(dailyChange) : 0;
+    out.push({
+      date: sorted[i].date,
+      follower_count: followerCount,
+      daily_change: dailyChange,
+      follows,
+      unfollows,
+    });
+  }
+  return out;
+}
+
+/**
  * Normalize a single account's Meta API response into our format.
  * Handles both values (time_series) and total_value response shapes.
  *
@@ -265,6 +305,7 @@ function normalizeAccountResponse(accountId, data, date) {
     date: date || new Date().toISOString().slice(0, 10),
     daily_views_engagements: [],
     daily_subscriber_change: [],
+    unfollows_report_daily: [],
   };
 
   if (!Array.isArray(data)) return out;
@@ -286,23 +327,25 @@ function normalizeAccountResponse(accountId, data, date) {
       out.net_followers_delta = deltaResult.net_followers;
       out.date_range_days = deltaResult.date_range_days;
       out.daily_subscriber_change = buildDailySubscriberChange(m);
+      out.unfollows_report_daily = buildUnfollowsReportDaily(m);
       continue;
     }
 
     const sum = extractMetricValue(m);
-    const hasTotalValue = m.total_value != null;
+    // Prefer sum of daily values for reach/views/interactions (same as Follows) so dashboard matches daily breakdown
+    const dailySum = sumDailyMetricValues(m);
     switch (name) {
       case "reach":
-        out.reached = sum;
+        out.reached = dailySum > 0 ? dailySum : sum;
         break;
       case "views":
-        if (hasTotalValue || out.views === 0) out.views = sum;
+        out.views = dailySum > 0 ? dailySum : sum;
         break;
       case "impressions":
         if (out.views === 0) out.views = sum;
         break;
       case "total_interactions":
-        if (hasTotalValue || out.interactions === 0) out.interactions = sum;
+        out.interactions = dailySum > 0 ? dailySum : sum;
         break;
       case "profile_views":
         if (out.interactions === 0) out.interactions = sum;
@@ -485,6 +528,8 @@ function aggregateAccounts(accounts) {
     valid.map((a) => a.daily_subscriber_change || []),
     "subscriber"
   );
+  // Use first account's daily report (same date range); multi-account could merge by date later
+  const unfollowsReportDaily = (valid.length > 0 && valid[0].unfollows_report_daily) ? valid[0].unfollows_report_daily : [];
 
   return {
     totalReached,
@@ -497,6 +542,7 @@ function aggregateAccounts(accounts) {
     date_range_days: maxDateRangeDays,
     daily_views_engagements: dailyViewsEngagements,
     daily_subscriber_change: dailySubscriberChange,
+    unfollows_report_daily: unfollowsReportDaily,
     accounts: valid.map((a) => ({
       accountId: a.accountId,
       reached: a.reached || 0,
@@ -647,6 +693,7 @@ async function fetchInstagramInsights(opts = {}) {
       period: `${since} to ${until}`,
       daily_views_engagements: aggregated.daily_views_engagements || [],
       daily_subscriber_change: aggregated.daily_subscriber_change || [],
+      unfollows_report_daily: aggregated.unfollows_report_daily || [],
     },
     error: null,
   };
