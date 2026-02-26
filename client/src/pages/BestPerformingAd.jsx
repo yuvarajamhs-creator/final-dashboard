@@ -650,16 +650,6 @@ export default function BestPerformingAd() {
         }, 0);
     }, [campaignData, manualConversionByCampaign]);
 
-    // Total conversion count for KPI: sum of manual overrides (when set) or API conversions per campaign
-    const totalConversionCount = useMemo(() => {
-        return campaignData.reduce((sum, row) => {
-            const effective = manualConversionByCampaign[row.id] !== undefined
-                ? manualConversionByCampaign[row.id]
-                : row.conversions;
-            return sum + (Number(effective) || 0);
-        }, 0);
-    }, [campaignData, manualConversionByCampaign]);
-
     // Date range filter handler (same as Ads Analytics Dashboard)
     const handleDateRangeApply = (payload) => {
         if (!payload.start_date || !payload.end_date) {
