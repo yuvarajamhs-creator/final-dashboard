@@ -184,7 +184,7 @@ export default function BestPerformingReel() {
         return () => { cancelled = true; };
     }, [reelPage, contentFilters.startDate, contentFilters.endDate]);
 
-    // Fetch media insights. For Stories, skip date filter so we get latest available (API only returns stories for ~24–48h).
+    // Fetch media insights. Send date range for all tabs so Stories can show snapshots within the selected period (live API only returns ~24–48h).
     useEffect(() => {
         if (!reelPage) {
             setMediaInsights(null);
@@ -195,7 +195,7 @@ export default function BestPerformingReel() {
         setLoadingMedia(true);
         setMediaError(null);
         const opts = { contentType: activeTab };
-        if (contentFilters.startDate && contentFilters.endDate && activeTab !== 'stories') {
+        if (contentFilters.startDate && contentFilters.endDate) {
             opts.from = contentFilters.startDate;
             opts.to = contentFilters.endDate;
         }
@@ -560,10 +560,37 @@ export default function BestPerformingReel() {
         return { list, label, subtitle };
     })();
 
-    // Age & Gender Distribution (Ads Insights) — grouped bar chart like Audience page
+    // Age & Gender Distribution: when a page is selected, use Instagram audience (per-page); else use Ads demographics (single ad account).
     const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const ageGenderBreakdownForChart = (() => {
+        if (reelPage && demographicsData?.age_breakdown?.length && demographicsData?.gender_breakdown?.length) {
+            const ageRows = demographicsData.age_breakdown;
+            const genderRows = demographicsData.gender_breakdown;
+            let totalMale = 0;
+            let totalFemale = 0;
+            genderRows.forEach((r) => {
+                const v = Number(r.value) || 0;
+                const g = (r.gender || '').toString().toLowerCase();
+                if (g === 'm' || g === 'male') totalMale += v;
+                else if (g === 'f' || g === 'female') totalFemale += v;
+            });
+            const totalGender = totalMale + totalFemale;
+            const maleRatio = totalGender > 0 ? totalMale / totalGender : 0.5;
+            const femaleRatio = totalGender > 0 ? totalFemale / totalGender : 0.5;
+            const out = [];
+            ageRows.forEach((r) => {
+                const age = (r.age || r.age_range || '').toString().trim();
+                if (!age) return;
+                const val = Number(r.value) || 0;
+                out.push({ age, gender: 'male', reach: Math.round(val * maleRatio) });
+                out.push({ age, gender: 'female', reach: Math.round(val * femaleRatio) });
+            });
+            return out.length ? out : null;
+        }
+        return adsDemographicsData?.age_gender_breakdown || null;
+    })();
     const ageGenderChartData = (() => {
-        const rows = adsDemographicsData?.age_gender_breakdown || [];
+        const rows = ageGenderBreakdownForChart || [];
         if (!rows.length) return null;
         const byAge = {};
         AGE_BUCKETS.forEach((b) => { byAge[b] = { age: b, men: 0, women: 0 }; });
@@ -584,6 +611,7 @@ export default function BestPerformingReel() {
         const totalWomen = ageGenderChartData.reduce((s, row) => s + (Number(row.women) || 0), 0);
         return [...ageGenderChartData, { age: 'All Ages', men: totalMen, women: totalWomen }];
     })();
+    const ageGenderChartFromInstagram = Boolean(reelPage && demographicsData?.age_breakdown?.length && demographicsData?.gender_breakdown?.length);
 
     // 3. CONTENT LIST FOR TABS — live data only; no sample/placeholder when no page or no media
     const emptyList = [];
@@ -912,10 +940,14 @@ export default function BestPerformingReel() {
                                             <div className="chart-header-row">
                                                 <div className="chart-legend-custom">
                                                     <div className="fw-bold">Age & Gender Distribution</div>
-                                                    <small className="text-secondary text-muted d-block">Audience breakdown by demographics (Meta Ads Insights)</small>
+                                                    <small className="text-secondary text-muted d-block">
+                                                        {ageGenderChartFromInstagram
+                                                            ? 'Audience breakdown by demographics (Instagram audience — selected page)'
+                                                            : 'Audience breakdown by demographics (Meta Ads Insights)'}
+                                                    </small>
                                                 </div>
                                             </div>
-                                            {adsDemographicsError && (
+                                            {!ageGenderChartFromInstagram && adsDemographicsError && (
                                                 <div className="text-muted small mb-2">{adsDemographicsError}</div>
                                             )}
                                             <div style={{ width: '100%', height: 350 }}>
@@ -948,11 +980,13 @@ export default function BestPerformingReel() {
                                                 </div>
                                             </div>
                                         </>
-                                    ) : loadingAdsDemographics ? (
+                                    ) : (loadingAdsDemographics || (reelPage && loadingDemographics)) ? (
                                         <div className="d-flex align-items-center justify-content-center text-muted" style={{ minHeight: 320 }}>
                                             <div className="text-center">
                                                 <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
-                                                <p className="mb-0 small">Loading Age & Gender demographics...</p>
+                                                <p className="mb-0 small">
+                                                    {reelPage && loadingDemographics ? 'Loading Instagram audience…' : 'Loading Age & Gender demographics…'}
+                                                </p>
                                             </div>
                                         </div>
                                     ) : (

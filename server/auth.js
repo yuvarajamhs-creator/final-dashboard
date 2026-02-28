@@ -71,7 +71,10 @@ function authMiddleware(req, res, next) {
       fs.appendFileSync(logPath, logEntry, 'utf8');
     } catch (e) { }
     // #endregion
-    return res.status(401).json({ error: 'Invalid token' });
+    const message = e.name === 'TokenExpiredError'
+      ? 'Token expired. Please log in again.'
+      : 'Invalid token';
+    return res.status(401).json({ error: message });
   }
 }
 

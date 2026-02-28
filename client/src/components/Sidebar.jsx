@@ -159,7 +159,21 @@ export default function Layout({ children }) {
             </NavLink>
           </li>
 
-          {/* 7. Settings Dropdown */}
+          {/* 7. Unique Leads */}
+          <li className="nav-item mb-2">
+            <NavLink
+              to="/unique-leads"
+              className="nav-link sidebar-link d-flex align-items-center"
+              onClick={() => {
+                if (window.innerWidth < 992) setSidebarOpen(false);
+              }}
+            >
+              <span className="icon-wrapper me-3">📋</span>
+              <span>Unique Leads</span>
+            </NavLink>
+          </li>
+
+          {/* 8. Settings Dropdown */}
           <li className="nav-item mb-2" ref={settingsMenuRef}>
             <button
               className={`nav-link sidebar-link d-flex align-items-center justify-content-between w-100 ${

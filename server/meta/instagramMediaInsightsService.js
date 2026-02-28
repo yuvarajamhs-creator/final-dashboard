@@ -636,6 +636,17 @@ async function fetchInstagramMediaInsights(opts = {}) {
     }
   }
 
+  // For stories, filter by date range when from/to provided (so "Top Stories by Views" matches selected period)
+  if (opts.contentType === "stories" && opts.from && opts.to && allMedia.length > 0) {
+    const fromTs = new Date(opts.from + "T00:00:00Z").getTime();
+    const toTs = new Date(opts.to + "T23:59:59Z").getTime();
+    allMedia = allMedia.filter((m) => {
+      if (!m.timestamp) return true;
+      const t = new Date(m.timestamp).getTime();
+      return t >= fromTs && t <= toTs;
+    });
+  }
+
   const byContentType = buildByContentTypeAggregates(allMedia);
 
   return {

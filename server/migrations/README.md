@@ -1,5 +1,19 @@
 # Database migrations
 
+## Unique Leads Extraction (fix "Could not find the table 'public.unique_leads_paid' in the schema cache")
+
+If the **Unique Leads** page shows: **"Could not find the table 'public.unique_leads_paid' in the schema cache"** when you click Import:
+
+1. Open your **Supabase** project → **SQL Editor** → **New query**.
+2. Copy the full contents of **`unique-leads-tables.sql`** and paste into the editor.
+3. Click **Run**.
+4. In Supabase: **Settings** → **API** → scroll to **Schema** → click **Reload schema** (wait ~10–30 seconds).
+5. Refresh the Unique Leads page and try Import again.
+
+Tables created: `unique_leads_paid`, `unique_leads_youtube`, `unique_leads_free`.
+
+---
+
 ## Plan tables (fix "Could not find the table 'public.plan_teams' in the schema cache")
 
 If the **Add team** modal (or Plan page) shows: **"Could not find the table 'public.plan_teams' in the schema cache"** or **"Team goals need database setup"**, run the Plan tables migration:
