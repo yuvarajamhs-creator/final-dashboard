@@ -19,6 +19,7 @@ function getAccessToken() {
 
 /**
  * Fetch ad accounts from Meta /me/adaccounts and upsert into DB.
+ * Handles pagination to get ALL accounts, not just the first page.
  * @returns {Promise<Array<{account_id, account_name, currency, timezone, status}>>}
  */
 async function fetchAndCache() {
@@ -26,16 +27,36 @@ async function fetchAndCache() {
   const url = `https://graph.facebook.com/${META_API_VERSION}/me/adaccounts`;
 
   const run = async () => {
-    const { data } = await axios.get(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      params: {
-        fields: 'account_id,name,currency,timezone_name,account_status',
-        limit: 100,
-      },
-      timeout: 15000,
-    });
-    const raw = (data && data.data) ? data.data : [];
-    const accounts = raw.map((acc) => ({
+    let allRaw = [];
+    let params = {
+      fields: 'account_id,name,currency,timezone_name,account_status',
+      limit: 100,
+    };
+    let pageCount = 0;
+    const maxPages = 20; // Safety limit (e.g. 2000 accounts max)
+
+    do {
+      const { data } = await axios.get(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params,
+        timeout: 15000,
+      });
+      const raw = (data && data.data) ? data.data : [];
+      allRaw = allRaw.concat(raw);
+
+      const paging = data && data.paging;
+      const nextUrl = paging && paging.next;
+      const after = paging && paging.cursors && paging.cursors.after;
+
+      if (nextUrl && after && pageCount < maxPages) {
+        params = { ...params, after };
+        pageCount++;
+      } else {
+        break;
+      }
+    } while (true);
+
+    const accounts = allRaw.map((acc) => ({
       account_id: (acc.account_id != null ? acc.account_id : acc.id || '').toString().replace(/^act_/, ''),
       name: (acc.name || acc.account_name || '').toString().trim() || `Account ${(acc.account_id || acc.id || '')}`,
       currency: acc.currency || 'USD',

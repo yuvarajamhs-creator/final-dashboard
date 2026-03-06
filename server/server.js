@@ -8,7 +8,7 @@ const { signToken, hashPassword, comparePassword, authMiddleware } = require('./
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 
 // Import Meta routes
 const metaRoutes = require("./meta/meta.jsx");
@@ -21,6 +21,18 @@ app.use("/api/wix", wixRoutes);
 // Import Permissions routes
 const permissionsRoutes = require("./routes/permissions");
 app.use("/api/permissions", permissionsRoutes);
+
+// Import AI Insights routes (Gemini)
+const aiInsightsRoutes = require("./routes/aiInsights");
+app.use("/api/ai", aiInsightsRoutes);
+
+// Import Plan page routes (teams, targets, aggregates)
+const planRoutes = require("./routes/plan");
+app.use("/api/plan", planRoutes);
+
+// Unique Leads Extraction (import/export, deduplication)
+const uniqueLeadsRoutes = require("./routes/uniqueLeads");
+app.use("/api/unique-leads", uniqueLeadsRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend is running...");

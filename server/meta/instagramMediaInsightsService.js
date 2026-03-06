@@ -21,6 +21,7 @@ const {
   resolveIgAccountsFromPages,
   getDateRangeFromPeriod,
 } = require("./instagramInsightsService");
+const storySnapshots = require("../repositories/instagramStorySnapshotsRepository");
 
 function getSystemToken() {
   const token = (
@@ -65,16 +66,16 @@ async function graphApiGet(url, params) {
 
 /**
  * Step 1 — Fetch media list for an IG Business Account.
- * GET /{ig_user_id}/media?fields=id,media_type,product_type,video_duration,permalink
+ * GET /{ig_user_id}/media?fields=id,media_type,product_type,video_duration,permalink,timestamp,caption
  * Handles pagination via next cursor.
  *
  * @param {string} igAccountId - IG Business Account ID
  * @param {string} accessToken - Page or system access token
- * @returns {Promise<Array<{ id, media_type, product_type, video_duration, permalink }>>}
+ * @returns {Promise<Array<{ id, media_type, product_type, video_duration, permalink, timestamp, caption }>>}
  */
 async function fetchMediaList(igAccountId, accessToken) {
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/media`;
-  const fields = "id,media_type,product_type,video_duration,permalink";
+  const fields = "id,media_type,product_type,video_duration,permalink,timestamp,caption,thumbnail_url,media_url";
   const limit = 100;
   const all = [];
 
@@ -93,6 +94,10 @@ async function fetchMediaList(igAccountId, accessToken) {
         product_type: item.product_type || null,
         video_duration: item.video_duration != null ? Number(item.video_duration) : null,
         permalink: item.permalink || null,
+        timestamp: item.timestamp || null,
+        caption: (item.caption && typeof item.caption === "string") ? item.caption : null,
+        thumbnail_url: item.thumbnail_url || null,
+        media_url: item.media_url || null,
       });
     }
 
@@ -121,11 +126,14 @@ function isReel(media) {
 }
 
 /**
- * Step 4 — Hook rate: (video_views / plays) * 100. Divide-by-zero safe, clamped 0–100, 2 decimals.
+ * Hook rate: (threeSecondViews / totalPlays) * 100.
+ * Divide-by-zero safe, clamped 0–100, 2 decimals.
  */
-function calcHookRate(plays, video_views) {
-  if (plays == null || plays <= 0) return 0;
-  const rate = (Number(video_views) / Number(plays)) * 100;
+function calcHookRate(threeSecondViews, totalPlays) {
+  if (threeSecondViews == null || threeSecondViews < 0) return null;
+  const total = Number(totalPlays) || 0;
+  if (total <= 0) return null;
+  const rate = (Number(threeSecondViews) / total) * 100;
   const clamped = Math.min(100, Math.max(0, rate));
   return Math.round(clamped * 100) / 100;
 }
@@ -162,12 +170,13 @@ function extractMetricValue(metric) {
 }
 
 /**
- * Step 3 — Conditional insights fetch per media. Reels: plays, video_views, video_avg_time_watched.
- * Non-Reels: reach, impressions, likes, comments, saved. Never mix; error-safe.
+ * Step 3 — Conditional insights fetch per media.
+ * Reels: views, reach, ig_reels_avg_watch_time, total_interactions, likes, comments (plays/video_views deprecated).
+ * Non-Reels: views, reach, total_interactions, likes, comments, saved.
  *
- * @param {object} media - { id, media_type, product_type, video_duration, permalink }
+ * @param {object} media - { id, media_type, product_type, video_duration, permalink, timestamp, caption }
  * @param {string} accessToken
- * @returns {Promise<{ media_id, media_type, product_type, hook_rate, hold_rate, availability }>}
+ * @returns {Promise<{ media_id, permalink, timestamp, caption, media_type, product_type, views, reach, video_avg_time_watched, total_interactions, likes, comments, hook_rate, hold_rate, availability }>}
  */
 async function fetchMediaInsights(media, accessToken) {
   const mediaId = media.id;
@@ -176,20 +185,32 @@ async function fetchMediaInsights(media, accessToken) {
 
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}/insights`;
 
-  // Reels: request retention metrics only (avoids #100 for feed videos)
+  // Reels: views (3s+), reach, ig_reels_avg_watch_time. Do not request "plays" (deprecated in Meta v22.0+).
   if (reel) {
     const data = await rateLimiter.schedule(() =>
       graphApiGet(baseUrl, {
-        metric: "plays,video_views,video_avg_time_watched",
+        metric: "views,reach,ig_reels_avg_watch_time,total_interactions,likes,comments,saved,shares",
         access_token: accessToken,
       })
     );
-
     if (!data || !Array.isArray(data.data)) {
       return {
         media_id: mediaId,
+        permalink: media.permalink || null,
+        timestamp: media.timestamp || null,
+        caption: media.caption || null,
         media_type: media.media_type || "VIDEO",
         product_type: productType,
+        thumbnail_url: media.thumbnail_url || null,
+        media_url: media.media_url || null,
+        views: 0,
+        reach: 0,
+        video_avg_time_watched: 0,
+        total_interactions: 0,
+        likes: 0,
+        comments: 0,
+        saved: 0,
+        shares: 0,
         hook_rate: null,
         hold_rate: null,
         availability: "not_supported",
@@ -201,57 +222,331 @@ async function fetchMediaInsights(media, accessToken) {
       metrics[m.name] = extractMetricValue(m);
     }
 
+    const views = metrics.views ?? 0;
+    const reach = metrics.reach ?? 0;
     const plays = metrics.plays ?? 0;
-    const video_views = metrics.video_views ?? 0;
-    const video_avg_time_watched = metrics.video_avg_time_watched ?? 0;
+    const video_avg_time_watched = metrics.ig_reels_avg_watch_time ?? 0;
     const video_duration = media.video_duration ?? 0;
+    const total_interactions = metrics.total_interactions ?? 0;
+    const likes = metrics.likes ?? 0;
+    const comments = metrics.comments ?? 0;
+    const saved = metrics.saved ?? 0;
+    const shares = metrics.shares ?? 0;
 
-    const hook_rate = calcHookRate(plays, video_views);
+    const totalPlays = Number(plays) || 0;
+    const hook_rate = calcHookRate(views, totalPlays) ?? (reach > 0 ? calcHookRate(views, reach) : null);
     const hold_rate = calcHoldRate(video_avg_time_watched, video_duration);
 
     return {
       media_id: mediaId,
+      permalink: media.permalink || null,
+      timestamp: media.timestamp || null,
+      caption: media.caption || null,
       media_type: media.media_type || "VIDEO",
       product_type: productType,
+      thumbnail_url: media.thumbnail_url || null,
+      media_url: media.media_url || null,
+      views,
+      reach,
+      plays: totalPlays,
+      video_views: views,
+      video_avg_time_watched,
+      total_interactions,
+      likes,
+      comments,
+      saved,
+      shares,
       hook_rate,
       hold_rate,
       availability: "available",
     };
   }
 
-  // Non-Reels: standard metrics only (never request plays/video_views for feed — causes #100)
-  await rateLimiter.schedule(() =>
+  // Non-Reels (Posts/Stories): views, reach, total_interactions, likes, comments, saved, shares
+  const data = await rateLimiter.schedule(() =>
     graphApiGet(baseUrl, {
-      metric: "reach,impressions,likes,comments,saved",
+      metric: "views,reach,total_interactions,likes,comments,saved,shares",
       access_token: accessToken,
     })
   );
 
+  if (!data || !Array.isArray(data.data)) {
+    return {
+      media_id: mediaId,
+      permalink: media.permalink || null,
+      timestamp: media.timestamp || null,
+      caption: media.caption || null,
+      media_type: media.media_type || "VIDEO",
+      product_type: productType,
+      thumbnail_url: media.thumbnail_url || null,
+      media_url: media.media_url || null,
+      views: 0,
+      reach: 0,
+      total_interactions: 0,
+      likes: 0,
+      comments: 0,
+      saved: 0,
+      shares: 0,
+      hook_rate: null,
+      hold_rate: null,
+      availability: "not_supported",
+    };
+  }
+
+  const metrics = {};
+  for (const m of data.data) {
+    metrics[m.name] = extractMetricValue(m);
+  }
+
+  const views = metrics.views ?? 0;
+  const reach = metrics.reach ?? 0;
+  const total_interactions = metrics.total_interactions ?? 0;
+  const likes = metrics.likes ?? 0;
+  const comments = metrics.comments ?? 0;
+  const saved = metrics.saved ?? 0;
+  const shares = metrics.shares ?? 0;
+
   return {
     media_id: mediaId,
+    permalink: media.permalink || null,
+    timestamp: media.timestamp || null,
+    caption: media.caption || null,
     media_type: media.media_type || "VIDEO",
     product_type: productType,
+    thumbnail_url: media.thumbnail_url || null,
+    media_url: media.media_url || null,
+    views,
+    reach,
+    video_views: views,
+    video_avg_time_watched: 0,
+    total_interactions,
+    likes,
+    comments,
+    saved,
+    shares,
     hook_rate: null,
     hold_rate: null,
-    availability: "not_supported",
+    availability: "available",
   };
 }
 
 /**
+ * Map contentType param to product_type filter.
+ * @param {string} [contentType] - 'all' | 'posts' | 'stories' | 'reels'
+ * @returns {string|null} - 'FEED' | 'STORY' | 'REELS' | null (all)
+ */
+function contentTypeToProductType(contentType) {
+  if (!contentType || contentType === "all") return null;
+  const map = { posts: "FEED", stories: "STORY", reels: "REELS" };
+  return map[contentType] || null;
+}
+
+/**
+ * Filter media list by product_type (and optionally timestamp for date range).
+ * @param {Array} mediaList
+ * @param {string|null} productType - 'FEED' | 'STORY' | 'REELS' | null
+ * @param {{ from?: string, to?: string }} dateRange - YYYY-MM-DD
+ * @returns {Array}
+ */
+function filterMediaByContentTypeAndDate(mediaList, productType, dateRange) {
+  let filtered = mediaList;
+  if (productType) {
+    filtered = filtered.filter((m) => {
+      const pt = m.product_type || (isReel(m) ? "REELS" : "FEED");
+      return pt === productType;
+    });
+  }
+  if (dateRange?.from && dateRange?.to) {
+    const fromTs = new Date(dateRange.from + "T00:00:00Z").getTime();
+    const toTs = new Date(dateRange.to + "T23:59:59Z").getTime();
+    filtered = filtered.filter((m) => {
+      if (!m.timestamp) return true;
+      const t = new Date(m.timestamp).getTime();
+      return t >= fromTs && t <= toTs;
+    });
+  }
+  return filtered;
+}
+
+/**
+ * Build byContentType aggregates from media results.
+ * @param {Array} media
+ * @returns {{ all: object, posts: object, stories: object, reels: object }}
+ */
+function buildByContentTypeAggregates(media) {
+  const types = [
+    { key: "all", productType: null },
+    { key: "posts", productType: "FEED" },
+    { key: "stories", productType: "STORY" },
+    { key: "reels", productType: "REELS" },
+  ];
+
+  const result = {};
+  for (const { key, productType } of types) {
+    const items = productType
+      ? media.filter((m) => (m.product_type || (isReel(m) ? "REELS" : "FEED")) === productType)
+      : media;
+
+    const views = items.reduce((s, m) => s + (Number(m.views) || Number(m.video_views) || 0), 0);
+    const reach = items.reduce((s, m) => s + (Number(m.reach) || 0), 0);
+    const total_interactions = items.reduce((s, m) => s + (Number(m.total_interactions) || 0), 0);
+
+    const reelsWithHookRate = items.filter(
+      (m) => m.hook_rate != null && !Number.isNaN(m.hook_rate) && (m.product_type === "REELS" || isReel(m))
+    );
+    const totalPlaysForReels = reelsWithHookRate.reduce(
+      (s, m) => s + (Number(m.plays) || 0),
+      0
+    );
+    const totalViewsForReels = reelsWithHookRate.reduce(
+      (s, m) => s + (Number(m.views) || Number(m.video_views) || 0),
+      0
+    );
+    const avgHookRate =
+      totalPlaysForReels > 0
+        ? Math.min(100, Math.round((totalViewsForReels / totalPlaysForReels) * 10000) / 100)
+        : reelsWithHookRate.length > 0
+          ? Math.round((reelsWithHookRate.map((m) => m.hook_rate).reduce((a, b) => a + b, 0) / reelsWithHookRate.length) * 100) / 100
+          : null;
+    const hookRates = reelsWithHookRate.map((m) => m.hook_rate);
+    const median = (arr) => {
+      if (!arr.length) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    const medianHookRate = median(hookRates);
+    const contentWinRate =
+      hookRates.length > 0
+        ? Math.round((hookRates.filter((r) => r >= medianHookRate).length / hookRates.length) * 100)
+        : 0;
+
+    result[key] = {
+      views,
+      reach,
+      total_interactions,
+      count: items.length,
+      hook_rate: avgHookRate,
+      content_win_rate: contentWinRate,
+    };
+  }
+  return result;
+}
+
+/** Max number of media items to fetch insights for (reduces API calls and load time). */
+const MEDIA_INSIGHTS_LIMIT = 50;
+
+/** Max stories to fetch when using the dedicated /stories endpoint (limits per-account API calls). */
+const STORY_FETCH_LIMIT = 25;
+
+/**
+ * Fetch story IDs from the dedicated stories edge.
+ * GET /{ig-user-id}/stories — returns only IDs; stories are available ~24h after posting.
+ * @param {string} igAccountId - IG Business Account ID
+ * @param {string} accessToken - Page or system access token
+ * @returns {Promise<Array<{ id: string }>>}
+ */
+async function fetchStoryIds(igAccountId, accessToken) {
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${igAccountId}/stories`;
+  const data = await rateLimiter.schedule(() =>
+    graphApiGet(url, { access_token: accessToken })
+  );
+  if (!data || !Array.isArray(data.data)) return [];
+  return (data.data || []).map((item) => ({ id: item.id }));
+}
+
+/**
+ * Fetch a single media object by ID (for story details: thumbnail, timestamp, etc.).
+ * @param {string} mediaId - IG Media ID
+ * @param {string} accessToken
+ * @returns {Promise<object|null>} Normalized media object or null
+ */
+async function fetchMediaById(mediaId, accessToken) {
+  const fields = "id,media_type,product_type,video_duration,permalink,timestamp,caption,thumbnail_url,media_url";
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}`;
+  const item = await rateLimiter.schedule(() =>
+    graphApiGet(url, { fields, access_token: accessToken })
+  );
+  if (!item || !item.id) return null;
+  return {
+    id: item.id,
+    media_type: item.media_type || null,
+    product_type: "STORY",
+    video_duration: item.video_duration != null ? Number(item.video_duration) : null,
+    permalink: item.permalink || null,
+    timestamp: item.timestamp || null,
+    caption: (item.caption && typeof item.caption === "string") ? item.caption : null,
+    thumbnail_url: item.thumbnail_url || null,
+    media_url: item.media_url || null,
+  };
+}
+
+/**
+ * Fetch story list using the dedicated /stories endpoint, then resolve each to full media shape.
+ * Use when contentType is 'stories' to maximize stories returned (API exposes them ~24h).
+ * @param {string} igAccountId - IG Business Account ID
+ * @param {string} accessToken - Page or system access token
+ * @returns {Promise<Array>} Array of media objects (same shape as fetchMediaList items) with product_type STORY
+ */
+async function fetchStoryList(igAccountId, accessToken) {
+  const ids = await fetchStoryIds(igAccountId, accessToken);
+  if (ids.length === 0) return [];
+  const limited = ids.slice(0, STORY_FETCH_LIMIT);
+  const list = await Promise.all(
+    limited.map(({ id }) => fetchMediaById(id, accessToken))
+  );
+  return list.filter(Boolean);
+}
+
+/**
  * Fetch media insights for one IG account: media list then conditional insights per media (parallel, rate-limited).
+ * Limited to most recent MEDIA_INSIGHTS_LIMIT items to keep response time acceptable.
  *
  * @param {string} igAccountId
  * @param {string} accessToken
- * @returns {Promise<Array<{ media_id, media_type, product_type, hook_rate, hold_rate, availability }>>}
+ * @param {{ contentType?: string, from?: string, to?: string }} opts
+ * @returns {Promise<Array>}
  */
-async function fetchAccountMediaInsights(igAccountId, accessToken) {
-  const mediaList = await fetchMediaList(igAccountId, accessToken);
-  if (mediaList.length === 0) return [];
+async function fetchAccountMediaInsights(igAccountId, accessToken, opts = {}) {
+  const productType = contentTypeToProductType(opts.contentType);
+  let filtered = [];
 
-  const results = await Promise.all(
-    mediaList.map((media) => fetchMediaInsights(media, accessToken))
-  );
+  // For stories, use the dedicated /stories endpoint first to get all available stories (~24h window).
+  if (opts.contentType === "stories") {
+    const storyList = await fetchStoryList(igAccountId, accessToken);
+    if (storyList.length > 0) {
+      filtered = [...storyList].sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
+    }
+  }
 
+  if (filtered.length === 0) {
+    const mediaList = await fetchMediaList(igAccountId, accessToken);
+    if (mediaList.length === 0) return [];
+    filtered = filterMediaByContentTypeAndDate(mediaList, productType, {
+      from: opts.from,
+      to: opts.to,
+    });
+    // When date filter returns empty but we have a range, show latest content (no date filter) so Top Content by Views is not blank.
+    if (filtered.length === 0 && opts.from && opts.to) {
+      filtered = filterMediaByContentTypeAndDate(mediaList, productType, {});
+    }
+  }
+
+  if (filtered.length === 0) return [];
+
+  // Sort by timestamp descending (most recent first) and cap to limit
+  filtered = [...filtered].sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return tb - ta;
+  });
+  filtered = filtered.slice(0, MEDIA_INSIGHTS_LIMIT);
+
+  const results = await Promise.all(filtered.map((media) => fetchMediaInsights(media, accessToken)));
   return results;
 }
 
@@ -305,19 +600,81 @@ async function fetchInstagramMediaInsights(opts = {}) {
   }
 
   const warnings = [];
-  const allMedia = [];
+  let allMedia = [];
 
   for (const accountId of accountIds) {
     try {
-      const list = await fetchAccountMediaInsights(accountId, accessToken);
+      const list = await fetchAccountMediaInsights(accountId, accessToken, {
+        contentType: opts.contentType,
+        from: opts.from,
+        to: opts.to,
+      });
       allMedia.push(...list);
+      if (opts.contentType === "stories" && list.length > 0) {
+        try {
+          await storySnapshots.saveStories(accountId, list);
+        } catch (_) {
+          // Table may not exist; don't fail the request
+        }
+      }
     } catch (err) {
       warnings.push(`Account ${accountId}: ${err?.message || err}`);
     }
   }
 
+  if (opts.contentType === "stories" && accountIds.length > 0) {
+    try {
+      const stored = await storySnapshots.getStoriesByAccountIds(accountIds, MEDIA_INSIGHTS_LIMIT);
+      const byId = new Map();
+      for (const m of allMedia) byId.set(m.media_id, m);
+      for (const m of stored) if (!byId.has(m.media_id)) byId.set(m.media_id, m);
+      allMedia = [...byId.values()]
+        .sort((a, b) => (b.views || b.video_views || 0) - (a.views || a.video_views || 0))
+        .slice(0, MEDIA_INSIGHTS_LIMIT);
+    } catch (_) {
+      // Table may not exist; keep live-only
+    }
+  }
+
+  // For stories only: filter by date range when from/to provided. If that would leave 0 items, show stories from last 7 days so "Top Stories by Views" shows something.
+  let storiesFallbackUsed = false;
+  if (opts.contentType === "stories" && opts.from && opts.to && allMedia.length > 0) {
+    const fromTs = new Date(opts.from + "T00:00:00Z").getTime();
+    const toTs = new Date(opts.to + "T23:59:59Z").getTime();
+    const filteredByDate = allMedia.filter((m) => {
+      if (!m.timestamp) return true;
+      const t = new Date(m.timestamp).getTime();
+      return t >= fromTs && t <= toTs;
+    });
+    if (filteredByDate.length > 0) {
+      allMedia = filteredByDate;
+    } else {
+      // No stories in selected period: show stories from the last 7 days (from opts.to)
+      const fallbackEnd = new Date(opts.to + "T23:59:59Z").getTime();
+      const fallbackStart = new Date(opts.to + "T00:00:00Z");
+      fallbackStart.setUTCDate(fallbackStart.getUTCDate() - 7);
+      const fallbackStartTs = fallbackStart.getTime();
+      const fallbackFiltered = allMedia.filter((m) => {
+        if (!m.timestamp) return true;
+        const t = new Date(m.timestamp).getTime();
+        return t >= fallbackStartTs && t <= fallbackEnd;
+      });
+      if (fallbackFiltered.length > 0) {
+        allMedia = fallbackFiltered;
+        storiesFallbackUsed = true;
+      }
+    }
+  }
+
+  const byContentType = buildByContentTypeAggregates(allMedia);
+
+  // Ensure every media item has `id` for client (Stories use media_id from insights; Posts/Reels often have id from media list)
+  const mediaWithId = allMedia.map((m) => ({ ...m, id: m.id || m.media_id }));
+
   return {
-    media: allMedia,
+    media: mediaWithId,
+    byContentType,
+    ...(opts.contentType === "stories" && storiesFallbackUsed && { storiesFallbackUsed: true }),
     ...(warnings.length > 0 && { warnings }),
   };
 }

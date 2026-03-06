@@ -1,6 +1,7 @@
 // server/jobs/leadsSync.js
 const axios = require('axios');
 const { saveLeads } = require('../repositories/leadsRepository');
+const { parseFieldData, findFirstValueByKeyPattern } = require('../constants/leadFieldLabels');
 const { getJobState, setJobState } = require('../repositories/jobStateRepository');
 
 const META_API_VERSION = "v24.0"; // Using v24.0 as specified in user's API
@@ -445,16 +446,7 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
             stats.filteredByMissingAdCampaign++;
           }
 
-          // Parse field_data
-          const fieldData = {};
-          if (Array.isArray(lead.field_data)) {
-            lead.field_data.forEach(field => {
-              const fieldName = field.name || '';
-              const fieldValue = field.values ? (Array.isArray(field.values) ? field.values[0] : field.values) : '';
-              fieldData[fieldName.toLowerCase()] = fieldValue;
-              fieldData[fieldName] = fieldValue;
-            });
-          }
+          const fieldData = parseFieldData(lead.field_data);
 
           // Extract name
           let leadName = 'N/A';
@@ -505,9 +497,10 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
             }
           }
           if (street === 'N/A') {
-            street = fieldData.street_address || fieldData.address || fieldData.street || 'N/A';
+            street = fieldData.street || fieldData.street_address || fieldData.address || findFirstValueByKeyPattern(fieldData, /street|address/i) || 'N/A';
           }
-          const city = fieldData.city || 'N/A';
+          const city = fieldData.city || findFirstValueByKeyPattern(fieldData, /city|town/i) || 'N/A';
+          const sugarPoll = fieldData['Sugar Poll'] || findFirstValueByKeyPattern(fieldData, /sugar/i) || 'N/A';
 
           const campaignId = lead.campaign_id ? String(lead.campaign_id) : null;
           const adId = lead.ad_id ? String(lead.ad_id) : null;
@@ -555,6 +548,8 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
             DateChar: dateChar, // Date extracted without timezone conversion
             Street: street,
             City: city,
+            SugarPoll: sugarPoll,
+            sugar_poll: sugarPoll,
           };
 
           allLeads.push(mappedLead);

@@ -32,7 +32,18 @@ const MultiSelectFilter = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [openAbove, setOpenAbove] = useState(false);
   const dropdownRef = useRef(null);
+
+  // When opening, decide whether to show dropdown above or below to avoid viewport cut-off
+  useEffect(() => {
+    if (!isOpen || !dropdownRef.current) return;
+    const el = dropdownRef.current;
+    const rect = el.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const estimatedMenuHeight = 360;
+    setOpenAbove(spaceBelow < estimatedMenuHeight && rect.top > spaceBelow);
+  }, [isOpen]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -53,10 +64,20 @@ const MultiSelectFilter = ({
   }, [isOpen]);
 
   // Filter options based on search term
-  const filteredOptions = options.filter(option => {
+  const filteredBySearch = options.filter(option => {
     const label = getOptionLabel(option);
     return label.toLowerCase().includes(searchTerm.toLowerCase());
   });
+
+  // Sort: Active first (A–Z), then inactive/paused (A–Z)
+  const sortByLabel = (a, b) => (getOptionLabel(a) || '').localeCompare(getOptionLabel(b) || '', undefined, { sensitivity: 'base' });
+  const filteredOptions = getOptionStatus
+    ? (() => {
+        const active = filteredBySearch.filter(opt => (getOptionStatus(opt) || '').toUpperCase() === 'ACTIVE');
+        const inactive = filteredBySearch.filter(opt => (getOptionStatus(opt) || '').toUpperCase() !== 'ACTIVE');
+        return [...active.sort(sortByLabel), ...inactive.sort(sortByLabel)];
+      })()
+    : filteredBySearch;
 
   // Handle checkbox toggle (multi) or single selection
   const handleToggle = (value) => {
@@ -128,7 +149,9 @@ const MultiSelectFilter = ({
         </button>
 
         {isOpen && (
-          <div className="multi-select-dropdown-menu">
+          <div
+            className={`multi-select-dropdown-menu ${openAbove ? 'open-above' : ''}`}
+          >
             {/* Search Input */}
             <div className="multi-select-search">
               <i className="fas fa-search multi-select-search-icon"></i>
@@ -169,6 +192,7 @@ const MultiSelectFilter = ({
                   const label = getOptionLabel(option);
                   const isSelected = selectedValues.includes(value);
                   const status = getOptionStatus ? getOptionStatus(option) : null;
+                  const isActive = (status || '').toUpperCase() === 'ACTIVE';
                   const statusColor = status
                     ? (statusColors[status] || DEFAULT_STATUS_COLOR)
                     : DEFAULT_STATUS_COLOR;
@@ -176,7 +200,7 @@ const MultiSelectFilter = ({
                   return (
                     <div
                       key={value}
-                      className={`multi-select-item ${isSelected ? 'selected' : ''}`}
+                      className={`multi-select-item ${isSelected ? 'selected' : ''} ${isActive ? 'multi-select-item-active' : ''}`}
                       onClick={() => handleToggle(value)}
                     >
                       <label className="multi-select-checkbox-label">

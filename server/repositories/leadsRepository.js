@@ -198,18 +198,19 @@ async function getLeadsByCampaignAndAd(campaignIds, adIds, dateFrom, dateTo, for
       query = query.in('page_id', pageIdList);
     }
 
+    // Date filter: use TimeUtc so existing Supabase leads (with TimeUtc populated) are included
     if (dateFrom) {
       const dateFromISO = new Date(dateFrom + 'T00:00:00').toISOString();
-      query = query.gte('created_time', dateFromISO);
+      query = query.gte('TimeUtc', dateFromISO);
     }
 
     if (dateTo) {
       const dateToISO = new Date(dateTo + 'T23:59:59').toISOString();
-      query = query.lte('created_time', dateToISO);
+      query = query.lte('TimeUtc', dateToISO);
     }
 
-    // Order by created_time descending
-    query = query.order('created_time', { ascending: false });
+    // Order by TimeUtc descending (matches common DB column)
+    query = query.order('TimeUtc', { ascending: false });
 
     const { data, error } = await query;
 
@@ -260,6 +261,72 @@ async function getLeadsByDateRange(dateFrom, dateTo) {
 }
 
 /**
+ * Normalize phone for duplicate detection (same as uniqueLeadsRepository)
+ */
+function normalizePhone(phone) {
+  if (phone == null || phone === '') return '';
+  return String(phone).trim().replace(/\s/g, '');
+}
+
+/**
+ * Get duplicate lead rate by campaign for a date range.
+ * Duplicate = same phone appearing more than once in Leads for that campaign+period.
+ * Returns: Array<{ campaign_id, campaign_name, total, unique_phones, duplicate_rate }>
+ */
+async function getDuplicateRateByCampaign(dateFrom, dateTo) {
+  if (!supabase) {
+    throw new Error('Supabase not configured');
+  }
+
+  const dateFromISO = dateFrom ? new Date(dateFrom + 'T00:00:00').toISOString() : null;
+  const dateToISO = dateTo ? new Date(dateTo + 'T23:59:59').toISOString() : null;
+
+  let query = supabase
+    .from('Leads')
+    .select('campaign_id, Campaign, Phone');
+
+  if (dateFromISO) query = query.gte('TimeUtc', dateFromISO);
+  if (dateToISO) query = query.lte('TimeUtc', dateToISO);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('[LeadsRepository] Error getDuplicateRateByCampaign:', error);
+    throw error;
+  }
+
+  const rows = data || [];
+  const byCampaign = new Map();
+
+  for (const row of rows) {
+    const cid = row.campaign_id || '';
+    const name = row.Campaign || row.campaign_name || '';
+    const phone = normalizePhone(row.Phone);
+
+    if (!byCampaign.has(cid)) {
+      byCampaign.set(cid, { campaign_id: cid, campaign_name: name, phones: [], total: 0 });
+    }
+    const rec = byCampaign.get(cid);
+    rec.total++;
+    rec.phones.push(phone);
+  }
+
+  const result = [];
+  for (const [cid, rec] of byCampaign) {
+    const uniquePhones = new Set(rec.phones.filter(Boolean));
+    const uniqueCount = uniquePhones.size;
+    const duplicateRate = rec.total > 0 ? (rec.total - uniqueCount) / rec.total : 0;
+    result.push({
+      campaign_id: cid,
+      campaign_name: rec.campaign_name,
+      total: rec.total,
+      unique_phones: uniqueCount,
+      duplicate_rate: Math.round(duplicateRate * 10000) / 10000,
+    });
+  }
+  return result;
+}
+
+/**
  * Upsert a single lead
  */
 async function upsertLead(lead) {
@@ -270,5 +337,6 @@ module.exports = {
   saveLeads,
   getLeadsByCampaignAndAd,
   getLeadsByDateRange,
-  upsertLead
+  upsertLead,
+  getDuplicateRateByCampaign,
 };

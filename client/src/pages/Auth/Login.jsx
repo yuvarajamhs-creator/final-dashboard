@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { auth } from "../../utils/auth";
 import "./AuthPages.css";
 
@@ -8,6 +8,7 @@ const STORAGE_KEY = process.env.REACT_APP_STORAGE_KEY || "app_auth";
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -73,7 +74,8 @@ export default function Login() {
         }
       } catch (err) {}
 
-      navigate("/");
+      const from = location.state?.from ?? "/";
+      navigate(from, { replace: true });
     } catch (err) {
       const base = process.env.REACT_APP_API_BASE || "";
       setError(

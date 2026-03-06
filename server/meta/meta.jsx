@@ -12,15 +12,20 @@ const { getInsights, upsertInsights } = require("../repositories/insightsReposit
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
 const { fetchInsightsFromMetaLive } = require("./insightsService");
+const { fetchVideoPerformance } = require("./videoPerformanceService");
 const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
-const { fetchInstagramInsights, fetchInstagramAudienceDemographics, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { fetchInstagramInsights, fetchInstagramAudienceDemographics, fetchReachByFollowType, fetchOnlineFollowers, resolveIgAccountsFromPages } = require("./instagramInsightsService");
+const { processOnlineFollowersResponse, buildBestTimesFromMediaViews } = require("./onlineFollowersProcessor");
 const { fetchInstagramMediaInsights } = require("./instagramMediaInsightsService");
+const insightsCache = require("../cache/insightsCache");
+const { runAnalytics } = require("./instagramAnalyticsEngine");
 // Meta API best-practice layer: DB cache, rate limit, one request per resource
 const adAccountsService = require("../services/meta/adAccountsService");
 const campaignsServiceMeta = require("../services/meta/campaignsService");
 const adsServiceMeta = require("../services/meta/adsService");
 const META_API_VERSION = "v21.0";
+const { parseFieldData, findFirstValueByKeyPattern } = require("../constants/leadFieldLabels");
 // Page Insights requires v22+ for page_follows, page_media_view (v21.0 returns invalid metric)
 const META_PAGE_INSIGHTS_API_VERSION = process.env.META_PAGE_INSIGHTS_API_VERSION || "v24.0";
 
@@ -207,6 +212,36 @@ async function getPageAccessToken(pageId) {
     // Clear cache on error
     delete pageTokenCache.tokens[pageId];
 
+    // Fallback 1: try GET pageId with META_ACCESS_TOKEN if different from system token (e.g. user token has page access)
+    const systemToken = getSystemToken();
+    const altToken = (process.env.META_ACCESS_TOKEN || '').trim();
+    if (altToken && altToken !== systemToken) {
+      try {
+        const altRes = await axios.get(
+          `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
+          { params: { fields: 'access_token', access_token: altToken }, timeout: 30000 }
+        );
+        if (altRes.data && altRes.data.access_token) {
+          const pageToken = altRes.data.access_token;
+          pageTokenCache.tokens[pageId] = { token: pageToken, expiresAt: Date.now() + pageTokenCache.ttl };
+          return pageToken;
+        }
+      } catch (altErr) {
+        // ignore, try next fallback
+      }
+    }
+
+    // Fallback 2: refresh cache from me/accounts and businesses/owned_pages, then check cache again
+    try {
+      await loadPageTokensIntoCache();
+      const cached = pageTokenCache.tokens[pageId];
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.token;
+      }
+    } catch (refreshErr) {
+      // ignore
+    }
+
     // Handle specific error codes
     if (errorCode === 190) {
       throw new Error(`Page Access Token expired/invalid for page ${pageId}: ${errorMsg}. Please check your System User Token.`);
@@ -219,6 +254,21 @@ async function getPageAccessToken(pageId) {
     }
 
     throw new Error(`Failed to get page access token for page ${pageId}: ${errorMsg}`);
+  }
+}
+
+/**
+ * Get page access token without throwing. Use when the page may not be in the System User's scope
+ * (e.g. different page IDs). Returns { token } on success, { token: null, error: string } on failure.
+ */
+async function getPageAccessTokenSafe(pageId) {
+  if (!pageId) return { token: null, error: "Page ID is required" };
+  try {
+    const token = await getPageAccessToken(pageId);
+    return { token };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    return { token: null, error: msg };
   }
 }
 
@@ -433,12 +483,31 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     }
     const { campaign_id, ad_id, from, to, days, ad_account_id, is_all_campaigns, is_all_ads } = req.query;
 
-    let adAccountIds = [ad_account_id || credentials.adAccountId].flat().filter(Boolean);
-    const raw = (ad_account_id || credentials.adAccountId || '').toString();
-    if (raw.includes(',')) {
-      adAccountIds = raw.split(',').map((s) => s.trim().replace(/^act_/, '')).filter(Boolean);
-    } else if (adAccountIds[0]) {
-      adAccountIds[0] = String(adAccountIds[0]).replace(/^act_/, '');
+    let adAccountIds;
+    const rawAdAccount = (ad_account_id || '').toString().trim();
+    if (rawAdAccount) {
+      if (rawAdAccount.includes(',')) {
+        adAccountIds = rawAdAccount.split(',').map((s) => s.trim().replace(/^act_/, '')).filter(Boolean);
+      } else {
+        adAccountIds = [String(rawAdAccount).replace(/^act_/, '')];
+      }
+    } else {
+      // "All Ad Accounts" - fetch insights from all ad accounts
+      let accounts = await adAccountsService.listFromDb();
+      if (!accounts || accounts.length === 0) {
+        try {
+          await adAccountsService.fetchAndCache();
+          accounts = await adAccountsService.listFromDb();
+        } catch (e) {
+          console.warn("Insights: fetchAndCache ad accounts failed:", e?.message);
+        }
+      }
+      adAccountIds = (accounts || [])
+        .map((a) => String(a.account_id || a.id || '').replace(/^act_/, ''))
+        .filter((id) => id && /^\d+$/.test(id));
+      if (adAccountIds.length === 0) {
+        adAccountIds = [credentials.adAccountId].filter(Boolean);
+      }
     }
     if (!adAccountIds.length) {
       return res.status(400).json({
@@ -502,67 +571,123 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     const adIds = (ad_id || '').split(',').map((s) => s.trim()).filter(Boolean);
 
     const useLive = req.query.live === '1' || req.query.live === 'true';
-    let data = [];
-    for (const adAccountId of adAccountIds) {
-      const rows = await getInsights({
-        ad_account_id: adAccountId,
-        from: fromDate,
-        to: toDate,
-        campaign_id: campaignIdForDb,
-        ad_id: adIdForDb,
-      });
-      data = data.concat(rows);
+    const skipCache = req.query.refresh === '1' || req.query.refresh === 'true';
+    const insightsCacheKey = insightsCache.buildInsightsKey({
+      ad_account_id: adAccountIds.slice().sort().join(','),
+      from: fromDate,
+      to: toDate,
+      campaign_id: campaignIdForDb,
+      ad_id: adIdForDb,
+      live: useLive,
+    });
+    const cachedInsights = skipCache ? null : insightsCache.get(insightsCacheKey);
+    if (cachedInsights != null) {
+      return res.json(cachedInsights);
     }
+
+    const dbResults = await Promise.all(
+      adAccountIds.map((adAccountId) =>
+        getInsights({
+          ad_account_id: adAccountId,
+          from: fromDate,
+          to: toDate,
+          campaign_id: campaignIdForDb,
+          ad_id: adIdForDb,
+        })
+      )
+    );
+    let data = dbResults.flat();
     // #region agent log
     _log({ location: 'meta.jsx:GET/insights', message: 'db result', data: { source: 'db', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
     // #endregion
 
     if (useLive || data.length === 0) {
-      let liveAggregate = [];
-      for (const adAccountId of adAccountIds) {
-        try {
-          const liveData = await fetchInsightsFromMetaLive({
-            accessToken: credentials.accessToken,
-            adAccountId,
-            from: fromDate,
-            to: toDate,
-            isAllCampaigns,
-            isAllAds,
-            campaignIds,
-            adIds,
-          });
-          if (liveData && liveData.length > 0) {
-            await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
-            const tagged = liveData.map((row) => ({
-              ...row,
-              ad_account_id: String(adAccountId),
-              ad_account_name: row.ad_account_name || '',
-            }));
-            liveAggregate = liveAggregate.concat(tagged);
-          }
-        } catch (liveErr) {
-          if (useLive) {
-            console.error("Insights live fetch error:", liveErr?.message || liveErr);
-            return res.status(500).json({
-              error: "Failed to fetch insights from Meta",
-              details: liveErr?.message || String(liveErr),
+      try {
+        const liveResults = await Promise.all(
+          adAccountIds.map(async (adAccountId) => {
+            const liveData = await fetchInsightsFromMetaLive({
+              accessToken: credentials.accessToken,
+              adAccountId,
+              from: fromDate,
+              to: toDate,
+              isAllCampaigns,
+              isAllAds,
+              campaignIds,
+              adIds,
             });
-          }
+            if (liveData && liveData.length > 0) {
+              await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
+              return liveData.map((row) => ({
+                ...row,
+                ad_account_id: String(adAccountId),
+                ad_account_name: row.ad_account_name || '',
+              }));
+            }
+            return [];
+          })
+        );
+        const liveAggregate = liveResults.flat();
+        if (liveAggregate.length > 0) data = liveAggregate;
+      } catch (liveErr) {
+        if (useLive) {
+          console.error("Insights live fetch error:", liveErr?.message || liveErr);
+          return res.status(500).json({
+            error: "Failed to fetch insights from Meta",
+            details: liveErr?.message || String(liveErr),
+          });
         }
       }
-      if (liveAggregate.length > 0) data = liveAggregate;
       // #region agent log
       _log({ location: 'meta.jsx:GET/insights', message: 'live result', data: { source: 'live', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
       // #endregion
     }
 
-    res.json({ data });
+    const payload = { data };
+    insightsCache.set(insightsCacheKey, payload, 5 * 60); // 5 min TTL
+    res.json(payload);
   } catch (err) {
     console.error("Insights DB Error:", err?.message || err);
     res.status(500).json({
       error: "Failed to fetch insights",
       details: err?.message || String(err),
     });
+  }
+});
+
+// ---------------------------------------------------------------------
+// VIDEO PERFORMANCE — Hook Rate and Hold Rate per ad from Meta Ads Insights.
+// GET /api/meta/video-performance?adAccountId=&accessToken=&since=&until=
+// ---------------------------------------------------------------------
+router.get("/video-performance", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { adAccountId, accessToken: queryToken, since, until } = req.query;
+    if (!adAccountId || !String(adAccountId).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "adAccountId is required",
+      });
+    }
+    let accessToken = (queryToken && String(queryToken).trim()) || null;
+    if (!accessToken) {
+      try {
+        const credentials = getCredentials();
+        accessToken = credentials.accessToken;
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: "accessToken is required (query param or META_ACCESS_TOKEN in server .env)",
+        });
+      }
+    }
+    const data = await fetchVideoPerformance(adAccountId, accessToken, since || undefined, until || undefined);
+    return res.json({ success: true, data });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    const message = err.message || "Failed to fetch video performance";
+    if (status >= 500) {
+      console.error("[VideoPerformance]", message);
+    }
+    return res.status(status).json({ success: false, error: message });
   }
 });
 
@@ -604,7 +729,7 @@ router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) =>
       });
     }
 
-    const requestedBreakdowns = (breakdowns || 'age,gender,country,region').toString().split(',').map((s) => s.trim()).filter(Boolean);
+    const requestedBreakdowns = (breakdowns || 'age,gender,country').toString().split(',').map((s) => s.trim()).filter(Boolean);
     const isAllCampaigns = is_all_campaigns === '1' || is_all_campaigns === 'true';
     const isAllAds = is_all_ads === '1' || is_all_ads === 'true';
     const campaignIds = (campaign_id || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -708,6 +833,66 @@ router.get("/insights/daily", optionalAuthMiddleware, async (req, res) => {
     console.error("Insights daily error:", err?.message || err);
     return res.status(500).json({
       error: "Failed to fetch daily insights",
+      details: err?.response?.data?.error?.message || err?.message || String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// INSIGHTS DAILY SPEND — for Team Performance / Ad Spend charts. New endpoint; does not change existing APIs.
+// GET /api/meta/insights/daily-spend?from=YYYY-MM-DD&to=YYYY-MM-DD&ad_account_id=...
+// Returns { data: [ { date, spend } ] } sorted by date.
+// ---------------------------------------------------------------------
+router.get("/insights/daily-spend", optionalAuthMiddleware, async (req, res) => {
+  try {
+    let credentials;
+    try {
+      credentials = getCredentials();
+    } catch (e) {
+      return res.status(400).json({ error: "Meta credentials required", details: e.message });
+    }
+    const { from, to, ad_account_id } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from;
+    let toDate = to;
+    if (!fromDate || !toDate || !dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+      const today = new Date().toISOString().slice(0, 10);
+      const fromD = new Date();
+      fromD.setDate(fromD.getDate() - 7);
+      fromDate = fromD.toISOString().slice(0, 10);
+      toDate = today;
+    }
+    const adAccountId = (ad_account_id || credentials.adAccountId || '').toString().replace(/^act_/, '');
+    if (!adAccountId || !/^\d+$/.test(adAccountId)) {
+      return res.status(400).json({ error: "Valid Ad Account ID is required", details: "Provide ad_account_id or set META_AD_ACCOUNT_ID" });
+    }
+    const insightsUrl = `https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`;
+    const timeRange = JSON.stringify({ since: fromDate, until: toDate });
+    const params = {
+      access_token: credentials.accessToken,
+      level: "campaign",
+      time_increment: 1,
+      time_range: timeRange,
+      fields: "date_start,spend",
+      limit: 1000,
+      filtering: JSON.stringify(DAILY_INSIGHTS_STATUS_FILTER),
+    };
+    const { data } = await axios.get(insightsUrl, { params, timeout: 60000 });
+    const rows = Array.isArray(data.data) ? data.data : [];
+    const byDate = new Map();
+    rows.forEach((row) => {
+      const date = row.date_start || null;
+      if (!date) return;
+      const spend = parseFloat(row.spend || 0) || 0;
+      byDate.set(date, (byDate.get(date) || 0) + spend);
+    });
+    const sortedDates = [...byDate.keys()].sort();
+    const result = sortedDates.map((date) => ({ date, spend: byDate.get(date) }));
+    return res.json({ data: result });
+  } catch (err) {
+    console.error("Insights daily-spend error:", err?.message || err);
+    return res.status(500).json({
+      error: "Failed to fetch daily spend",
       details: err?.response?.data?.error?.message || err?.message || String(err),
     });
   }
@@ -1055,11 +1240,13 @@ async function fetchAllAdsCached(credentials, res, send, sendError) {
 // ---------------------------------------------------------------------
 // 5.0) AD ACCOUNTS API - DB-first. UI dropdown reads from DB only.
 //    GET /api/meta/ad-accounts → list from DB; if empty, fetch /me/adaccounts and cache, then return.
+//    ?refresh=true → force fetch from Meta (handles pagination) and refresh cache.
 // ---------------------------------------------------------------------
 router.get("/ad-accounts", optionalAuthMiddleware, async (req, res) => {
   try {
+    const forceRefresh = req.query.refresh === 'true' || req.query.refresh === '1';
     let accounts = await adAccountsService.listFromDb();
-    if (!accounts || accounts.length === 0) {
+    if (forceRefresh || !accounts || accounts.length === 0) {
       try {
         await adAccountsService.fetchAndCache();
         accounts = await adAccountsService.listFromDb();
@@ -1259,6 +1446,41 @@ async function fetchPageById(pageId, accessToken) {
   return response.data ? [response.data] : [];
 }
 
+/** Load all page tokens into cache (me/accounts + businesses). Used as fallback when getPageAccessToken fails. */
+async function loadPageTokensIntoCache() {
+  const systemToken = (
+    (process.env.META_SYSTEM_ACCESS_TOKEN_1 || process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) || ''
+  ).trim();
+  const userToken = (process.env.META_ACCESS_TOKEN || '').trim();
+  const pageIdEnv = (process.env.META_PAGE_ID || '').trim();
+  if (!systemToken && !userToken) return [];
+  const accessToken = systemToken || userToken;
+  let rawPages = [];
+  if (userToken) {
+    try { rawPages = await fetchPagesFromMeAccounts(userToken); } catch (e) { /* ignore */ }
+  }
+  if (rawPages.length === 0 && systemToken) {
+    try { rawPages = await fetchPagesFromMeAccounts(systemToken); } catch (e) { /* ignore */ }
+  }
+  if (rawPages.length === 0) {
+    const bizToken = userToken || systemToken;
+    if (bizToken) {
+      try { rawPages = await fetchPagesFromBusinesses(bizToken); } catch (e) { /* ignore */ }
+    }
+  }
+  if (rawPages.length === 0 && pageIdEnv) {
+    try { rawPages = await fetchPageById(pageIdEnv, accessToken); } catch (e) { /* ignore */ }
+  }
+  const now = Date.now();
+  const ttl = pageTokenCache.ttl || 60 * 60 * 1000;
+  for (const page of rawPages) {
+    if (page && page.id && page.access_token) {
+      pageTokenCache.tokens[page.id] = { token: page.access_token, expiresAt: now + ttl };
+    }
+  }
+  return rawPages;
+}
+
 router.get("/pages", optionalAuthMiddleware, async (req, res) => {
   try {
     const systemToken = (
@@ -1274,11 +1496,21 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
     const accessToken = systemToken || userToken;
     let rawPages = [];
 
-    // 1) Try me/accounts (works with User tokens; System User often returns empty)
-    try {
-      rawPages = await fetchPagesFromMeAccounts(accessToken);
-    } catch (e) {
-      console.warn("[Pages] me/accounts failed:", e.response?.data?.error?.message || e.message);
+    // 1) Try me/accounts — use User token first (Meta returns pages for User tokens with pages_show_list;
+    //    System User tokens often return empty for me/accounts)
+    if (userToken) {
+      try {
+        rawPages = await fetchPagesFromMeAccounts(userToken);
+      } catch (e) {
+        console.warn("[Pages] me/accounts (user token) failed:", e.response?.data?.error?.message || e.message);
+      }
+    }
+    if (rawPages.length === 0 && systemToken) {
+      try {
+        rawPages = await fetchPagesFromMeAccounts(systemToken);
+      } catch (e) {
+        console.warn("[Pages] me/accounts (system token) failed:", e.response?.data?.error?.message || e.message);
+      }
     }
 
     // 2) If empty, try businesses -> owned_pages (works when pages are linked to Business)
@@ -1303,6 +1535,17 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
       }
     }
 
+    if (rawPages.length === 0) {
+      console.warn(
+        "[Pages] No pages returned. PAGE dropdown will be empty. " +
+        "Fix: (1) Use a User token with pages_show_list for me/accounts, or " +
+        "(2) Link pages to a Business and use a token with business_management, or " +
+        "(3) Set META_PAGE_ID in server/.env to a Facebook Page ID."
+      );
+    } else {
+      console.log(`[Pages] Returning ${rawPages.length} page(s) for PAGE filter.`);
+    }
+
     const now = Date.now();
     const ttl = pageTokenCache.ttl || 60 * 60 * 1000;
     for (const page of rawPages) {
@@ -1315,8 +1558,9 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
     }
 
     const pages = rawPages.map(mapPage);
+    const defaultPageId = (pageIdEnv || '').trim();
 
-    res.json({ data: pages });
+    res.json({ data: pages, defaultPageId });
   } catch (error) {
     console.error("Meta /pages error:", error.response?.data || error.message);
 
@@ -1405,6 +1649,16 @@ router.get("/page-name", optionalAuthMiddleware, async (req, res) => {
 // Returns city_breakdown and country_breakdown from Instagram engaged_audience_demographics
 // ---------------------------------------------------------------------
 router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (req, res) => {
+  const emptyData = () => ({
+    data: {
+      city_breakdown: [],
+      country_breakdown: [],
+      age_breakdown: [],
+      gender_breakdown: [],
+      source: "instagram_audience",
+    },
+    message: "Page not accessible with current token. Add this page in Meta Business Suite or select a page your app can access.",
+  });
   try {
     const { page_id, timeframe } = req.query;
     if (!page_id || String(page_id).trim() === "") {
@@ -1420,23 +1674,51 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
 
     const systemToken = getSystemToken();
     const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
-    const pageRes = await axios.get(pageUrl, {
-      params: {
-        access_token: systemToken,
-        fields: "instagram_business_account{id}",
-      },
-      timeout: 10000,
-    });
-    const igAccountId = pageRes.data?.instagram_business_account?.id;
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
+    }
     if (!igAccountId) {
-      return res.status(400).json({
-        error: "No Instagram account linked",
-        details: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        const code = pageErr?.response?.data?.error?.code;
+        console.warn("[Instagram Audience Demographics] Page not accessible:", pageId, code, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json(emptyData());
+      }
+    }
+    if (!igAccountId) {
+      return res.status(200).json({
+        ...emptyData(),
+        message: "This page does not have a linked Instagram Business account. Select a page with Instagram linked.",
       });
     }
-
-    const pageToken = await getPageAccessToken(pageId);
-    const { city_breakdown, country_breakdown } = await fetchInstagramAudienceDemographics(
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (tokenError || !t) {
+        console.warn("[Instagram Audience Demographics] Page token not available for page:", pageId, tokenError);
+        return res.status(200).json(emptyData());
+      }
+      pageToken = t;
+    }
+    const { city_breakdown, country_breakdown, age_breakdown, gender_breakdown } = await fetchInstagramAudienceDemographics(
       igAccountId,
       pageToken,
       actualTimeframe
@@ -1444,14 +1726,16 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
 
     return res.json({
       data: {
-        city_breakdown,
-        country_breakdown,
+        city_breakdown: city_breakdown || [],
+        country_breakdown: country_breakdown || [],
+        age_breakdown: age_breakdown || [],
+        gender_breakdown: gender_breakdown || [],
         source: "instagram_audience",
       },
     });
   } catch (err) {
     const code = err?.response?.data?.error?.code;
-    const msg = err?.response?.data?.error?.message || err.message;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
     console.error("[Instagram Audience Demographics] Error:", code || err.message, msg);
     if (err.response?.status === 400) {
       return res.status(400).json({
@@ -1459,8 +1743,480 @@ router.get("/instagram-audience-demographics", optionalAuthMiddleware, async (re
         details: msg,
       });
     }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json(emptyData());
+    }
     return res.status(500).json({
       error: "Failed to fetch Instagram audience demographics",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Instagram reach by follow_type (Followers vs Non-Followers)
+// GET /api/meta/instagram/reach-by-follow-type?page_id=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+// Same format as Meta: metric=reach, period=day, metric_type=total_value, breakdown=follow_type
+// ---------------------------------------------------------------------
+router.get("/instagram/reach-by-follow-type", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { page_id, from, to } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID that has a linked Instagram Business account.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from && dateRegex.test(String(from).trim()) ? String(from).trim() : null;
+    let toDate = to && dateRegex.test(String(to).trim()) ? String(to).trim() : null;
+    if (!fromDate || !toDate) {
+      const end = new Date();
+      end.setDate(end.getDate() - 1);
+      const start = new Date(end);
+      start.setDate(start.getDate() - 6);
+      fromDate = start.toISOString().slice(0, 10);
+      toDate = end.toISOString().slice(0, 10);
+    }
+
+    const systemToken = getSystemToken();
+    const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
+    }
+    if (!igAccountId) {
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        console.warn("[Instagram reach-by-follow-type] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json({
+          data: {
+            total_value: 0,
+            follower_value: 0,
+            non_follower_value: 0,
+            followers_pct: 0,
+            non_followers_pct: 0,
+            name: "reach",
+            period: "day",
+            breakdown: "follow_type",
+          },
+          message: "Page not accessible with current token.",
+        });
+      }
+    }
+    if (!igAccountId) {
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "This page does not have a linked Instagram Business account.",
+      });
+    }
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (tokenError || !t) {
+        console.warn("[Instagram reach-by-follow-type] Page token not available:", pageId, tokenError);
+        return res.status(200).json({
+          data: {
+            total_value: 0,
+            follower_value: 0,
+            non_follower_value: 0,
+            followers_pct: 0,
+            non_followers_pct: 0,
+            name: "reach",
+            period: "day",
+            breakdown: "follow_type",
+          },
+          message: "Page not accessible with current token.",
+        });
+      }
+      pageToken = t;
+    }
+    const result = await fetchReachByFollowType(igAccountId, fromDate, toDate, pageToken);
+    const total = result.total_value || 0;
+    const followerVal = result.follower_value || 0;
+    const nonFollowerVal = result.non_follower_value || 0;
+    const followersPct = total > 0 ? Math.round((followerVal / total) * 100) : 0;
+    const nonFollowersPct = total > 0 ? Math.round((nonFollowerVal / total) * 100) : 0;
+
+    return res.json({
+      data: {
+        total_value: total,
+        follower_value: followerVal,
+        non_follower_value: nonFollowerVal,
+        followers_pct: followersPct,
+        non_followers_pct: nonFollowersPct,
+        name: "reach",
+        period: "day",
+        breakdown: "follow_type",
+      },
+    });
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    console.error("[Instagram reach-by-follow-type] Error:", code || err.message, msg);
+    if (err.response?.status === 400) {
+      return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json({
+        data: {
+          total_value: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          followers_pct: 0,
+          non_followers_pct: 0,
+          name: "reach",
+          period: "day",
+          breakdown: "follow_type",
+        },
+        message: "Permission not available (pages_read_engagement). Returning empty data.",
+      });
+    }
+    if (code === 190) {
+      return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
+    }
+    if (code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: msg,
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram reach by follow type",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Facebook Page audience — demographics and follower count for Audience page when platform=Facebook
+// GET /api/meta/facebook-page-audience?page_id=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+// ---------------------------------------------------------------------
+router.get("/facebook-page-audience", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { page_id, from, to } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let fromDate = from && dateRegex.test(String(from).trim()) ? String(from).trim() : null;
+    let toDate = to && dateRegex.test(String(to).trim()) ? String(to).trim() : null;
+    if (!fromDate || !toDate) {
+      const end = new Date();
+      end.setDate(end.getDate() - 1);
+      const start = new Date(end);
+      start.setDate(start.getDate() - 6);
+      fromDate = start.toISOString().slice(0, 10);
+      toDate = end.toISOString().slice(0, 10);
+    }
+
+    const { token: accessToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !accessToken) {
+      console.warn("[Facebook Page Audience] Page not accessible:", pageId, tokenError);
+      return res.status(200).json({
+        data: {
+          follower_count: 0,
+          follower_value: 0,
+          non_follower_value: 0,
+          total_value: 0,
+          age_breakdown: [],
+          gender_breakdown: [],
+          city_breakdown: [],
+          country_breakdown: [],
+        },
+        message: "Page not accessible with current token.",
+      });
+    }
+
+    const insightsUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}/insights`;
+    const period = "day";
+    const since = fromDate;
+    const until = toDate;
+
+    const fetchOneMetric = async (metric) => {
+      try {
+        const { data } = await axios.get(insightsUrl, {
+          params: { access_token: accessToken, metric, period, since, until },
+          timeout: 15000,
+        });
+        return data.data || [];
+      } catch (err) {
+        if (err?.response?.data?.error?.code === 100) {
+          console.warn("[Facebook Page Audience] Metric not supported:", metric, err?.response?.data?.error?.message);
+        }
+        return [];
+      }
+    };
+
+    const [fansData, cityData, countryData, genderAgeData] = await Promise.all([
+      fetchOneMetric("page_fans"),
+      fetchOneMetric("page_fans_city"),
+      fetchOneMetric("page_fans_country"),
+      fetchOneMetric("page_fans_gender_age"),
+    ]);
+
+    let followerCount = 0;
+    if (fansData && fansData.length > 0) {
+      const metric = fansData.find((m) => m.name === "page_fans");
+      if (metric && metric.values && metric.values.length > 0) {
+        const last = metric.values[metric.values.length - 1];
+        followerCount = parseInt(last.value || 0, 10) || 0;
+      }
+    }
+    // Fallback: when Insights page_fans returns 0 or empty, get current follower count from Page node (fan_count / followers_count)
+    if (followerCount === 0 && accessToken) {
+      try {
+        const pageUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}`;
+        const { data: pageData } = await axios.get(pageUrl, {
+          params: { access_token: accessToken, fields: "followers_count,fan_count" },
+          timeout: 10000,
+        });
+        const fromFollowers = parseInt(pageData.followers_count || 0, 10) || parseInt(pageData.fan_count || 0, 10) || 0;
+        if (fromFollowers > 0) followerCount = fromFollowers;
+      } catch (pageErr) {
+        if (pageErr?.response?.data?.error?.code !== 100) {
+          console.warn("[Facebook Page Audience] Page node fallback for follower count failed:", pageErr?.response?.data?.error?.message || pageErr.message);
+        }
+      }
+    }
+
+    const city_breakdown = [];
+    if (cityData && cityData.length > 0) {
+      const metric = cityData.find((m) => m.name === "page_fans_city");
+      if (metric && metric.values && metric.values.length > 0) {
+        const last = metric.values[metric.values.length - 1];
+        const val = last.value;
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          Object.entries(val).forEach(([city, count]) => {
+            const n = parseInt(count, 10) || 0;
+            if (city && n > 0) city_breakdown.push({ city, value: n });
+          });
+        }
+      }
+    }
+    city_breakdown.sort((a, b) => (b.value || 0) - (a.value || 0));
+
+    const country_breakdown = [];
+    if (countryData && countryData.length > 0) {
+      const metric = countryData.find((m) => m.name === "page_fans_country");
+      if (metric && metric.values && metric.values.length > 0) {
+        const last = metric.values[metric.values.length - 1];
+        const val = last.value;
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          Object.entries(val).forEach(([country, count]) => {
+            const n = parseInt(count, 10) || 0;
+            if (country && n > 0) country_breakdown.push({ country, value: n });
+          });
+        }
+      }
+    }
+    country_breakdown.sort((a, b) => (b.value || 0) - (a.value || 0));
+
+    const age_breakdown = [];
+    const gender_breakdown = [];
+    if (genderAgeData && genderAgeData.length > 0) {
+      const metric = genderAgeData.find((m) => m.name === "page_fans_gender_age");
+      if (metric && metric.values && metric.values.length > 0) {
+        const last = metric.values[metric.values.length - 1];
+        const val = last.value;
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          const genderTotals = { M: 0, F: 0 };
+          Object.entries(val).forEach(([key, count]) => {
+            const n = parseInt(count, 10) || 0;
+            if (!key || n === 0) return;
+            const parts = String(key).split(".");
+            const gender = parts[0] === "F" ? "female" : "male";
+            const age = parts[1] || "";
+            if (age) {
+              genderTotals[parts[0] === "F" ? "F" : "M"] = (genderTotals[parts[0] === "F" ? "F" : "M"] || 0) + n;
+              age_breakdown.push({ age, gender, value: n });
+            }
+          });
+          gender_breakdown.push({ gender: "male", value: genderTotals.M });
+          gender_breakdown.push({ gender: "female", value: genderTotals.F });
+        }
+      }
+    }
+
+    return res.json({
+      data: {
+        follower_count: followerCount,
+        follower_value: followerCount,
+        non_follower_value: 0,
+        total_value: followerCount,
+        age_breakdown,
+        gender_breakdown,
+        city_breakdown,
+        country_breakdown,
+        source: "facebook_page",
+      },
+    });
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    console.error("[Facebook Page Audience] Error:", code || err.message, msg);
+    return res.status(500).json({
+      error: "Failed to fetch Facebook Page audience",
+      details: msg,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Instagram online_followers — best posting times (heatmap, peak hours, recommendation)
+// GET /api/meta/instagram/online-followers?page_id=...
+// Fetches metric=online_followers&period=lifetime, processes to best_times, peak_hours, heatmap_data, recommendation_text
+// ---------------------------------------------------------------------
+router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, res) => {
+  const emptyOnlineFollowers = () => processOnlineFollowersResponse({ data: [] });
+  try {
+    const { page_id } = req.query;
+    if (!page_id || String(page_id).trim() === "") {
+      return res.status(400).json({
+        error: "page_id is required",
+        details: "Provide the Facebook Page ID that has a linked Instagram Business account.",
+      });
+    }
+    const pageId = String(page_id).trim();
+    const systemToken = getSystemToken();
+    const pageUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}`;
+    let igAccountId = null;
+    let pageToken = null;
+    const { token: pageTokenFirst } = await getPageAccessTokenSafe(pageId);
+    if (pageTokenFirst) {
+      try {
+        const pageResFirst = await axios.get(pageUrl, {
+          params: { access_token: pageTokenFirst, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        if (pageResFirst.data?.instagram_business_account?.id) {
+          igAccountId = pageResFirst.data.instagram_business_account.id;
+          pageToken = pageTokenFirst;
+        }
+      } catch (_) {
+        // ignore, fall back to system token
+      }
+    }
+    if (!igAccountId) {
+      try {
+        const pageRes = await axios.get(pageUrl, {
+          params: { access_token: systemToken, fields: "instagram_business_account{id}" },
+          timeout: 10000,
+        });
+        igAccountId = pageRes.data?.instagram_business_account?.id;
+      } catch (pageErr) {
+        console.warn("[Instagram online-followers] Page not accessible:", pageId, pageErr?.response?.data?.error?.message || pageErr.message);
+        return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+      }
+    }
+    if (!igAccountId) {
+      return res.status(200).json({
+        ...emptyOnlineFollowers(),
+        message: "This page does not have a linked Instagram Business account.",
+      });
+    }
+    if (!pageToken) {
+      const { token: t, error: tokenError } = await getPageAccessTokenSafe(pageId);
+      if (t) {
+        pageToken = t;
+      } else {
+        const systemTokenFallback = getSystemToken();
+        if (systemTokenFallback) {
+          pageToken = systemTokenFallback;
+          console.warn("[Instagram online-followers] Using system token for page:", pageId, tokenError);
+        }
+      }
+      if (!pageToken) {
+        console.warn("[Instagram online-followers] Page token not available:", pageId, tokenError);
+        return res.status(200).json({ ...emptyOnlineFollowers(), message: "Page not accessible with current token." });
+      }
+    }
+    const raw = await fetchOnlineFollowers(igAccountId, pageToken);
+    let result = processOnlineFollowersResponse(raw);
+    if (result.is_sample_data && !result.message) {
+      result.message = "Meta returned no online_followers data for this account.";
+    }
+    // When Meta returns no online_followers data, try fallback: best times from last 7 days media views
+    if (result.is_sample_data) {
+      try {
+        const endDate = new Date();
+        endDate.setUTCDate(endDate.getUTCDate() - 1);
+        const startDate = new Date(endDate);
+        startDate.setUTCDate(startDate.getUTCDate() - 6);
+        const to = endDate.toISOString().slice(0, 10);
+        const from = startDate.toISOString().slice(0, 10);
+        const mediaResult = await fetchInstagramMediaInsights({
+          pageIds: [pageId],
+          getPageToken: getPageAccessToken,
+          from,
+          to,
+          contentType: "all",
+        });
+        const mediaList = mediaResult?.media || [];
+        const timezone = (req.query.timezone && String(req.query.timezone).trim()) || "UTC";
+        const fallback = buildBestTimesFromMediaViews(mediaList, { timezone });
+        if (fallback && (fallback.best_times?.length > 0 || fallback.heatmap_data?.some((d) => d.value > 0))) {
+          result = { ...fallback, is_sample_data: false };
+        }
+      } catch (fallbackErr) {
+        console.warn("[Instagram online-followers] Fallback from media views failed:", fallbackErr?.message || fallbackErr);
+      }
+    }
+    return res.json(result);
+  } catch (err) {
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message || err.message || "").toString();
+    console.error("[Instagram online-followers] Error:", code || err.message, msg);
+    if (err.response?.status === 400) {
+      return res.status(400).json({ error: "Bad request", details: msg });
+    }
+    if (code === 10 || code === "10" || msg.includes("(#10)") || msg.includes("pages_read_engagement") || msg.includes("Page Public Content Access") || msg.includes("Page Public Metadata Access")) {
+      return res.status(200).json({ ...emptyOnlineFollowers(), message: "Permission not available (pages_read_engagement). Returning empty data." });
+    }
+    if (code === 190) {
+      return res.status(401).json({ error: "Meta Access Token expired or invalid", details: msg, isAuthError: true });
+    }
+    if (code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: msg,
+        instruction: "Ensure Meta token has instagram_manage_insights or instagram_business_manage_insights",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch Instagram online followers",
       details: msg,
     });
   }
@@ -1898,34 +2654,35 @@ router.get("/forms", optionalAuthMiddleware, async (req, res) => {
 //    Uses Page Access Token (required by Meta for this endpoint)
 // ---------------------------------------------------------------------
 router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) => {
+  const emptyPageInsights = (since, until) => ({
+    followers: [],
+    reach: [],
+    impressions: [],
+    clicks: [],
+    fan_adds: [],
+    fan_removes: [],
+    views: [],
+    interactions: [],
+    current_followers: 0,
+    current_reach: 0,
+    total_follows: 0,
+    total_unfollows: 0,
+    total_reached: 0,
+    total_views: 0,
+    total_interactions: 0,
+    period: `${since} to ${until}`,
+  });
   try {
     const { pageId } = req.params;
     const { from, to, metric } = req.query;
 
-    const accessToken = await getPageAccessToken(pageId);
-    
-    // Page Insights API: request impressions, reach, and engagement so the chart shows all three.
-    // First try full set; if Meta returns #100, try alternatives then last-resort impressions only.
-    // Page engagement metrics (page_consumptions, page_engaged_users) were deprecated Sept 2024 and trigger #100.
-    const metricsToTry = metric ? [metric] : [
-      "page_media_view,page_impressions_unique,page_follows",
-      "page_impressions,page_impressions_unique,page_follows",
-      "page_impressions"
-    ];
-    
-    // Date range handling
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     let since = null;
     let until = null;
-    
-    if (from && to) {
-      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-      if (dateRegex.test(from) && dateRegex.test(to)) {
-        since = from;
-        until = to;
-      }
+    if (from && to && dateRegex.test(from) && dateRegex.test(to)) {
+      since = from;
+      until = to;
     }
-    
-    // Default to last 30 days if no date range provided
     if (!since || !until) {
       const today = new Date();
       const thirtyDaysAgo = new Date(today);
@@ -1933,8 +2690,96 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
       until = today.toISOString().split('T')[0];
       since = thirtyDaysAgo.toISOString().split('T')[0];
     }
+
+    const { token: accessToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !accessToken) {
+      console.warn("[Page Insights] Page not accessible:", pageId, tokenError);
+      return res.status(200).json({
+        data: emptyPageInsights(since, until),
+        message: "Page not accessible with current token. Add this page in Meta Business Suite or select a page your app can access.",
+      });
+    }
     
+    // Page Insights API: use multiple small requests so one deprecated/invalid metric doesn't fail the whole response.
     const insightsUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}/insights`;
+    const periodLabel = `${since} to ${until}`;
+
+    const fetchOneMetricSet = async (metricsString) => {
+      try {
+        const params = {
+          access_token: accessToken,
+          metric: metricsString,
+          period: "day",
+          since,
+          until,
+        };
+        const { data } = await axios.get(insightsUrl, { params });
+        return data.data || [];
+      } catch (err) {
+        const code = err?.response?.data?.error?.code;
+        if (code === 100) {
+          console.warn("[Page Insights] Metric set not supported:", metricsString, err?.response?.data?.error?.message);
+        }
+        return [];
+      }
+    };
+
+    const mergeProcessedData = (base, next) => {
+      const out = { ...base };
+      if (next.total_reached > 0) {
+        out.total_reached = next.total_reached;
+        if (next.reach && next.reach.length) out.reach = next.reach;
+      }
+      if (next.current_reach > 0) out.current_reach = next.current_reach;
+      if (next.total_views > 0) {
+        out.total_views = next.total_views;
+        if (next.views && next.views.length) out.views = next.views;
+      }
+      if (next.total_follows > 0 || next.fan_adds?.length) {
+        out.total_follows = next.total_follows;
+        if (next.fan_adds?.length) out.fan_adds = next.fan_adds;
+      }
+      if (next.total_unfollows > 0 || next.fan_removes?.length) {
+        out.total_unfollows = next.total_unfollows;
+        if (next.fan_removes?.length) out.fan_removes = next.fan_removes;
+      }
+      if (next.total_interactions > 0) {
+        out.total_interactions = next.total_interactions;
+        if (next.interactions?.length) out.interactions = next.interactions;
+      }
+      if (next.clicks?.length) out.clicks = next.clicks;
+      if (next.current_followers > 0) out.current_followers = next.current_followers;
+      if (next.impressions?.length) out.impressions = next.impressions;
+      if (next.followers?.length) out.followers = next.followers;
+      return out;
+    };
+
+    // Derive follows/unfollows from daily page_follows (follower count) when direct metrics are deprecated
+    const deriveFollowsUnfollowsFromDailyCount = (followersArray) => {
+      if (!Array.isArray(followersArray) || followersArray.length < 2) {
+        return { fan_adds: [], fan_removes: [], total_follows: 0, total_unfollows: 0 };
+      }
+      const sorted = [...followersArray].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const fan_adds = [];
+      const fan_removes = [];
+      let total_follows = 0;
+      let total_unfollows = 0;
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = parseInt(sorted[i - 1].value || 0);
+        const curr = parseInt(sorted[i].value || 0);
+        const date = sorted[i].date || null;
+        if (!date) continue;
+        const delta = curr - prev;
+        if (delta > 0) {
+          fan_adds.push({ date, value: delta });
+          total_follows += delta;
+        } else if (delta < 0) {
+          fan_removes.push({ date, value: -delta });
+          total_unfollows += -delta;
+        }
+      }
+      return { fan_adds, fan_removes, total_follows, total_unfollows };
+    };
     
     // Helper to process insights response into totals
     const processInsights = (insightsData, periodLabel) => {
@@ -1942,6 +2787,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
         followers: [],
         reach: [],
         impressions: [],
+        clicks: [],
         fan_adds: [],
         fan_removes: [],
         views: [],
@@ -1995,6 +2841,7 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
             totalReached += parseInt(v.value || 0);
           });
           processedData.total_reached = totalReached;
+          processedData.current_reach = totalReached;
           processedData.reach = values.map(v => ({
             date: v.end_time ? v.end_time.split('T')[0] : null,
             value: parseInt(v.value || 0)
@@ -2004,10 +2851,15 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
             date: v.end_time ? v.end_time.split('T')[0] : null,
             value: parseInt(v.value || 0)
           })).filter(v => v.date);
+          let mediaSum = 0;
+          values.forEach(v => { mediaSum += parseInt(v.value || 0); });
           if (processedData.total_reached === 0) {
-            let sum = 0;
-            values.forEach(v => { sum += parseInt(v.value || 0); });
-            processedData.total_reached = sum;
+            processedData.total_reached = mediaSum;
+          }
+          // Use page_media_view (content played/displayed) for Views card when page_views not available
+          if (processedData.total_views === 0 && mediaSum > 0) {
+            processedData.total_views = mediaSum;
+            processedData.views = processedData.impressions;
           }
         } else if (metricName === 'page_fan_adds') {
           let totalFollows = 0;
@@ -2031,6 +2883,28 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
             };
           }).filter(v => v.date);
           processedData.total_unfollows = totalUnfollows;
+        } else if (metricName === 'page_daily_follows') {
+          let totalFollows = 0;
+          processedData.fan_adds = values.map(v => {
+            const value = parseInt(v.value || 0);
+            totalFollows += value;
+            return {
+              date: v.end_time ? v.end_time.split('T')[0] : null,
+              value: value
+            };
+          }).filter(v => v.date);
+          processedData.total_follows = totalFollows;
+        } else if (metricName === 'page_daily_unfollows_unique') {
+          let totalUnfollows = 0;
+          processedData.fan_removes = values.map(v => {
+            const value = parseInt(v.value || 0);
+            totalUnfollows += value;
+            return {
+              date: v.end_time ? v.end_time.split('T')[0] : null,
+              value: value
+            };
+          }).filter(v => v.date);
+          processedData.total_unfollows = totalUnfollows;
         } else if (metricName === 'page_views') {
           let totalViews = 0;
           processedData.views = values.map(v => {
@@ -2043,6 +2917,19 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
           }).filter(v => v.date);
           processedData.total_views = totalViews;
         } else if (metricName === 'page_consumptions') {
+          let totalInteractions = 0;
+          const clicksArr = values.map(v => {
+            const value = parseInt(v.value || 0);
+            totalInteractions += value;
+            return {
+              date: v.end_time ? v.end_time.split('T')[0] : null,
+              value
+            };
+          }).filter(v => v.date);
+          processedData.interactions = clicksArr;
+          processedData.clicks = clicksArr;
+          processedData.total_interactions = totalInteractions;
+        } else if (metricName === 'page_post_engagements') {
           let totalInteractions = 0;
           processedData.interactions = values.map(v => {
             const value = parseInt(v.value || 0);
@@ -2059,37 +2946,53 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
       return processedData;
     };
     
-    // Fetch current period insights. Try multiple metric sets; Page Insights API (#100) can reject some metrics per Page.
-    let lastError = null;
-    let processedData = null;
-    for (const metrics of metricsToTry) {
-      try {
-        const params = {
-          access_token: accessToken,
-          metric: metrics,
-          period: "day",
-          since: since,
-          until: until,
-        };
-        const { data } = await axios.get(insightsUrl, { params });
-        const insightsData = data.data || [];
-        processedData = processInsights(insightsData, `${since} to ${until}`);
-        lastError = null;
-        break;
-      } catch (err) {
-        const code = err?.response?.data?.error?.code;
-        lastError = err;
-        if (code === 100 && metricsToTry.indexOf(metrics) < metricsToTry.length - 1) {
-          continue;
-        }
-        throw err;
+    // Fetch current period insights: multiple small requests, then merge (so one bad metric doesn't fail all).
+    let processedData;
+    if (metric) {
+      const insightsData = await fetchOneMetricSet(metric);
+      processedData = processInsights(insightsData.length ? insightsData : [], periodLabel);
+    } else {
+      const [reachViewsData, followsData, interactionsData, consumptionsData] = await Promise.all([
+        fetchOneMetricSet("page_media_view,page_impressions_unique"),
+        fetchOneMetricSet("page_daily_follows,page_daily_unfollows_unique,page_follows"),
+        fetchOneMetricSet("page_post_engagements"),
+        fetchOneMetricSet("page_consumptions"),
+      ]);
+      processedData = processInsights([], periodLabel);
+      if (reachViewsData.length) {
+        processedData = mergeProcessedData(processedData, processInsights(reachViewsData, periodLabel));
       }
-    }
-    if (lastError && !processedData) {
-      throw lastError;
-    }
-    if (!processedData) {
-      processedData = processInsights([], `${since} to ${until}`);
+      if (followsData.length) {
+        processedData = mergeProcessedData(processedData, processInsights(followsData, periodLabel));
+      }
+      if (interactionsData.length) {
+        processedData = mergeProcessedData(processedData, processInsights(interactionsData, periodLabel));
+      }
+      if (consumptionsData.length) {
+        processedData = mergeProcessedData(processedData, processInsights(consumptionsData, periodLabel));
+      }
+      if ((processedData.total_follows === 0 && processedData.total_unfollows === 0) || !followsData.length) {
+        const pageFollowsDaily = await fetchOneMetricSet("page_follows");
+        if (pageFollowsDaily.length) {
+          const processed = processInsights(pageFollowsDaily, periodLabel);
+          if (processed.followers && processed.followers.length >= 2) {
+            const derived = deriveFollowsUnfollowsFromDailyCount(processed.followers);
+            if (derived.total_follows > 0 || derived.total_unfollows > 0) {
+              processedData.total_follows = derived.total_follows;
+              processedData.total_unfollows = derived.total_unfollows;
+              if (derived.fan_adds.length) processedData.fan_adds = derived.fan_adds;
+              if (derived.fan_removes.length) processedData.fan_removes = derived.fan_removes;
+            }
+          }
+          if (processed.current_followers > 0) processedData.current_followers = processed.current_followers;
+        }
+      }
+      if (processedData.total_reached === 0 && processedData.total_views === 0) {
+        const fallback = await fetchOneMetricSet("page_impressions");
+        if (fallback.length) {
+          processedData = mergeProcessedData(processedData, processInsights(fallback, periodLabel));
+        }
+      }
     }
 
     // Fetch previous period for change calculations
@@ -2151,6 +3054,312 @@ router.get("/pages/:pageId/insights", optionalAuthMiddleware, async (req, res) =
     res.status(500).json({
       error: "Failed to fetch page insights",
       details: errDetails,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 5.2.2) FACEBOOK CONTENT INSIGHTS - Same shape as Instagram for Best Reel page
+//    GET /api/meta/facebook/content-insights?pageId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+//    Returns: total_views, total_reached, total_interactions, daily_views_engagements, daily_subscriber_change
+// ---------------------------------------------------------------------
+router.get("/facebook/content-insights", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { pageId, from, to } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!pageId || !from || !to || !dateRegex.test(from) || !dateRegex.test(to)) {
+      return res.status(400).json({ error: "pageId, from, and to (YYYY-MM-DD) are required" });
+    }
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const authHeader = req.get("Authorization");
+    const headers = authHeader ? { Authorization: authHeader } : {};
+    const insightsRes = await axios.get(
+      `${baseUrl}/api/meta/pages/${encodeURIComponent(pageId)}/insights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      { headers, validateStatus: () => true, timeout: 20000 }
+    );
+    const raw = insightsRes.data?.data;
+    if (insightsRes.status !== 200 || !raw) {
+      return res.status(insightsRes.status === 200 ? 502 : insightsRes.status).json({
+        error: "Failed to load Facebook page insights",
+        details: insightsRes.data?.message || insightsRes.data?.error || "No data returned",
+      });
+    }
+    const formatChartDate = (dateStr) => {
+      const d = new Date(dateStr + "T00:00:00Z");
+      const day = d.getUTCDate();
+      const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+      return `${String(day).padStart(2, "0")} ${mon}`;
+    };
+    const byDate = {};
+    (raw.views || []).forEach((v) => {
+      const d = v.date;
+      if (!d) return;
+      if (!byDate[d]) byDate[d] = { date: formatChartDate(d), views: 0, eng: 0 };
+      byDate[d].views += Number(v.value) || 0;
+    });
+    (raw.interactions || []).forEach((v) => {
+      const d = v.date;
+      if (!d) return;
+      if (!byDate[d]) byDate[d] = { date: formatChartDate(d), views: 0, eng: 0 };
+      byDate[d].eng += Number(v.value) || 0;
+    });
+    const daily_views_engagements = Object.keys(byDate)
+      .sort()
+      .map((k) => byDate[k]);
+    const subByDate = {};
+    (raw.fan_adds || []).forEach((v) => {
+      const d = v.date;
+      if (!d) return;
+      subByDate[d] = (subByDate[d] || 0) + (Number(v.value) || 0);
+    });
+    (raw.fan_removes || []).forEach((v) => {
+      const d = v.date;
+      if (!d) return;
+      subByDate[d] = (subByDate[d] || 0) - (Number(v.value) || 0);
+    });
+    const daily_subscriber_change = Object.keys(subByDate)
+      .sort()
+      .map((k) => ({ date: formatChartDate(k), val: subByDate[k] }));
+    const total_views = raw.total_views || 0;
+    const total_reached = raw.total_reached || 0;
+    const total_interactions = raw.total_interactions || 0;
+    res.json({
+      totalViews: total_views,
+      totalReached: total_reached,
+      totalInteractions: total_interactions,
+      data: {
+        total_views: total_views,
+        total_reached: total_reached,
+        total_interactions: total_interactions,
+        daily_views_engagements,
+        daily_subscriber_change,
+      },
+    });
+  } catch (err) {
+    console.error("[Facebook content-insights] Error:", err.message);
+    res.status(500).json({
+      error: "Failed to fetch Facebook content insights",
+      details: err.message,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// 5.2.3) FACEBOOK MEDIA (TOP CONTENT) - Page videos with view counts, same shape as Instagram media-insights
+//    GET /api/meta/facebook/media-insights?pageId=...&from=...&to=... (from/to optional)
+// ---------------------------------------------------------------------
+router.get("/facebook/media-insights", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { pageId } = req.query;
+    if (!pageId) {
+      return res.status(400).json({ error: "pageId is required" });
+    }
+    const { token: accessToken, error: tokenError } = await getPageAccessTokenSafe(pageId);
+    if (tokenError || !accessToken) {
+      return res.status(200).json({
+        media: [],
+        byContentType: { all: { views: 0 }, posts: { views: 0 }, reels: { views: 0 }, stories: { views: 0 } },
+        message: "Page not accessible with current token.",
+      });
+    }
+    const baseUrl = `https://graph.facebook.com/${META_API_VERSION}`;
+    let metaErrorMessage = null;
+    const videosRes = await axios.get(`${baseUrl}/${pageId}/videos`, {
+      params: {
+        access_token: accessToken,
+        fields: "id,permalink_url,created_time,title,description,length,likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
+        limit: 25,
+      },
+      timeout: 15000,
+      validateStatus: () => true,
+    });
+    if (videosRes.data?.error) {
+      metaErrorMessage = videosRes.data.error.message || "Videos API error";
+      console.warn("[Facebook media-insights] /videos error:", metaErrorMessage, "code:", videosRes.data.error.code);
+    }
+    let videoList = videosRes.data?.data || [];
+    const media = [];
+    let totalViews = 0;
+
+    const pushMedia = (item) => {
+      totalViews += item.views || 0;
+      media.push(item);
+    };
+
+    if (Array.isArray(videoList) && videoList.length > 0) {
+      for (const v of videoList) {
+        let views = 0;
+        try {
+          const insRes = await axios.get(`${baseUrl}/${v.id}/video_insights`, {
+            params: {
+              access_token: accessToken,
+              metric: "total_video_views",
+              period: "lifetime",
+            },
+            timeout: 8000,
+            validateStatus: () => true,
+          });
+          const metrics = insRes.data?.data;
+          if (Array.isArray(metrics) && metrics.length > 0) {
+            const m0 = metrics[0];
+            if (m0.total_value != null && m0.total_value.value != null) {
+              views = parseInt(String(m0.total_value.value), 10) || 0;
+            } else if (m0.values && m0.values.length > 0 && m0.values[0].value != null) {
+              views = parseInt(String(m0.values[0].value), 10) || 0;
+            }
+          }
+        } catch (_) {
+          /* ignore per-video insight failure */
+        }
+        const likes = parseInt(v.likes?.summary?.total_count || 0, 10) || 0;
+        const comments = parseInt(v.comments?.summary?.total_count || 0, 10) || 0;
+        const shares = parseInt(v.shares?.count ?? 0, 10) || 0;
+        pushMedia({
+          media_id: v.id,
+          permalink: v.permalink_url || null,
+          timestamp: v.created_time || null,
+          caption: (v.title || v.description || "").slice(0, 500) || null,
+          media_type: "VIDEO",
+          product_type: "FEED",
+          views,
+          video_views: views,
+          likes,
+          comments,
+          shares,
+          total_interactions: likes + comments + shares,
+          availability: "available",
+        });
+      }
+    }
+
+    // Fallback: when /videos is empty, use published_posts with video attachments (video-in-posts)
+    if (media.length === 0) {
+      const postsRes = await axios.get(`${baseUrl}/${pageId}/published_posts`, {
+        params: {
+          access_token: accessToken,
+          fields: "id,permalink_url,created_time,message,full_picture,attachments{media_type,type,target{id}},likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
+          limit: 25,
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      });
+      if (postsRes.data?.error) {
+        metaErrorMessage = postsRes.data.error.message || "Published posts API error";
+        console.warn("[Facebook media-insights] /published_posts error:", metaErrorMessage, "code:", postsRes.data.error.code);
+      }
+      const posts = postsRes.data?.data || [];
+      const isVideoAttachment = (a) => {
+        const t = (a.media_type || a.type || "").toLowerCase();
+        return t === "video" || t.includes("video");
+      };
+      const videoPosts = posts.filter((p) => {
+        const att = p.attachments?.data || [];
+        return att.some(isVideoAttachment);
+      });
+      for (const p of videoPosts) {
+        let views = 0;
+        const videoAttachment = (p.attachments?.data || []).find(isVideoAttachment);
+        const videoId = videoAttachment?.target?.id || null;
+        if (videoId) {
+          try {
+            const vidInsRes = await axios.get(`${baseUrl}/${videoId}/video_insights`, {
+              params: {
+                access_token: accessToken,
+                metric: "total_video_views",
+                period: "lifetime",
+              },
+              timeout: 8000,
+              validateStatus: () => true,
+            });
+            const metrics = vidInsRes.data?.data;
+            if (Array.isArray(metrics) && metrics.length > 0) {
+              const m0 = metrics[0];
+              if (m0.total_value != null && m0.total_value.value != null) {
+                views = parseInt(String(m0.total_value.value), 10) || 0;
+              } else if (m0.values && m0.values.length > 0 && m0.values[0].value != null) {
+                views = parseInt(String(m0.values[0].value), 10) || 0;
+              }
+            }
+          } catch (_) {
+            /* fall through to post insights */
+          }
+        }
+        if (views === 0) {
+          try {
+            const insRes = await axios.get(`${baseUrl}/${p.id}/insights`, {
+              params: {
+                access_token: accessToken,
+                metric: "post_video_views,post_video_views_organic,post_video_views_paid,post_impressions",
+                period: "lifetime",
+              },
+              timeout: 8000,
+              validateStatus: () => true,
+            });
+            const metrics = insRes.data?.data || [];
+            let organic = 0;
+            let paid = 0;
+            let impressions = 0;
+            for (const m of metrics) {
+              const name = (m.name || "").toLowerCase();
+              const fromTotal = m.total_value != null && m.total_value.value != null;
+              const val = fromTotal
+                ? parseInt(String(m.total_value.value), 10) || 0
+                : (m.values && m.values[0] && m.values[0].value != null ? parseInt(String(m.values[0].value), 10) : 0);
+              if (name === "post_video_views" && val > 0) {
+                views = val;
+                break;
+              }
+              if (name === "post_video_views_organic") organic = val;
+              if (name === "post_video_views_paid") paid = val;
+              if (name === "post_impressions") impressions = val;
+            }
+            if (views === 0 && (organic > 0 || paid > 0)) views = organic + paid;
+            if (views === 0 && impressions > 0) views = impressions;
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        const likes = parseInt(p.likes?.summary?.total_count || 0, 10) || 0;
+        const comments = parseInt(p.comments?.summary?.total_count || 0, 10) || 0;
+        const shares = parseInt(p.shares?.count ?? 0, 10) || 0;
+        pushMedia({
+          media_id: p.id,
+          permalink: p.permalink_url || null,
+          timestamp: p.created_time || null,
+          caption: (p.message || "").slice(0, 500) || null,
+          media_type: "VIDEO",
+          product_type: "FEED",
+          views,
+          video_views: views,
+          likes,
+          comments,
+          shares,
+          total_interactions: likes + comments + shares,
+          availability: "available",
+          thumbnail_url: p.full_picture || null,
+        });
+      }
+    }
+
+    media.sort((a, b) => (b.views || 0) - (a.views || 0));
+    const payload = {
+      media,
+      byContentType: {
+        all: { views: totalViews },
+        posts: { views: totalViews },
+        reels: { views: 0 },
+        stories: { views: 0 },
+      },
+    };
+    if (media.length === 0 && metaErrorMessage) {
+      payload.message = metaErrorMessage;
+    }
+    res.json(payload);
+  } catch (err) {
+    console.error("[Facebook media-insights] Error:", err.message);
+    res.status(500).json({
+      error: "Failed to fetch Facebook video content",
+      details: err.message,
     });
   }
 });
@@ -2271,11 +3480,13 @@ router.post("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/meta/instagram/media-insights?accountIds=...|pageIds=...&from=...&to=... (or period=last_7_days)
-// Returns media list with hook_rate/hold_rate for Reels only; null + availability for non-Reels.
+// GET /api/meta/instagram/media-insights?accountIds=...|pageIds=...&from=...&to=...&contentType=... (or period=last_7_days)
+// Returns media list with hook_rate/hold_rate for Reels; views, reach, total_interactions for all. Includes byContentType aggregates.
+// Cache-first: 10–100 ms when cached; Meta is only called on cache miss (TTL 5 min).
+// Token: Page Access Token or System User with instagram_manage_insights, instagram_basic, pages_read_engagement.
 router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res) => {
   try {
-    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period } = req.query;
+    const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period, contentType } = req.query;
 
     let accountIds = [];
     if (accountIdsParam) {
@@ -2290,15 +3501,31 @@ router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res)
         .filter(Boolean);
     }
 
-    const result = await fetchInstagramMediaInsights({
+    const cacheOpts = {
       accountIds: accountIds.length > 0 ? accountIds : undefined,
       pageIds: pageIds.length > 0 ? pageIds : undefined,
-      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
       from: from || undefined,
       to: to || undefined,
       period: period || undefined,
+      contentType: contentType && ["all", "posts", "stories", "reels"].includes(String(contentType).toLowerCase()) ? String(contentType).toLowerCase() : undefined,
+    };
+    const cacheKey = insightsCache.buildMediaInsightsKey(cacheOpts);
+    const cached = insightsCache.get(cacheKey);
+    if (cached != null) {
+      return res.json(cached);
+    }
+
+    const result = await fetchInstagramMediaInsights({
+      accountIds: cacheOpts.accountIds,
+      pageIds: cacheOpts.pageIds,
+      getPageToken: pageIds.length > 0 ? getPageAccessToken : undefined,
+      from: cacheOpts.from,
+      to: cacheOpts.to,
+      period: cacheOpts.period,
+      contentType: cacheOpts.contentType,
     });
 
+    insightsCache.set(cacheKey, result, 5 * 60); // 5 min TTL
     return res.json(result);
   } catch (err) {
     console.error("[Instagram Media Insights] Error:", err.response?.data || err.message);
@@ -2320,6 +3547,84 @@ router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res)
     return res.status(500).json({
       error: "Failed to fetch Instagram media insights",
       details: err.response?.data || err.message,
+    });
+  }
+});
+
+// GET /api/meta/instagram/analytics?ig_user_id=...&media_id=...&page_id=... (page_id optional; used for token and to resolve ig_user_id if omitted)
+// Returns dashboard JSON: reach, estimated_views, hook_rate, hold_rate, engagement_score, likes, comments, saved, shares, best_posting_time
+router.get("/instagram/analytics", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { ig_user_id: igUserIdParam, media_id: mediaIdParam, page_id: pageIdParam } = req.query;
+    const mediaId = (mediaIdParam && String(mediaIdParam).trim()) || null;
+    if (!mediaId) {
+      return res.status(400).json({
+        error: "media_id is required",
+        message: "Provide media_id (Instagram media ID) as query parameter",
+      });
+    }
+
+    let igUserId = (igUserIdParam && String(igUserIdParam).trim()) || null;
+    let accessToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "").trim();
+
+    if (pageIdParam && String(pageIdParam).trim()) {
+      const pageId = String(pageIdParam).trim();
+      try {
+        const pageToken = await getPageAccessToken(pageId);
+        if (pageToken) accessToken = pageToken;
+        if (!igUserId) {
+          const systemToken = (process.env.META_SYSTEM_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "").trim();
+          const pageRes = await axios.get(
+            `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}/${pageId}`,
+            { params: { fields: "instagram_business_account", access_token: systemToken }, timeout: 10000 }
+          );
+          const igAccountId = pageRes.data?.instagram_business_account?.id;
+          if (igAccountId) igUserId = String(igAccountId);
+        }
+      } catch (pageErr) {
+        console.warn("[Instagram Analytics] page_id resolution failed:", pageErr?.message);
+      }
+    }
+
+    if (!igUserId) {
+      return res.status(400).json({
+        error: "ig_user_id is required when page_id is not provided or could not resolve Instagram account",
+        message: "Provide ig_user_id (Instagram Business Account ID) or a valid page_id with linked Instagram",
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(503).json({
+        error: "No access token available",
+        message: "Configure META_ACCESS_TOKEN or provide page_id to use page token",
+      });
+    }
+
+    const dashboard = await runAnalytics({
+      igUserId,
+      mediaId,
+      accessToken,
+    });
+    return res.json(dashboard);
+  } catch (err) {
+    console.error("[Instagram Analytics] Error:", err?.response?.data || err?.message);
+    if (err?.response?.data?.error?.code === 190) {
+      return res.status(401).json({
+        error: "Meta Access Token expired or invalid",
+        details: err.response.data.error.message,
+        isAuthError: true,
+      });
+    }
+    if (err?.response?.data?.error?.code === 200) {
+      return res.status(403).json({
+        error: "Insufficient permissions for Instagram insights",
+        details: err.response?.data?.error?.message,
+        isPermissionError: true,
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to run Instagram analytics",
+      details: err?.response?.data || err?.message,
     });
   }
 });
@@ -2985,48 +4290,61 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
     
     if (formId) {
       // Direct form ID provided
-      // We need page_id to get the Page Access Token for fetching leads
-      try {
-        const formResponse = await axios.get(
-          `https://graph.facebook.com/${META_API_VERSION}/${formId}`,
-          { params: { access_token: accessToken, fields: "id,name,page_id" } }
-        );
-        if (!formResponse.data.page_id) {
-          return res.status(400).json({ 
-            error: "Form missing page_id", 
-            details: "Unable to determine which page this form belongs to. Cannot fetch leads without page_id." 
-          });
-        }
+      // When pageId is also provided: use it directly - no need to call GET /formId (avoids permission
+      // issues for pages like Integfarms My Health School, MHS Dental Care where System token may not
+      // have access to the form object, but Page Access Token works for /formId/leads)
+      if (pageId) {
         formsToFetch.push({
           form_id: formId,
-          name: formResponse.data.name || `Form ${formId}`,
-          page_id: formResponse.data.page_id
+          name: `Form ${formId}`,
+          page_id: pageId
         });
-      } catch (err) {
-        const errorData = err.response?.data?.error;
-        const errorCode = errorData?.code;
-        const errorMsg = errorData?.message || err.message;
-        
-        // Handle token errors
-        if (errorCode === 190) {
-          return res.status(401).json({ 
-            error: "Meta Access Token expired or invalid", 
+      } else {
+        // No pageId: must fetch form info to get page_id (requires System token to access form object)
+        try {
+          const formResponse = await axios.get(
+            `https://graph.facebook.com/${META_API_VERSION}/${formId}`,
+            { params: { access_token: accessToken, fields: "id,name,page_id" } }
+          );
+          if (!formResponse.data.page_id) {
+            return res.status(400).json({
+              error: "Form missing page_id",
+              details: "Unable to determine which page this form belongs to. Cannot fetch leads without page_id."
+            });
+          }
+          formsToFetch.push({
+            form_id: formId,
+            name: formResponse.data.name || `Form ${formId}`,
+            page_id: formResponse.data.page_id
+          });
+        } catch (err) {
+          const errorData = err.response?.data?.error;
+          const errorCode = errorData?.code;
+          const errorMsg = errorData?.message || err.message;
+
+          if (errorCode === 190) {
+            return res.status(401).json({
+              error: "Meta Access Token expired or invalid",
+              details: errorMsg,
+              isAuthError: true,
+              instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+            });
+          }
+
+          if (errorCode === 200 || errorCode === 10) {
+            return res.status(403).json({
+              error: "Permission error",
+              details: errorMsg,
+              instruction: "Ensure your System User Token has 'leads_retrieval' and assign the Page to your System User in Meta Business Manager"
+            });
+          }
+
+          return res.status(400).json({
+            error: "Invalid formId",
             details: errorMsg,
-            isAuthError: true,
-            instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+            instruction: "Provide pageId alongside formId when selecting a page (e.g. Integfarms My Health School, MHS Dental Care) to use Page Access Token instead."
           });
         }
-        
-        if (errorCode === 200 || errorCode === 10) {
-          return res.status(403).json({ 
-            error: "Permission error", 
-            details: errorMsg,
-            instruction: "Ensure your System User Token has required permissions"
-          });
-        }
-        
-        console.error(`[Leads API] Error fetching form ${formId}:`, errorMsg);
-        return res.status(400).json({ error: "Invalid formId", details: errorMsg });
       }
     } else if (adId) {
       // Fetch forms associated with ad - use same logic as /forms endpoint
@@ -3207,16 +4525,8 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
             continue; // Skip leads that don't match the requested adId
           }
           
-          // Parse field_data
-          const fieldData = {};
-          if (Array.isArray(lead.field_data)) {
-            lead.field_data.forEach(field => {
-              const fieldName = field.name || '';
-              const fieldValue = field.values ? (Array.isArray(field.values) ? field.values[0] : field.values) : '';
-              fieldData[fieldName.toLowerCase()] = fieldValue;
-              fieldData[fieldName] = fieldValue;
-            });
-          }
+          // Parse field_data (clean labels via FIELD_LABELS, e.g. Sugar Poll)
+          const fieldData = parseFieldData(lead.field_data);
 
           // Extract name
           let leadName = 'N/A';
@@ -3259,9 +4569,10 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
             }
           }
           if (street === 'N/A') {
-            street = fieldData.street_address || fieldData.address || fieldData.street || 'N/A';
+            street = fieldData.street || fieldData.street_address || fieldData.address || findFirstValueByKeyPattern(fieldData, /street|address/i) || 'N/A';
           }
-          const city = fieldData.city || 'N/A';
+          const city = fieldData.city || findFirstValueByKeyPattern(fieldData, /city|town/i) || 'N/A';
+          const sugarPoll = fieldData['Sugar Poll'] || findFirstValueByKeyPattern(fieldData, /sugar/i) || 'N/A';
 
           // Get form name (from cache or fetch)
           let formName = formNameCache[formInfo.form_id] || formInfo.name;
@@ -3370,6 +4681,8 @@ router.get("/leads", optionalAuthMiddleware, async (req, res) => {
             DateChar: lead.created_time ? lead.created_time.split('T')[0] : '',
             Street: street,
             City: city,
+            SugarPoll: sugarPoll,
+            sugar_poll: sugarPoll,
             raw_field_data: lead.field_data || [],
             field_data: fieldData
           };
@@ -3641,18 +4954,8 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
           return leadDate >= startDate && leadDate <= endDate;
         })
         .map(lead => {
-          // Extract field_data
-          const fieldData = {};
-          if (Array.isArray(lead.field_data)) {
-            lead.field_data.forEach(field => {
-              const fieldName = field.name || '';
-              const fieldValue = field.values ? (Array.isArray(field.values) ? field.values[0] : field.values) : '';
-              fieldData[fieldName.toLowerCase()] = fieldValue;
-              fieldData[fieldName] = fieldValue;
-            });
-          }
+          const fieldData = parseFieldData(lead.field_data);
           
-          // Extract name
           let leadName = 'N/A';
           for (const [key, value] of Object.entries(fieldData)) {
             if (key && typeof key === 'string' && 
@@ -3668,7 +4971,6 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
                       fieldData.name || 'N/A';
           }
           
-          // Extract phone
           let phone = 'N/A';
           for (const [key, value] of Object.entries(fieldData)) {
             if (key && typeof key === 'string' && 
@@ -3681,7 +4983,11 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
           if (phone === 'N/A') {
             phone = fieldData.phone_number || fieldData.phone || fieldData.mobile_number || 'N/A';
           }
-          
+
+          let street = fieldData.street || fieldData.street_address || fieldData.address || findFirstValueByKeyPattern(fieldData, /street|address/i) || 'N/A';
+          const city = fieldData.city || findFirstValueByKeyPattern(fieldData, /city|town/i) || 'N/A';
+          const sugarPoll = fieldData['Sugar Poll'] || findFirstValueByKeyPattern(fieldData, /sugar/i) || 'N/A';
+
           return {
             lead_id: lead.id,
             form_id: form_id,
@@ -3689,8 +4995,10 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
             name: leadName,
             phone: phone,
             email: fieldData.email || null,
-            city: fieldData.city || 'N/A',
-            street: fieldData.street_address || fieldData.address || fieldData.street || 'N/A',
+            city: city,
+            street: street,
+            sugar_poll: sugarPoll,
+            SugarPoll: sugarPoll,
             raw_field_data: lead.field_data || [],
             // Legacy date fields for frontend compatibility
             Date: lead.created_time ? lead.created_time.split('T')[0] : '',
@@ -3700,6 +5008,8 @@ router.get("/leads-with-context", optionalAuthMiddleware, async (req, res) => {
             // Capitalized field names for backward compatibility
             Name: leadName,
             Phone: phone,
+            City: city,
+            Street: street,
             // NOTE: NO ad_id, campaign_id, ad_name, campaign_name
             // Meta API does not provide these per lead
           };

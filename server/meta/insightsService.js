@@ -72,6 +72,101 @@ const STATUS_FILTER = [
 ];
 
 /**
+ * Get numeric value from a row's actions or action_values by action_type (for Hold Rate).
+ */
+function getActionValue(row, actionType) {
+  if (!row) return 0;
+  for (const arr of [row.actions, row.action_values]) {
+    if (!Array.isArray(arr)) continue;
+    const entry = arr.find((a) => a && a.action_type === actionType);
+    if (entry != null && entry.value != null) return Number(entry.value) || 0;
+  }
+  return 0;
+}
+
+/** Meta can expose video completion as top-level arrays e.g. row.video_p100_watched_actions = [{ value: "x" }]. */
+function getTopLevelActionValue(row, key) {
+  if (!row || !key) return 0;
+  const arr = row[key];
+  if (!Array.isArray(arr) || arr.length === 0) return 0;
+  const v = arr[0] && (arr[0].value != null ? arr[0].value : arr[0]);
+  return Number(v) || 0;
+}
+
+/** Get video "full views" (100% or best available completion) from row. Tries p100, p95, p75, p50, p25. */
+function getVideoCompletionCount(row, aggs, values) {
+  const tryKeys = [
+    'video_p100_watched_actions', 'video_p100_watched',
+    'video_p95_watched_actions', 'video_p95_watched',
+    'video_p75_watched_actions', 'video_p75_watched',
+    'video_p50_watched_actions', 'video_p50_watched',
+    'video_p25_watched_actions', 'video_p25_watched',
+  ];
+  for (const key of tryKeys) {
+    const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
+    if (fromRow > 0) return fromRow;
+    const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
+    if (fromAggs > 0) return fromAggs;
+    const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
+    if (fromValues > 0) return fromValues;
+  }
+  return 0;
+}
+
+/**
+ * Build a map of action_type -> number from Meta actions/action_values array.
+ */
+function transformActions(actions) {
+  if (!Array.isArray(actions)) return {};
+  const map = {};
+  for (const a of actions) {
+    if (a && a.action_type != null) map[a.action_type] = Number(a.value) || 0;
+  }
+  return map;
+}
+
+/**
+ * Enrich one Meta insight row with videoPlays, videoP100Watched, hold_rate (server-side Hold Rate).
+ * Uses same logic as client: video_play_actions/video_view for plays, video_p100_watched for fullViews,
+ * then fallbacks: ThruPlay/videoViews, ThruPlay/video3sViews, else 0.
+ */
+function enrichInsightsRow(row) {
+  const aggs = transformActions(row.actions || []);
+  const values = transformActions(row.action_values || []);
+  const videoViews = aggs.video_view || aggs.video_views || 0;
+  const video3sViews = aggs.video_view_3s || aggs.video_views_3s || aggs.video_view_3s_autoplayed || aggs.video_views_3s_autoplayed || 0;
+  const videoThruPlays = aggs.video_thruplay || aggs.video_views_thruplay || 0;
+
+  const plays =
+    getTopLevelActionValue(row, 'video_play_actions') ||
+    getTopLevelActionValue(row, 'video_play') ||
+    getTopLevelActionValue(row, 'video_view') ||
+    getActionValue(row, 'video_play_actions') ||
+    getActionValue(row, 'video_play') ||
+    getActionValue(row, 'video_view') ||
+    0;
+  const fullViews = getVideoCompletionCount(row, aggs, values);
+
+  let hold_rate = 0;
+  if (plays > 0 && fullViews > 0) {
+    hold_rate = Math.round((fullViews / plays) * 10000) / 100;
+  } else if (plays > 0 && videoThruPlays > 0) {
+    hold_rate = Math.round((videoThruPlays / plays) * 10000) / 100;
+  } else if (videoViews > 0 && videoThruPlays >= 0) {
+    hold_rate = Math.round((videoThruPlays / videoViews) * 10000) / 100;
+  } else if (video3sViews > 0 && videoThruPlays >= 0) {
+    hold_rate = Math.round((videoThruPlays / video3sViews) * 10000) / 100;
+  }
+
+  return {
+    ...row,
+    videoPlays: plays,
+    videoP100Watched: fullViews,
+    hold_rate,
+  };
+}
+
+/**
  * Build filtering array for Meta Insights API.
  * Aggregated (Select All): status only. Filtered: add campaign.id IN and/or ad.id IN. One request, no loop.
  */
@@ -154,22 +249,28 @@ async function fetchInsightsFromMetaLive(opts) {
       }
     } while (true);
 
-    // Debug: log first row's actions so we can verify Meta's action_type keys for Hook/Hold rate
+    // Debug: log first row's actionTypes so we can verify Meta's keys for Hook/Hold rate
+    let actionTypes = [];
     if (allRows.length > 0) {
       const first = allRows[0];
       if (first && (first.actions || first.action_values)) {
-        const actionTypes = Array.isArray(first.actions) ? first.actions.map((a) => a.action_type) : [];
+        actionTypes = Array.isArray(first.actions) ? first.actions.map((a) => a.action_type) : [];
+        const actionValueTypes = Array.isArray(first.action_values) ? first.action_values.map((a) => a.action_type) : [];
         console.log('[InsightsService] Sample row actions (first row):', {
           ad_id: first.ad_id,
           actionTypes,
+          actionValueTypes,
           actionsSample: Array.isArray(first.actions) ? first.actions.slice(0, 15) : first.actions,
           hasActionValues: Array.isArray(first.action_values) && first.action_values.length > 0,
         });
       }
     }
 
-    cache.set(key, { data: allRows, expires: now + CACHE_TTL_MS });
-    return allRows;
+    // Enrich each row with videoPlays, videoP100Watched, hold_rate (server-side Hold Rate)
+    const enrichedRows = allRows.map((r) => enrichInsightsRow(r));
+
+    cache.set(key, { data: enrichedRows, expires: now + CACHE_TTL_MS });
+    return enrichedRows;
   };
 
   return scheduleRateLimited(run);
@@ -179,4 +280,7 @@ module.exports = {
   fetchInsightsFromMetaLive,
   cacheKey,
   buildFiltering,
+  getActionValue,
+  transformActions,
+  enrichInsightsRow,
 };

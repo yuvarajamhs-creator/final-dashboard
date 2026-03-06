@@ -14,6 +14,7 @@ import BestPerformingReel from "./pages/BestPerformingReel";
 import Plan from "./pages/Plan";
 import Audience from "./pages/Audience";
 import AIInsights from "./pages/AIInsights";
+import UniqueLeads from "./pages/UniqueLeads";
 import HighFiveLanding from "./pages/HighFiveLanding";
 import TeamManagement from "./pages/TeamManagement";
 import ManagePermissions from "./pages/ManagePermissions";
@@ -37,6 +38,7 @@ export default function App() {
                   <Route path="/plan" element={<Plan />} />
                   <Route path="/audience" element={<Audience />} />
                   <Route path="/ai-insights" element={<AIInsights />} />
+                  <Route path="/unique-leads" element={<UniqueLeads />} />
                   <Route path="/operation/task" element={<Task />} />
                   <Route path="/report/daily" element={<Report />} />
                   <Route path="/high-five" element={<HighFiveLanding />} />

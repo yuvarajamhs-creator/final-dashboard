@@ -1,6 +1,6 @@
 /* eslint-disable no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -19,13 +19,34 @@ import {
   Line,
 } from "recharts";
 import { getCurrentTheme, setTheme } from "../utils/theme";
+import { calculateFollowerGrowthRate } from "../utils/followerGrowthRate";
 import MultiSelectFilter from "../components/MultiSelectFilter";
 import DateRangeFilter from "../components/DateRangeFilter";
 import { downloadCSV } from "../utils/csvExport";
+import { PROJECT_ORDER, ALL_SPECIFIED_ACCOUNT_IDS, buildAdAccountsByProject, normalizeAccountId } from "../constants/projectAdAccounts";
 import ExcelJS from 'exceljs';
 import './Dashboards.css';
 
 const COLORS = ["#4F46E5", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
+
+/** Meta Lead Form API raw field name -> display label (e.g. Sugar Poll) */
+const FIELD_LABELS = {
+  'what_is_your_sugar_level?_உங்கள்_சர்க்கரை_அளவு_என்ன?': 'Sugar Poll',
+  'what_is_your_sugar_level': 'Sugar Poll',
+  'sugar_level': 'Sugar Poll',
+  'sugar_poll': 'Sugar Poll'
+};
+const getFieldLabel = (name) => (name != null && FIELD_LABELS[name] !== undefined) ? FIELD_LABELS[name] : name;
+
+/** Content Marketing: page names shown in PAGE filter and in Followers vs Page chart when Instagram/Facebook is selected.
+ *  Matching is trim + case-insensitive; add API variants (e.g. "Dr. Farmer") so all 4 pages appear. */
+const CONTENT_MARKETING_PAGE_NAMES = [
+  'Integfarms My Health School',
+  'My Health School',
+  'MHS Dental Care',
+  'Doctor Farmer',
+  'Dr. Farmer', // API may return this instead of "Doctor Farmer"
+];
 
 /** Download an Excel file from headers and rows (array of arrays). columnWidths: array of numbers. */
 async function downloadExcelFromRows(headers, rows, sheetName, filename, columnWidths) {
@@ -53,6 +74,37 @@ const transformActions = (actions = []) => {
     map[a.action_type] = Number(a.value);
   });
   return map;
+};
+
+// Get numeric value for Hold Rate: from named array (e.g. video_play_actions?.[0]?.value) or from actions/action_values by action_type
+const getActionValue = (row, actionType) => {
+  if (!row) return 0;
+  for (const arr of [row.actions, row.action_values]) {
+    if (!Array.isArray(arr)) continue;
+    const entry = arr.find((a) => a && a.action_type === actionType);
+    if (entry != null && entry.value != null) return Number(entry.value) || 0;
+  }
+  return 0;
+};
+
+const getTopLevelActionValue = (row, key) => {
+  if (!row || !key || !row[key] || !Array.isArray(row[key]) || row[key].length === 0) return 0;
+  const v = row[key][0] && (row[key][0].value != null ? row[key][0].value : row[key][0]);
+  return Number(v) || 0;
+};
+
+// Best available video completion (p100, p95, p75, p50, p25) so Hold Rate can show when Meta uses any of these
+const getVideoCompletionCount = (row, aggs, values) => {
+  const tryKeys = ['video_p100_watched_actions', 'video_p100_watched', 'video_p95_watched_actions', 'video_p95_watched', 'video_p75_watched_actions', 'video_p75_watched', 'video_p50_watched_actions', 'video_p50_watched', 'video_p25_watched_actions', 'video_p25_watched'];
+  for (const key of tryKeys) {
+    const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
+    if (fromRow > 0) return fromRow;
+    const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
+    if (fromAggs > 0) return fromAggs;
+    const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
+    if (fromValues > 0) return fromValues;
+  }
+  return 0;
 };
 
 // Helper: safe number
@@ -194,10 +246,9 @@ const fetchInstagramInsights = async ({ pageIds, accountIds, from, to }) => {
     }
 
     const json = await res.json();
-    if (json.error && !json.data) {
-      return null;
-    }
-    return json.data || null;
+    // Server returns the result at top level (totalFollows, totalViews, etc.), not under json.data
+    const data = json.data ?? (json.totalFollows != null || json.totalViews != null ? json : null);
+    return { data, error: json.error || null };
   } catch (error) {
     console.error("Error fetching Instagram insights:", error);
     throw error;
@@ -357,10 +408,27 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       const cpl = leadCount > 0 ? spend / leadCount : 0;
       
       // Video metrics for Hook Rate and Hold Rate
-      // Meta returns these in actions array; support all known action_type variants
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
       const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || 0;
       const videoThruPlays = aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+
+      // Prefer server-enriched values when present (from insightsService.enrichInsightsRow), else compute client-side with same fallbacks as server
+      const plays = (d.videoPlays != null && d.videoPlays !== '') ? num(d.videoPlays) : (getTopLevelActionValue(d, 'video_play_actions') || getTopLevelActionValue(d, 'video_play') || getTopLevelActionValue(d, 'video_view') || getActionValue(d, 'video_play_actions') || getActionValue(d, 'video_play') || getActionValue(d, 'video_view') || 0);
+      const fullViews = (d.videoP100Watched != null && d.videoP100Watched !== '') ? num(d.videoP100Watched) : getVideoCompletionCount(d, aggs, values);
+      const serverHoldRate = (d.hold_rate != null && d.hold_rate !== '') || (d.holdRate != null && d.holdRate !== '') ? num(d.hold_rate ?? d.holdRate) : null;
+      let holdRate = serverHoldRate;
+      if (holdRate == null || (typeof holdRate === 'number' && Number.isNaN(holdRate))) {
+        holdRate = 0;
+        if (plays > 0 && fullViews > 0) {
+          holdRate = parseFloat(((fullViews / plays) * 100).toFixed(2));
+        } else if (plays > 0 && videoThruPlays > 0) {
+          holdRate = parseFloat(((videoThruPlays / plays) * 100).toFixed(2));
+        } else if (videoViews > 0 && videoThruPlays >= 0) {
+          holdRate = parseFloat(((videoThruPlays / videoViews) * 100).toFixed(2));
+        } else if (video3sViews > 0 && videoThruPlays >= 0) {
+          holdRate = parseFloat(((videoThruPlays / video3sViews) * 100).toFixed(2));
+        }
+      }
 
       // Hook Rate: 3s views / impressions * 100 (or direct hook_rate from Meta if present)
       let hookRate = 0;
@@ -368,18 +436,6 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         hookRate = num(d.hook_rate);
       } else {
         hookRate = impressions > 0 ? (video3sViews / impressions) * 100 : 0;
-      }
-
-      // Hold Rate: ThruPlays / video views * 100 (or ThruPlays / 3s views if video views missing; or direct hold_rate)
-      let holdRate = 0;
-      if ((d.Hold_rate !== undefined && d.Hold_rate !== null && d.Hold_rate !== '') ||
-          (d.hold_rate !== undefined && d.hold_rate !== null && d.hold_rate !== '')) {
-        holdRate = num(d.Hold_rate || d.hold_rate);
-      } else if (videoViews > 0) {
-        holdRate = (videoThruPlays / videoViews) * 100;
-      } else if (video3sViews > 0) {
-        // Ads Manager sometimes defines Hold as ThruPlays / 3s views
-        holdRate = (videoThruPlays / video3sViews) * 100;
       }
 
       return {
@@ -397,6 +453,8 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         cpl: cpl,
         hookRate: hookRate,
         holdRate: holdRate,
+        videoPlays: plays,
+        videoP100Watched: fullViews,
         videoViews: videoViews,
         video3sViews: video3sViews,
         videoThruPlays: videoThruPlays,
@@ -415,6 +473,7 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
 
 // Fetch insights from all ad accounts and combine into one dataset.
 // Used when "All Ad Accounts" is selected so KPI cards show aggregated totals.
+// Uses Promise.allSettled so one failing account does not block others; failed accounts are logged.
 const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adIds, allCampaigns, allAds, accounts, useLive = false }) => {
   if (!accounts || accounts.length === 0) return [];
   try {
@@ -431,12 +490,56 @@ const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adId
         useLive
       })
     );
-    const results = await Promise.all(promises);
+    const settled = await Promise.allSettled(promises);
+    const results = settled.map((s, i) => {
+      if (s.status === 'fulfilled') return s.value;
+      const acc = accounts[i];
+      const name = acc?.account_name || acc?.name || acc?.account_id || acc?.id || 'unknown';
+      console.warn(`[Dashboard] Ad account "${name}" failed:`, s.reason?.message || s.reason);
+      return [];
+    });
     return results.flat();
   } catch (e) {
     console.error("Failed to fetch multi-account dashboard data", e);
     return [];
   }
+};
+
+// Fetch Hook Rate and Hold Rate from video-performance API and return weighted totals.
+// Returns { hookRate, holdRate } or null on failure/no data.
+const fetchVideoPerformanceTotals = async (accountIds, since, until) => {
+  if (!accountIds || accountIds.length === 0 || !since || !until) return null;
+  const token = getAuthToken();
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  let allRows = [];
+  const settled = await Promise.allSettled(
+    accountIds.map((id) => {
+      const aid = String(id).replace(/^act_/, "");
+      if (!aid) return Promise.resolve([]);
+      const url = `${API_BASE}/api/meta/video-performance?adAccountId=${encodeURIComponent(aid)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+      return fetch(url, { headers }).then((r) => r.json()).then((body) => (body.success && Array.isArray(body.data) ? body.data : []));
+    })
+  );
+  settled.forEach((s) => {
+    if (s.status === "fulfilled" && Array.isArray(s.value)) allRows = allRows.concat(s.value);
+  });
+  if (allRows.length === 0) return null;
+  let totalImpressions = 0;
+  let weightedHook = 0;
+  let totalPlays = 0;
+  let weightedHold = 0;
+  allRows.forEach((row) => {
+    const imp = Number(row.impressions) || 0;
+    const plays = Number(row.plays) || 0;
+    totalImpressions += imp;
+    weightedHook += (Number(row.hookRate) || 0) * imp;
+    totalPlays += plays;
+    weightedHold += (Number(row.holdRate) || 0) * plays;
+  });
+  const hookRate = totalImpressions > 0 ? Math.round((weightedHook / totalImpressions) * 100) / 100 : 0;
+  const holdRate = totalPlays > 0 ? Math.round((weightedHold / totalPlays) * 100) / 100 : 0;
+  return { hookRate, holdRate };
 };
 
 // Fetch Wix analytics from backend (normalized to same row shape as Meta insights).
@@ -464,7 +567,8 @@ const fetchWixAnalytics = async ({ from, to }) => {
 };
 
 // Fetch ad accounts from Meta API
-const fetchAdAccounts = async () => {
+// forceRefresh: when true, asks server to re-fetch from Meta (handles pagination, gets all accounts)
+const fetchAdAccounts = async (forceRefresh = false) => {
   try {
     const token = getAuthToken();
     const headers = { "Content-Type": "application/json" };
@@ -474,7 +578,7 @@ const fetchAdAccounts = async () => {
       console.warn('[fetchAdAccounts] ⚠️ No token available - request may fail');
     }
 
-    const url = `${API_BASE}/api/meta/ad-accounts`;
+    const url = `${API_BASE}/api/meta/ad-accounts${forceRefresh ? '?refresh=true' : ''}`;
     
     const res = await fetch(url, { headers });
     
@@ -705,10 +809,11 @@ const fetchPages = async () => {
     }
 
     const data = await res.json();
-    return data.data || [];
+    if (Array.isArray(data)) return { data: data, defaultPageId: '' };
+    return { data: data.data || [], defaultPageId: (data.defaultPageId || '').trim() };
   } catch (e) {
     console.error("Error fetching pages:", e);
-    return [];
+    return { data: [], defaultPageId: '' };
   }
 }
 
@@ -988,16 +1093,18 @@ export default function AdsDashboardBootstrap() {
   const [days, setDays] = useState(30);
   const [adAccounts, setAdAccounts] = useState([]);
   const [adAccountsLoading, setAdAccountsLoading] = useState(true);
-  const [selectedAdAccount, setSelectedAdAccount] = useState(null);
+  const [selectedAdAccounts, setSelectedAdAccounts] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [adsLoading, setAdsLoading] = useState(false);
   const [ads, setAds] = useState([]);
   const [data, setData] = useState([]);
   const [allAdsData, setAllAdsData] = useState([]); // Store all unfiltered data for ad breakdown
+  const [videoPerformanceTotals, setVideoPerformanceTotals] = useState(null); // Hook/Hold from GET /api/meta/video-performance when available
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null); // Toast notification state
+  const [saturationAlert, setSaturationAlert] = useState(null); // Latest saturated campaigns for banner
 
   // Auto-dismiss toast after 5 seconds
   useEffect(() => {
@@ -1008,12 +1115,40 @@ export default function AdsDashboardBootstrap() {
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  // Fetch latest saturation run for dashboard banner (saturated campaigns)
+  const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
+  useEffect(() => {
+    let cancelled = false;
+    const token = (() => {
+      try {
+        const key = process.env.REACT_APP_STORAGE_KEY || 'app_auth';
+        const stored = localStorage.getItem(key);
+        return stored ? (JSON.parse(stored)?.token ?? null) : null;
+      } catch (e) { return null; }
+    })();
+    fetch(`${API_BASE}/api/ai/lead-saturation/latest`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled || !data.success || !Array.isArray(data.saturated) || data.saturated.length === 0) return;
+        setSaturationAlert({ saturated: data.saturated, summary: data.summary });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [projects, setProjects] = useState([]);
   const [selectedProjects, setSelectedProjects] = useState([]);
   const [selectedCampaigns, setSelectedCampaigns] = useState([]);
   const [selectedAds, setSelectedAds] = useState([]);
   const [selectedPlatforms, setSelectedPlatforms] = useState([]);
   const [selectedPlatform, setSelectedPlatform] = useState(null); // Single platform for main dashboard filter
+  // All Projects filter (single selection: '' = All Projects, or project name from PROJECT_ORDER)
+  const [selectedProject, setSelectedProject] = useState('');
+  const [projectsDropdownOpen, setProjectsDropdownOpen] = useState(false);
+  const [hoveredProject, setHoveredProject] = useState(null);
+  const projectsDropdownRef = useRef(null);
   const [selectedL1Revenue, setSelectedL1Revenue] = useState([]);
   const [selectedL2Revenue, setSelectedL2Revenue] = useState([]);
   const [selectedAction, setSelectedAction] = useState("");
@@ -1046,6 +1181,8 @@ export default function AdsDashboardBootstrap() {
   const [leadsLoading, setLeadsLoading] = useState(false);
   const [leadsError, setLeadsError] = useState(null);
   const [pages, setPages] = useState([]);
+  const [pagesLoading, setPagesLoading] = useState(true);
+  const [defaultFacebookPageId, setDefaultFacebookPageId] = useState('');
   const [forms, setForms] = useState([]);
   const [selectedPage, setSelectedPage] = useState(null);
   const [selectedForm, setSelectedForm] = useState(null);
@@ -1092,6 +1229,7 @@ export default function AdsDashboardBootstrap() {
   const [filteredLeadsSelectedDateRange, setFilteredLeadsSelectedDateRange] = useState('last_7_days');
   const [showFilteredLeadsDateRangeFilter, setShowFilteredLeadsDateRangeFilter] = useState(false);
   const [downloadingFilteredLeads, setDownloadingFilteredLeads] = useState(false);
+  const [downloadingFollowsExcel, setDownloadingFollowsExcel] = useState(false);
 
   // Pre-load state for leads optimization
   const [preloadedLeads, setPreloadedLeads] = useState([]);
@@ -1144,7 +1282,22 @@ export default function AdsDashboardBootstrap() {
   
   // Content Marketing PAGE filter (drives page insights for this section only)
   const [contentMarketingPage, setContentMarketingPage] = useState(null);
-  
+
+  // Content Marketing: PAGE filter and engagement data when Instagram or Facebook is selected in Source
+  const isInstagramSelected = selectedSource && selectedSource.some((s) => (s?.id || s) === 'instagram');
+  const isFacebookSelected = selectedSource && selectedSource.some((s) => (s?.id || s) === 'facebook');
+  const isEngagementSourceSelected = isInstagramSelected || isFacebookSelected;
+
+  // When Instagram or Facebook is selected, PAGE filter shows only these 4 pages (match trim + case-insensitive)
+  const contentMarketingPageOptions = useMemo(() => {
+    if (!isEngagementSourceSelected || !Array.isArray(pages)) return [];
+    const allowed = new Set(CONTENT_MARKETING_PAGE_NAMES.map((n) => (n || '').trim().toLowerCase()));
+    return pages.filter((p) => {
+      const name = (p.name || p.label || '').trim().toLowerCase();
+      return name && allowed.has(name);
+    });
+  }, [isEngagementSourceSelected, pages]);
+
   // Page Insights State
   const [pageInsightsLoading, setPageInsightsLoading] = useState(false);
   const [pageInsightsData, setPageInsightsData] = useState(null);
@@ -1154,12 +1307,18 @@ export default function AdsDashboardBootstrap() {
   const [contentPageInsightsLoading, setContentPageInsightsLoading] = useState(false);
   const [contentPageInsightsData, setContentPageInsightsData] = useState(null);
   const [contentPageInsightsError, setContentPageInsightsError] = useState(null);
+  // Insights for all 4 Content Marketing pages (for Followers vs Page chart when Instagram/Facebook selected)
+  const [contentMarketingAllPagesInsights, setContentMarketingAllPagesInsights] = useState([]);
+  const [contentMarketingAllPagesInsightsLoading, setContentMarketingAllPagesInsightsLoading] = useState(false);
+  const [contentMarketingAllPagesInsightsError, setContentMarketingAllPagesInsightsError] = useState(null);
   const [performanceInsightsLoading, setPerformanceInsightsLoading] = useState(false);
   const [performanceInsightsData, setPerformanceInsightsData] = useState(null);
   const [performanceInsightsError, setPerformanceInsightsError] = useState(null);
   const [unfollowsLast28Days, setUnfollowsLast28Days] = useState(null);
   const [unfollowsLast28Loading, setUnfollowsLast28Loading] = useState(false);
   const [unfollowsLast28Error, setUnfollowsLast28Error] = useState(null);
+  const [unfollowsReportDaily, setUnfollowsReportDaily] = useState([]);
+  const [showUnfollowsReport, setShowUnfollowsReport] = useState(false);
   
   // Platform-specific metrics (Content Marketing - shown when Platform filter is selected)
   const [contentPlatformMetricsLoading, setContentPlatformMetricsLoading] = useState(false);
@@ -1221,18 +1380,72 @@ export default function AdsDashboardBootstrap() {
     setCurrentTheme(newTheme);
   };
 
+  // Project → ad accounts (for All Projects filter and Ad Account dropdown). Strict ID-based: only specified IDs.
+  const adAccountsByProject = useMemo(() => buildAdAccountsByProject(adAccounts), [adAccounts]);
+  const specifiedAccountIdSet = useMemo(() => new Set(ALL_SPECIFIED_ACCOUNT_IDS.map((id) => normalizeAccountId(id))), []);
+  const specifiedAdAccounts = useMemo(() => adAccounts.filter((acc) => specifiedAccountIdSet.has(normalizeAccountId(acc.account_id || acc.id))), [adAccounts, specifiedAccountIdSet]);
+  const selectedProjectAccountIds = useMemo(() => {
+    if (!selectedProject) return [];
+    const list = adAccountsByProject[selectedProject] || [];
+    return list.map((x) => normalizeAccountId(x.value)).filter(Boolean);
+  }, [selectedProject, adAccountsByProject]);
+  const accountsForProject = useMemo(() => {
+    if (selectedProjectAccountIds.length === 0) return [];
+    const idSet = new Set(selectedProjectAccountIds);
+    return adAccounts.filter((acc) => idSet.has(normalizeAccountId(acc.account_id || acc.id)));
+  }, [adAccounts, selectedProjectAccountIds]);
+
+  const accountsForSelectedAdAccounts = useMemo(() => {
+    if (selectedAdAccounts.length === 0) return [];
+    const baseList = selectedProject ? accountsForProject : specifiedAdAccounts;
+    const idSet = new Set(selectedAdAccounts.map((id) => normalizeAccountId(id)));
+    return baseList.filter((acc) => idSet.has(normalizeAccountId(acc.account_id || acc.id)));
+  }, [selectedAdAccounts, selectedProject, accountsForProject, specifiedAdAccounts]);
+
   const load = async (useLive = false) => {
     setLoading(true);
     setCampaignsLoading(true);
     setError(null);
+    setVideoPerformanceTotals(null);
 
     try {
-      
-      // First, fetch campaigns to determine if all are selected
-      const [campData, projectsData] = await Promise.all([
-        fetchCampaigns(selectedAdAccount),
-        fetchProjects()
-      ]);
+      // First, fetch campaigns (selected accounts, project accounts, or all)
+      let campData;
+      if (selectedAdAccounts.length > 0) {
+        const campaignPromises = selectedAdAccounts.map((id) => fetchCampaigns(id));
+        const results = await Promise.all(campaignPromises);
+        const byId = new Map();
+        results.flat().forEach((c) => {
+          const id = c.id || c.campaign_id;
+          if (id && !byId.has(id)) byId.set(id, c);
+        });
+        campData = Array.from(byId.values());
+      } else if (selectedProject && accountsForProject.length > 0) {
+        const campaignPromises = accountsForProject.map((acc) =>
+          fetchCampaigns(acc.account_id || acc.id)
+        );
+        const results = await Promise.all(campaignPromises);
+        const byId = new Map();
+        results.flat().forEach((c) => {
+          const id = c.id || c.campaign_id;
+          if (id && !byId.has(id)) byId.set(id, c);
+        });
+        campData = Array.from(byId.values());
+      } else if (specifiedAdAccounts.length > 0) {
+        const campaignPromises = specifiedAdAccounts.map((acc) =>
+          fetchCampaigns(acc.account_id || acc.id)
+        );
+        const results = await Promise.all(campaignPromises);
+        const byId = new Map();
+        results.flat().forEach((c) => {
+          const id = c.id || c.campaign_id;
+          if (id && !byId.has(id)) byId.set(id, c);
+        });
+        campData = Array.from(byId.values());
+      } else {
+        campData = await fetchCampaigns(null);
+      }
+      const projectsData = await fetchProjects();
 
       // The active-campaigns API only returns active campaigns, so we can use the list directly
       const activeCampaignsList = campData || [];
@@ -1270,15 +1483,27 @@ export default function AdsDashboardBootstrap() {
         (ads.length > 0 && selectedAds.length === ads.length);
       
 
-      // When "All Ad Accounts" is selected, fetch from each account and combine.
-      // Use same filtered list as dropdown (exclude Read-Only names).
-      const isAllAdAccounts = !selectedAdAccount && adAccounts.length > 0;
-      const accountsForFetch = isAllAdAccounts
-        ? adAccounts.filter((account) => {
-            const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-            return !displayName.toLowerCase().includes('read-only');
-          })
-        : [];
+      // When no ad accounts selected = "All Ad Accounts"; else use selected accounts.
+      const isAllAdAccounts = selectedAdAccounts.length === 0 && (
+        selectedProject ? accountsForProject.length > 0 : specifiedAdAccounts.length > 0
+      );
+      const accountsForFetch = selectedAdAccounts.length > 0
+        ? accountsForSelectedAdAccounts
+        : isAllAdAccounts
+          ? (selectedProject ? accountsForProject : specifiedAdAccounts)
+          : [];
+
+      // No ad accounts to fetch: stop loading and tell user to select an account
+      if (accountsForFetch.length === 0) {
+        setLoading(false);
+        setCampaignsLoading(false);
+        setToast({
+          type: 'warning',
+          title: 'Select an Ad Account',
+          message: 'Select at least one Ad Account from the dropdown to load dashboard data. If the list is empty, check your Meta connection and server (.env token).'
+        });
+        return;
+      }
 
       let rows;
       let allAdsRows;
@@ -1311,8 +1536,8 @@ export default function AdsDashboardBootstrap() {
           accounts: accountsForFetch,
           useLive
         });
-      } else {
-        rows = await fetchDashboardData({
+      } else if (accountsForFetch.length > 0) {
+        rows = await fetchAllAccountsDashboardData({
           days,
           from: dateFilters.startDate || null,
           to: dateFilters.endDate || null,
@@ -1320,10 +1545,10 @@ export default function AdsDashboardBootstrap() {
           adIds: adIdsToSend,
           allCampaigns: allCampaignsSelected,
           allAds: allAdsSelected,
-          adAccountId: selectedAdAccount || null,
+          accounts: accountsForFetch,
           useLive
         });
-        allAdsRows = await fetchDashboardData({
+        allAdsRows = await fetchAllAccountsDashboardData({
           days,
           from: dateFilters.startDate || null,
           to: dateFilters.endDate || null,
@@ -1331,9 +1556,12 @@ export default function AdsDashboardBootstrap() {
           adIds: [],
           allCampaigns: allCampaignsSelected,
           allAds: true,
-          adAccountId: selectedAdAccount || null,
+          accounts: accountsForFetch,
           useLive
         });
+      } else {
+        rows = [];
+        allAdsRows = [];
       }
 
       // Fetch Wix analytics and merge with Meta data (Wix rows have platform: 'wix')
@@ -1422,6 +1650,16 @@ export default function AdsDashboardBootstrap() {
       // This ensures the table always shows all ads regardless of "Ad Name" filter
       setAllAdsData(filteredAllAdsData);
 
+      // Fetch Hook/Hold Rate from video-performance API for KPI cards (non-blocking)
+      const accountIdsForVideo = accountsForFetch.length > 0
+        ? accountsForFetch.map((a) => a.account_id || a.id).filter(Boolean)
+        : [];
+      if (fromDate && toDate && accountIdsForVideo.length > 0) {
+        fetchVideoPerformanceTotals(accountIdsForVideo, fromDate, toDate)
+          .then((totals) => totals != null && setVideoPerformanceTotals(totals))
+          .catch(() => {});
+      }
+
       if (filteredData.length === 0) {
         // If we have rows but they were all filtered out
         if (rows.length > 0 && !allCampaignsSelected) {
@@ -1458,30 +1696,65 @@ export default function AdsDashboardBootstrap() {
     }
   };
 
-  // Load ad accounts on mount
+  // When project changes, restrict Ad Accounts to those in the selected project (or clear if none match)
   useEffect(() => {
-    const loadAdAccounts = async () => {
-      
-      try {
-        setAdAccountsLoading(true);
-        const accountsData = await fetchAdAccounts();
-        
-        setAdAccounts(accountsData || []);
-      } catch (error) {
-        console.error('[Dashboard] ❌ Error in loadAdAccounts:', error);
-        setAdAccounts([]);
-      } finally {
-        setAdAccountsLoading(false);
+    if (selectedAdAccounts.length === 0) return;
+    if (!selectedProject || selectedProjectAccountIds.length === 0) return;
+    const projectIdSet = new Set(selectedProjectAccountIds.map((id) => normalizeAccountId(id)));
+    const filtered = selectedAdAccounts.filter((id) => projectIdSet.has(normalizeAccountId(id)));
+    if (filtered.length !== selectedAdAccounts.length) {
+      setSelectedAdAccounts(filtered);
+      setSelectedCampaigns([]);
+      setSelectedAds([]);
+      setCampaigns([]);
+      setAds([]);
+    }
+  }, [selectedProject, selectedProjectAccountIds, selectedAdAccounts]);
+
+  // Close All Projects dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (projectsDropdownRef.current && !projectsDropdownRef.current.contains(e.target)) {
+        setProjectsDropdownOpen(false);
       }
     };
-    loadAdAccounts();
+    if (projectsDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [projectsDropdownOpen]);
+
+  // Load ad accounts. forceRefresh=true re-fetches from Meta (pagination, all accounts).
+  const loadAdAccounts = useCallback(async (forceRefresh = false) => {
+    try {
+      setAdAccountsLoading(true);
+      const accountsData = await fetchAdAccounts(forceRefresh);
+      setAdAccounts(accountsData || []);
+    } catch (error) {
+      console.error('[Dashboard] ❌ Error in loadAdAccounts:', error);
+      setAdAccounts([]);
+    } finally {
+      setAdAccountsLoading(false);
+    }
   }, []);
+
+  // Load ad accounts on mount
+  useEffect(() => {
+    loadAdAccounts(false);
+  }, [loadAdAccounts]);
 
   // Load pages on mount
   useEffect(() => {
     const loadPages = async () => {
-      const pagesData = await fetchPages();
-      setPages(pagesData);
+      setPagesLoading(true);
+      try {
+        const result = await fetchPages();
+        const list = result?.data ?? result ?? [];
+        setPages(Array.isArray(list) ? list : []);
+        setDefaultFacebookPageId(result?.defaultPageId || '');
+      } finally {
+        setPagesLoading(false);
+      }
     };
     loadPages();
   }, []);
@@ -1818,10 +2091,10 @@ export default function AdsDashboardBootstrap() {
     }
   }, [dateFilters.startDate, dateFilters.endDate, selectedCampaigns, selectedAds, loadLeads]);
 
-  // Clear ads when ad account changes (avoid showing stale ads from previous account).
+  // Clear ads when ad account selection changes (avoid showing stale ads).
   useEffect(() => {
     setAds([]);
-  }, [selectedAdAccount]);
+  }, [selectedAdAccounts]);
 
   // Fetch ads only on explicit campaign selection (not on page load or time range change).
   // One request: GET /api/meta/ads?all=true (from DB only); pass ad_account_id for multi-account.
@@ -1833,7 +2106,7 @@ export default function AdsDashboardBootstrap() {
     }
     setAdsLoading(true);
     try {
-      const raw = await fetchAdsAll(selectedAdAccount || null);
+      const raw = await fetchAdsAll(selectedAdAccounts.length === 1 ? selectedAdAccounts[0] : null);
       const idSet = new Set(selectedIds.map(String));
       const filtered = raw.filter(ad => idSet.has(String(ad.campaign_id || '')));
       const unique = Array.from(new Map(filtered.map(ad => [ad.id, ad])).values());
@@ -1852,7 +2125,7 @@ export default function AdsDashboardBootstrap() {
   useEffect(() => {
     load();
     // eslint-disable-next-line
-  }, [days, selectedAdAccount, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, adAccounts]);
+  }, [days, selectedAdAccounts, selectedProject, selectedProjects, selectedCampaigns, selectedAds, selectedPlatforms, selectedL1Revenue, selectedL2Revenue, adAccounts]);
 
   // Load leads when form or date filters change
 
@@ -1910,138 +2183,151 @@ export default function AdsDashboardBootstrap() {
     }
   }, [pages, selectedPage]);
 
-  // Fetch page insights for Content Marketing Dashboard when contentMarketingPage/selectedPage or contentFilters change
+  // When Instagram/Facebook is deselected in Source, clear Content Marketing PAGE so next time they see "Select a Page"
   useEffect(() => {
-    const pageIdToUse = contentMarketingPage || selectedPage || (pages.length > 0 ? pages[0]?.id : null);
-    
-    if (pageIdToUse && contentFilters.startDate && contentFilters.endDate) {
-      setContentPageInsightsLoading(true);
-      setContentPageInsightsError(null);
-      fetchPageInsights({
-        pageId: pageIdToUse,
-        from: contentFilters.startDate,
-        to: contentFilters.endDate
-      })
-        .then((data) => {
-          if (data) {
-            setContentPageInsightsData(data);
-          }
-        })
-        .catch((error) => {
-          console.error("Error fetching Content Marketing page insights:", error);
-          if (error.isPermissionError) {
-            setContentPageInsightsError({
-              type: 'permission',
-              message: "Permission Error: Your Meta Access Token needs 'pages_read_engagement' permission.",
-              details: "Please ensure your Meta Access Token has the 'pages_read_engagement' permission. You may need to regenerate your token after adding this permission in Meta App Dashboard."
-            });
-          } else if (error.isAuthError) {
-            setContentPageInsightsError({
-              type: 'auth',
-              message: "Authentication Error: Your Meta Access Token is invalid or expired.",
-              details: error.message
-            });
-          } else {
-            setContentPageInsightsError({
-              type: 'error',
-              message: "Failed to fetch page insights.",
-              details: error.message
-            });
-          }
-          setContentPageInsightsData(null);
-        })
-        .finally(() => {
-          setContentPageInsightsLoading(false);
-        });
-    } else {
-      if (!pageIdToUse) {
-        console.warn('[Content Marketing] No page selected and no pages available');
-      }
-      if (!contentFilters.startDate || !contentFilters.endDate) {
-        console.warn('[Content Marketing] Date range not set:', {
-          startDate: contentFilters.startDate,
-          endDate: contentFilters.endDate
-        });
-      }
+    if (!isEngagementSourceSelected) {
+      setContentMarketingPage(null);
+    }
+  }, [isEngagementSourceSelected]);
+
+  // When Facebook is selected and server has a default page (META_PAGE_ID), auto-select it so insights load for the reference page
+  useEffect(() => {
+    if (!isFacebookSelected || !defaultFacebookPageId || pages.length === 0) return;
+    if (contentMarketingPage || selectedPage) return;
+    const hasDefault = pages.some((p) => (p.id || p.value) === defaultFacebookPageId);
+    if (hasDefault) {
+      setContentMarketingPage(defaultFacebookPageId);
+    }
+  }, [isFacebookSelected, defaultFacebookPageId, pages, contentMarketingPage, selectedPage]);
+
+  // Single flow: one Page Insights call for Content Marketing. Reuse result for both chart and performance cards.
+  // Fetch when Instagram or Facebook is selected in Source. Instagram: prefer IG insights, fallback to Page. Facebook: Page insights only.
+  useEffect(() => {
+    if (!isEngagementSourceSelected) {
       setContentPageInsightsData(null);
       setContentPageInsightsError(null);
-    }
-  }, [contentMarketingPage, selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
-
-  // Fetch performance insights (Views, Interactions, Follows, Reached) for Content Marketing Dashboard
-  // Always passes pageIds to match Explorer flow: Page token -> instagram_accounts -> insights with Page token
-  // Falls back to Facebook Page insights only when no IG account is linked (do not fall back on API errors)
-  useEffect(() => {
-    const pageIdToUse = contentMarketingPage || selectedPage || (pages.length > 0 ? pages[0]?.id : null);
-    const selectedPageObj = pages.find((p) => p.id === pageIdToUse);
-    const igAccountId = selectedPageObj?.instagram_business_account_id;
-
-    if (pageIdToUse && contentFilters.startDate && contentFilters.endDate) {
-      setPerformanceInsightsLoading(true);
-      setPerformanceInsightsError(null);
-
-      const fetchParams = {
-        pageIds: pageIdToUse,
-        from: contentFilters.startDate,
-        to: contentFilters.endDate,
-      };
-
-      fetchInstagramInsights(fetchParams)
-        .then((igData) => {
-          if (igData) {
-            setPerformanceInsightsData(igData);
-            return;
-          }
-          // No IG account linked (explicit null from successful response); fall back to Facebook Page insights
-          if (!igAccountId) {
-            return fetchPerformanceInsights({
-              pageId: pageIdToUse,
-              from: contentFilters.startDate,
-              to: contentFilters.endDate,
-            }).then((pageData) => {
-              setPerformanceInsightsData(pageData);
-            });
-          }
-          setPerformanceInsightsData(null);
-        })
-        .catch((error) => {
-          console.error("Error fetching performance insights:", error);
-          if (error.isPermissionError) {
-            setPerformanceInsightsError({
-              type: "permission",
-              message:
-                "Permission Error: Your Meta Access Token needs 'pages_read_engagement' or 'instagram_manage_insights' permission.",
-              details: error.message,
-            });
-          } else if (error.isAuthError) {
-            setPerformanceInsightsError({
-              type: "auth",
-              message: "Authentication Error: Your Meta Access Token is invalid or expired.",
-              details: error.message,
-            });
-          } else {
-            setPerformanceInsightsError({
-              type: "error",
-              message: "Failed to fetch performance insights.",
-              details: error.message,
-            });
-          }
-          setPerformanceInsightsData(null);
-        })
-        .finally(() => {
-          setPerformanceInsightsLoading(false);
-        });
-    } else {
       setPerformanceInsightsData(null);
       setPerformanceInsightsError(null);
+      return;
     }
-  }, [contentMarketingPage, selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
-
-  // Fetch unfollows for last 28 days only (independent of date range filter)
-  useEffect(() => {
     const pageIdToUse = contentMarketingPage || selectedPage || (pages.length > 0 ? pages[0]?.id : null);
-    const selectedPageObj = pages.find((p) => p.id === pageIdToUse);
-    const igAccountId = selectedPageObj?.instagram_business_account_id;
+
+    if (!pageIdToUse || !contentFilters.startDate || !contentFilters.endDate) {
+      setContentPageInsightsData(null);
+      setContentPageInsightsError(null);
+      setPerformanceInsightsData(null);
+      setPerformanceInsightsError(null);
+      return;
+    }
+
+    setContentPageInsightsLoading(true);
+    setPerformanceInsightsLoading(true);
+    setContentPageInsightsError(null);
+    setPerformanceInsightsError(null);
+
+    const from = contentFilters.startDate;
+    const to = contentFilters.endDate;
+
+    fetchPageInsights({ pageId: pageIdToUse, from, to })
+      .then((pageData) => {
+        if (pageData) {
+          setContentPageInsightsData(pageData);
+          setContentPageInsightsError(null);
+        }
+        // When Facebook only (Instagram not selected): use Page insights. When Instagram selected: try IG first, fallback to Page.
+        if (isFacebookSelected && !isInstagramSelected) {
+          if (pageData && (pageData.total_views != null || pageData.total_interactions != null || pageData.total_reached != null || pageData.total_follows != null)) {
+            setPerformanceInsightsData(pageData);
+            setPerformanceInsightsError(null);
+          }
+          return;
+        }
+        return fetchInstagramInsights({ pageIds: pageIdToUse, from, to })
+          .then((result) => {
+            if (result.data) {
+              setPerformanceInsightsData(result.data);
+              setPerformanceInsightsError(null);
+              return;
+            }
+            if (result.error) {
+              setPerformanceInsightsError({
+                type: "error",
+                message: "Instagram insights unavailable",
+                details: result.error,
+              });
+            }
+            if (pageData && (pageData.total_views != null || pageData.total_interactions != null || pageData.total_reached != null || pageData.total_follows != null)) {
+              setPerformanceInsightsData(pageData);
+              setPerformanceInsightsError(null);
+            }
+          })
+          .catch(() => {
+            if (pageData && (pageData.total_views != null || pageData.total_interactions != null || pageData.total_reached != null || pageData.total_follows != null)) {
+              setPerformanceInsightsData(pageData);
+              setPerformanceInsightsError(null);
+            }
+          });
+      })
+      .catch((error) => {
+        console.error("Error fetching Content Marketing insights:", error);
+        const errPayload = error.isPermissionError
+          ? {
+              type: "permission",
+              message: "Your Meta Access Token needs 'pages_read_engagement' (or 'instagram_manage_insights') permission.",
+              details: error.message,
+            }
+          : error.isAuthError
+            ? { type: "auth", message: "Meta Access Token invalid or expired.", details: error.message }
+            : { type: "error", message: "Failed to fetch page insights.", details: error.message };
+        setContentPageInsightsError(errPayload);
+        setPerformanceInsightsError(errPayload);
+        setContentPageInsightsData(null);
+        setPerformanceInsightsData(null);
+      })
+      .finally(() => {
+        setContentPageInsightsLoading(false);
+        setPerformanceInsightsLoading(false);
+      });
+  }, [isEngagementSourceSelected, isFacebookSelected, contentMarketingPage, selectedPage, pages, contentFilters.startDate, contentFilters.endDate]);
+
+  // Fetch insights for all 4 Content Marketing pages (for Followers vs Page chart) when Instagram or Facebook selected
+  useEffect(() => {
+    if (!isEngagementSourceSelected || contentMarketingPageOptions.length === 0 || !contentFilters.startDate || !contentFilters.endDate) {
+      setContentMarketingAllPagesInsights([]);
+      setContentMarketingAllPagesInsightsError(null);
+      return;
+    }
+    const from = contentFilters.startDate;
+    const to = contentFilters.endDate;
+    setContentMarketingAllPagesInsightsLoading(true);
+    setContentMarketingAllPagesInsightsError(null);
+    Promise.all(
+      contentMarketingPageOptions.map((p) =>
+        fetchPageInsights({ pageId: p.id, from, to }).then((data) => ({
+          pageId: p.id,
+          name: p.name || p.label || 'Unknown',
+          current_followers: data?.current_followers ?? 0,
+          current_reach: data?.current_reach ?? 0,
+        }))
+      )
+    )
+      .then(setContentMarketingAllPagesInsights)
+      .catch((err) => {
+        console.error('Error fetching Content Marketing all-pages insights:', err);
+        setContentMarketingAllPagesInsightsError(err?.message || 'Failed to load follower counts');
+        setContentMarketingAllPagesInsights([]);
+      })
+      .finally(() => setContentMarketingAllPagesInsightsLoading(false));
+  }, [isEngagementSourceSelected, contentMarketingPageOptions, contentFilters.startDate, contentFilters.endDate]);
+
+  // Fetch unfollows for last 28 days only (independent of date range filter); when Instagram or Facebook selected
+  useEffect(() => {
+    if (!isEngagementSourceSelected) {
+      setUnfollowsLast28Days(null);
+      setUnfollowsLast28Error(null);
+      return;
+    }
+    const pageIdToUse = contentMarketingPage || selectedPage || (pages.length > 0 ? pages[0]?.id : null);
 
     if (!pageIdToUse) {
       setUnfollowsLast28Days(null);
@@ -2053,42 +2339,95 @@ export default function AdsDashboardBootstrap() {
     setUnfollowsLast28Loading(true);
     setUnfollowsLast28Error(null);
 
+    const buildUnfollowsReportFromPageData = (pageData) => {
+      const followers = Array.isArray(pageData?.followers) ? pageData.followers : [];
+      const fanAdds = Array.isArray(pageData?.fan_adds) ? pageData.fan_adds : [];
+      const fanRemoves = Array.isArray(pageData?.fan_removes) ? pageData.fan_removes : [];
+      const byDate = (arr) => Object.fromEntries((arr || []).map((r) => [r.date, Number(r.value ?? r.follows ?? r.unfollows ?? 0)]));
+      const followersByDate = byDate(followers);
+      const followsByDate = byDate(fanAdds);
+      const unfollowsByDate = byDate(fanRemoves);
+      const dateSet = new Set([
+        ...followers.map((r) => r.date),
+        ...fanAdds.map((r) => r.date),
+        ...fanRemoves.map((r) => r.date),
+      ].filter(Boolean));
+      const sortedDates = [...dateSet].sort();
+      if (sortedDates.length === 0) return [];
+      const rows = sortedDates.map((date, i) => {
+        const follower_count = followersByDate[date] ?? null;
+        const follows = followsByDate[date] ?? 0;
+        const unfollows = unfollowsByDate[date] ?? 0;
+        let daily_change = null;
+        if (follower_count != null && i > 0) {
+          const prev = followersByDate[sortedDates[i - 1]];
+          if (prev != null) daily_change = follower_count - prev;
+        } else if (follows !== 0 || unfollows !== 0) {
+          daily_change = follows - unfollows;
+        }
+        return {
+          date,
+          follower_count,
+          daily_change,
+          follows,
+          unfollows,
+        };
+      });
+      return rows;
+    };
+
+    const fetchFromPageInsights = () =>
+      fetchPerformanceInsights({
+        pageId: pageIdToUse,
+        from: startDate,
+        to: endDate,
+      }).then((pageData) => {
+        setUnfollowsLast28Days({
+          total_unfollows: pageData?.total_unfollows ?? 0,
+          unfollowsChange: pageData?.unfollowsChange ?? 0,
+        });
+        setUnfollowsReportDaily(buildUnfollowsReportFromPageData(pageData));
+      });
+
+    if (isFacebookSelected && !isInstagramSelected) {
+      fetchFromPageInsights()
+        .catch((error) => {
+          console.error("Error fetching unfollows (last 28 days):", error);
+          setUnfollowsLast28Error(error?.message || "Failed to fetch unfollows");
+          setUnfollowsLast28Days(null);
+          setUnfollowsReportDaily([]);
+        })
+        .finally(() => setUnfollowsLast28Loading(false));
+      return;
+    }
+
     fetchInstagramInsights({
       pageIds: pageIdToUse,
       from: startDate,
       to: endDate,
     })
-      .then((igData) => {
-        if (igData) {
+      .then((result) => {
+        const igData = result?.data;
+        if (igData && (igData.total_unfollows != null || igData.total_follows != null)) {
           setUnfollowsLast28Days({
             total_unfollows: igData.total_unfollows ?? 0,
             unfollowsChange: igData.unfollowsChange ?? 0,
           });
+          setUnfollowsReportDaily(Array.isArray(igData.unfollows_report_daily) ? igData.unfollows_report_daily : []);
           return;
         }
-        if (!igAccountId) {
-          return fetchPerformanceInsights({
-            pageId: pageIdToUse,
-            from: startDate,
-            to: endDate,
-          }).then((pageData) => {
-            setUnfollowsLast28Days({
-              total_unfollows: pageData?.total_unfollows ?? 0,
-              unfollowsChange: pageData?.unfollowsChange ?? 0,
-            });
-          });
-        }
-        setUnfollowsLast28Days(null);
+        return fetchFromPageInsights();
       })
       .catch((error) => {
         console.error("Error fetching unfollows (last 28 days):", error);
         setUnfollowsLast28Error(error?.message || "Failed to fetch unfollows");
         setUnfollowsLast28Days(null);
+        setUnfollowsReportDaily([]);
       })
       .finally(() => {
         setUnfollowsLast28Loading(false);
       });
-  }, [contentMarketingPage, selectedPage, pages]);
+  }, [isEngagementSourceSelected, isFacebookSelected, contentMarketingPage, selectedPage, pages]);
 
   // Fetch Content Marketing revenue when filters change
   useEffect(() => {
@@ -2465,19 +2804,18 @@ export default function AdsDashboardBootstrap() {
         totalHookRateWeight += r.impressions;
       }
       
-      // For Hold Rate: weight by videoViews
-      if (r.holdRate !== undefined && r.holdRate !== null && r.videoViews > 0) {
-        weightedHoldRate += r.holdRate * r.videoViews;
-        totalHoldRateWeight += r.videoViews;
+      // For Hold Rate: weight by videoPlays (video_play_actions)
+      const plays = r.videoPlays || 0;
+      if (r.holdRate !== undefined && r.holdRate !== null && plays > 0) {
+        weightedHoldRate += r.holdRate * plays;
+        totalHoldRateWeight += plays;
       }
     });
     
     // Calculate weighted averages
-    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight : 
+    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
                  (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
-    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                 (t.videoViews > 0 ? (t.videoThruPlays / t.videoViews) * 100 :
-                  (t.video3sViews > 0 ? (t.videoThruPlays / t.video3sViews) * 100 : 0));
+    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight : 0;
     
     t.roas = t.spend ? t.totalRevenue / t.spend : 0;
 
@@ -2510,131 +2848,104 @@ export default function AdsDashboardBootstrap() {
   }, [data]);
 
   // Aggregate data by Ad for detailed table view
-  // Show all ads from filtered data (Time Range, Ad Account, Campaign filters)
-  // This table always shows all ads, not filtered by "Ad Name" selection
+  // Build from insights only; leads in table = same as cards (aggregated row.leads from Meta API).
   const adBreakdown = useMemo(() => {
-    // Aggregate leads from Total Leads data by ad_id
-    // Only count leads from active campaigns
-    const leadsByAdId = new Map();
-    leads.forEach(lead => {
-      const adId = lead.ad_id;
-      const campaignId = lead.campaign_id;
-      
-      // Only count leads from active campaigns
-      // Normalize campaign ID to string for comparison (consistent with other filters)
-      if (adId && campaignId && activeCampaignIds.has(String(campaignId))) {
-        const existing = leadsByAdId.get(adId) || {
-          ad_id: adId,
-          ad_name: lead.ad_name || 'N/A',
-          campaign_id: campaignId,
-          campaign_name: lead.campaign_name || lead.Campaign || 'N/A',
-          leads: 0
-        };
-        existing.leads += 1;
-        leadsByAdId.set(adId, existing);
-      }
-    });
-    
-    // Merge with insights data (spend, impressions, clicks, etc.)
-    // API returns campaigns with all effective statuses
-    const insightsByAdId = new Map();
     const sourceData = allAdsData.length > 0 ? allAdsData : data;
+    // Aggregate insights by ad_id (sum spend/impressions/clicks; weighted hook/hold)
+    const adAgg = new Map();
     sourceData.forEach(row => {
-      if (row.ad_id) {
-        // Only exclude if explicitly not active
-        const campaignStatus = row.campaign_status || row.status;
-        const adStatus = row.ad_status || row.effective_status;
-        if (campaignStatus && campaignStatus !== 'ACTIVE') return;
-        if (adStatus && adStatus !== 'ACTIVE') return;
-        // Include if status is null (API filtered) or ACTIVE
-        insightsByAdId.set(row.ad_id, row);
+      if (!row.ad_id) return;
+      const campaignStatus = row.campaign_status || row.status;
+      const adStatus = row.ad_status || row.effective_status;
+      if (campaignStatus && campaignStatus !== 'ACTIVE') return;
+      if (adStatus && adStatus !== 'ACTIVE') return;
+
+      const id = row.ad_id;
+      const cur = adAgg.get(id) || {
+        ad_id: id,
+        ad_name: row.ad_name || 'Unnamed Ad',
+        campaign_id: row.campaign_id,
+        campaign_name: row.campaign || row.campaign_name || 'N/A',
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        leads: 0,
+        videoViews: 0,
+        video3sViews: 0,
+        videoThruPlays: 0,
+        videoPlays: 0,
+        videoP100Watched: 0,
+        ad_status: row.ad_status || row.effective_status || 'ACTIVE',
+        campaign_status: row.campaign_status || row.status || 'ACTIVE',
+        hookRateSum: 0,
+        hookRateWeight: 0,
+        holdRateSum: 0,
+        holdRateWeight: 0
+      };
+      cur.spend += row.spend || 0;
+      cur.impressions += row.impressions || 0;
+      cur.clicks += row.clicks || 0;
+      cur.conversions += row.conversions || 0;
+      cur.leads += row.leads || 0;
+      cur.videoViews += row.videoViews || 0;
+      cur.video3sViews += row.video3sViews || 0;
+      cur.videoThruPlays += row.videoThruPlays || 0;
+      cur.videoPlays += row.videoPlays || 0;
+      cur.videoP100Watched += row.videoP100Watched || 0;
+      if (row.hookRate != null && row.impressions > 0) {
+        cur.hookRateSum += row.hookRate * row.impressions;
+        cur.hookRateWeight += row.impressions;
       }
+      // Hold Rate: weight by videoPlays (holdRate is always a number now)
+      if ((row.holdRate ?? 0) >= 0 && (row.videoPlays || 0) > 0) {
+        cur.holdRateSum += row.holdRate * (row.videoPlays || 0);
+        cur.holdRateWeight += row.videoPlays || 0;
+      }
+      adAgg.set(id, cur);
     });
-    
-    // Combine leads data with insights data
-    const combinedAds = Array.from(leadsByAdId.values()).map(leadAd => {
-      const insights = insightsByAdId.get(leadAd.ad_id) || {};
+
+    let combinedAds = Array.from(adAgg.values()).map(ad => {
+      // Use same leads as cards: aggregated from insights (row.leads per ad). Table and cards show same data.
+      const leadsCount = ad.leads || 0;
+      const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
+      // Hold Rate = (video_p100_watched_actions / video_play_actions) * 100; show null when no plays
+      const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0));
       return {
-        ...leadAd,
-        spend: insights.spend || 0,
-        impressions: insights.impressions || 0,
-        clicks: insights.clicks || 0,
-        conversions: insights.conversions || 0,
-        videoViews: insights.videoViews || 0,
-        video3sViews: insights.video3sViews || 0,
-        videoThruPlays: insights.videoThruPlays || 0,
-        ad_status: insights.ad_status || 'ACTIVE',
-        campaign_status: insights.campaign_status || 'ACTIVE',
-        hookRate: insights.hookRate,
-        holdRate: insights.holdRate
+        ad_id: ad.ad_id,
+        ad_name: ad.ad_name,
+        campaign_id: ad.campaign_id,
+        campaign_name: ad.campaign_name,
+        campaign: ad.campaign_name,
+        spend: ad.spend,
+        impressions: ad.impressions,
+        clicks: ad.clicks,
+        conversions: ad.conversions,
+        leads: leadsCount,
+        ad_status: ad.ad_status,
+        campaign_status: ad.campaign_status,
+        videoPlays: ad.videoPlays || 0,
+        hookRate,
+        holdRate
       };
     });
-    
+
     // Filter by selected campaigns if any are selected
-    let filteredAds = combinedAds;
-    const allCampaignsSelected = selectedCampaigns.length === 0 || 
-      (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
-    
+    const allCampaignsSelected = selectedCampaigns.length === 0 || (campaigns.length > 0 && selectedCampaigns.length === campaigns.length);
     if (!allCampaignsSelected && selectedCampaigns.length > 0) {
-      filteredAds = combinedAds.filter(ad => {
-        // Handle both string and number comparison
-        const adCampaignId = String(ad.campaign_id);
-        return selectedCampaigns.some(selectedId => String(selectedId) === adCampaignId);
-      });
+      combinedAds = combinedAds.filter(ad => selectedCampaigns.some(sid => String(sid) === String(ad.campaign_id)));
     }
-    
-    // Calculate metrics for each ad
-    // For hookRate and holdRate, we need to aggregate from sourceData for each ad
-    const result = filteredAds.map(ad => {
-      // Find all rows for this ad to aggregate hookRate and holdRate properly
-      const adRows = sourceData.filter(r => r.ad_id === ad.ad_id);
-      
-      // Calculate weighted average for Hook Rate (weight by impressions)
-      let totalHookRateWeight = 0;
-      let weightedHookRate = 0;
-      
-      // Calculate weighted average for Hold Rate (weight by videoViews)
-      let totalHoldRateWeight = 0;
-      let weightedHoldRate = 0;
-      
-      adRows.forEach(row => {
-        if (row.hookRate !== undefined && row.hookRate !== null && row.impressions > 0) {
-          weightedHookRate += row.hookRate * row.impressions;
-          totalHookRateWeight += row.impressions;
-        }
-        if (row.holdRate !== undefined && row.holdRate !== null && row.videoViews > 0) {
-          weightedHoldRate += row.holdRate * row.videoViews;
-          totalHoldRateWeight += row.videoViews;
-        }
-      });
-      
-      const hookRate = ad.hookRate !== undefined ? ad.hookRate :
-                      (totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
-                      (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0));
-      
-      const holdRate = ad.holdRate !== undefined ? ad.holdRate :
-                      (totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                      (ad.videoViews > 0 ? (ad.videoThruPlays / ad.videoViews) * 100 : 0));
-      
+
+    const result = combinedAds.map(ad => {
       const ctr = ad.impressions > 0 ? (ad.clicks / ad.impressions) * 100 : 0;
       const cpl = ad.leads > 0 ? ad.spend / ad.leads : 0;
       const conversionRate = ad.clicks > 0 ? (ad.conversions / ad.clicks) * 100 : 0;
-      
-      return {
-        ...ad,
-        campaign: ad.campaign_name || ad.campaign || 'N/A',
-        ctr,
-        cpl,
-        hookRate,
-        holdRate,
-        conversionRate
-      };
+      return { ...ad, ctr, cpl, conversionRate };
     });
-    
-    // Sort by leads count (descending) as default ranking
+
     result.sort((a, b) => b.leads - a.leads);
     return result;
-  }, [leads, data, allAdsData, selectedCampaigns, campaigns.length, activeCampaignIds]);
+  }, [data, allAdsData, selectedCampaigns, campaigns.length]);
     
   // Sort helper function
   const sortData = (data, field, direction) => {
@@ -2927,7 +3238,7 @@ export default function AdsDashboardBootstrap() {
     const to = dateFilters.endDate || null;
     
     // Extract filter IDs for contextual insights
-    const adAccountId = selectedAdAccount || null;
+    const adAccountId = selectedAdAccounts.length === 1 ? selectedAdAccounts[0] : null;
     const campaignId = selectedCampaigns.length > 0 ? selectedCampaigns[0] : null;
     const adId = selectedAds.length > 0 ? selectedAds[0] : null;
     
@@ -3099,7 +3410,7 @@ export default function AdsDashboardBootstrap() {
     
     setDownloadingFilteredLeads(true);
     try {
-      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Campaign', 'Ad Name', 'Form Name'];
+      const headers = ['Date & Time', 'Campaign', 'Ad Name', 'Lead Name', 'Phone Number', 'Sugar Poll', 'City', 'Street', 'Form Name'];
       
       // Escape commas and quotes in CSV
       const escapeCSV = (val) => {
@@ -3112,20 +3423,17 @@ export default function AdsDashboardBootstrap() {
       };
       
       const rows = filteredLeadsData.map(lead => {
-        const leadName = lead.Name || 'N/A';
-        const phone = lead.Phone || 'N/A';
         const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
-        const street = lead.Street || 'N/A';
-        const city = lead.City || 'N/A';
-        
+        const sugarPoll = lead.SugarPoll || lead.sugar_poll || (lead.field_data && lead.field_data['Sugar Poll']) || 'N/A';
         return [
-          escapeCSV(leadName),
-          escapeCSV(phone),
           escapeCSV(dateTime),
-          escapeCSV(street),
-          escapeCSV(city),
           escapeCSV(lead.campaign_name || 'N/A'),
           escapeCSV(lead.ad_name || 'N/A'),
+          escapeCSV(lead.Name || 'N/A'),
+          escapeCSV(lead.Phone || 'N/A'),
+          escapeCSV(sugarPoll),
+          escapeCSV(lead.City || 'N/A'),
+          escapeCSV(lead.Street || 'N/A'),
           escapeCSV(lead.form_name || 'N/A')
         ];
       });
@@ -3154,6 +3462,63 @@ export default function AdsDashboardBootstrap() {
     }
   };
 
+  // Format a date as "DD Mon" to match API daily_subscriber_change date strings
+  const formatDayMon = (dateStr) => {
+    const d = new Date(dateStr + 'T00:00:00');
+    const day = d.getDate();
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+    return `${String(day).padStart(2, '0')} ${mon}`;
+  };
+
+  // Export Follows to Excel (Meta-style: Date, Primary, Total row)
+  const handleDownloadFollowsExcel = async () => {
+    const dailyList =
+      performanceInsightsData?.data?.daily_subscriber_change ??
+      performanceInsightsData?.daily_subscriber_change ??
+      (Array.isArray(performanceInsightsData?.fan_adds) ? performanceInsightsData.fan_adds : []);
+    const startDate = contentFilters?.startDate;
+    const endDate = contentFilters?.endDate;
+    if (!startDate || !endDate) {
+      setToast({ type: 'warning', title: 'Warning', message: 'Please select a date range first.' });
+      return;
+    }
+    if (dailyList.length === 0) {
+      setToast({ type: 'warning', title: 'Warning', message: 'No follows data available to export.' });
+      return;
+    }
+    setDownloadingFollowsExcel(true);
+    try {
+      const byDayMon = {};
+      dailyList.forEach((item) => {
+        const rawDate = (item.date || '').trim();
+        const dayMonKey = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? formatDayMon(rawDate) : rawDate;
+        const val = item?.val ?? item?.value;
+        if (dayMonKey) byDayMon[dayMonKey] = (byDayMon[dayMonKey] || 0) + (Number(val) || 0);
+      });
+      const rows = [];
+      let totalFollows = 0;
+      const start = new Date(startDate + 'T00:00:00');
+      const end = new Date(endDate + 'T00:00:00');
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const iso = d.toISOString().slice(0, 10);
+        const dayMon = formatDayMon(iso);
+        const follows = Math.max(0, byDayMon[dayMon] || 0);
+        totalFollows += follows;
+        rows.push([iso + 'T00:00:00', follows]);
+      }
+      rows.push(['Total', totalFollows]);
+      const headers = ['Date', 'Primary'];
+      const filename = `Facebook-follows-${startDate}.xlsx`;
+      await downloadExcelFromRows(headers, rows, 'Facebook follows', filename, [24, 12]);
+      setToast({ type: 'success', title: 'Success', message: 'Follows data exported to Excel.' });
+    } catch (e) {
+      console.error('Error exporting follows Excel:', e);
+      setToast({ type: 'error', title: 'Error', message: 'Failed to export follows. Please try again.' });
+    } finally {
+      setDownloadingFollowsExcel(false);
+    }
+  };
+
   // Handle Excel download for filtered leads table
   const handleDownloadFilteredLeadsExcel = async () => {
     if (filteredLeadsData.length === 0) {
@@ -3167,30 +3532,27 @@ export default function AdsDashboardBootstrap() {
     
     setDownloadingFilteredLeads(true);
     try {
-      const headers = ['Lead Name', 'Phone Number', 'Date & Time', 'Street', 'City', 'Campaign', 'Ad Name', 'Form Name'];
+      const headers = ['Date & Time', 'Campaign', 'Ad Name', 'Lead Name', 'Phone Number', 'Sugar Poll', 'City', 'Street', 'Form Name'];
       
       const rows = filteredLeadsData.map(lead => {
-        const leadName = lead.Name || 'N/A';
-        const phone = lead.Phone || 'N/A';
         const dateTime = formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time);
-        const street = lead.Street || 'N/A';
-        const city = lead.City || 'N/A';
-        
+        const sugarPoll = lead.SugarPoll || lead.sugar_poll || (lead.field_data && lead.field_data['Sugar Poll']) || 'N/A';
         return [
-          leadName, 
-          phone, 
-          dateTime, 
-          street, 
-          city, 
+          dateTime,
           lead.campaign_name || 'N/A',
           lead.ad_name || 'N/A',
+          lead.Name || 'N/A',
+          lead.Phone || 'N/A',
+          sugarPoll,
+          lead.City || 'N/A',
+          lead.Street || 'N/A',
           lead.form_name || 'N/A'
         ];
       });
       
       const dateStr = new Date().toISOString().slice(0, 10);
       const filename = `filtered_leads_${dateStr}.xlsx`;
-      const columnWidths = [25, 15, 20, 30, 20, 30, 30, 30];
+      const columnWidths = [20, 30, 30, 25, 15, 15, 20, 30, 30];
       await downloadExcelFromRows(headers, rows, 'Filtered Leads', filename, columnWidths);
       
       setToast({
@@ -3338,19 +3700,43 @@ export default function AdsDashboardBootstrap() {
     setShowContentDateRangeFilter(false);
   };
 
+  // Follower Growth Rate (Content Marketing): derive from daily new followers + current followers
+  const followerGrowthResult = useMemo(() => {
+    const dailyList =
+      performanceInsightsData?.data?.daily_subscriber_change ??
+      performanceInsightsData?.daily_subscriber_change ??
+      (Array.isArray(performanceInsightsData?.fan_adds) ? performanceInsightsData.fan_adds : []);
+    const dailyFollowersArray = Array.isArray(dailyList)
+      ? dailyList.map((item) => ({
+          date: item?.date,
+          value: Math.max(0, Number(item?.val ?? item?.value) || 0),
+        }))
+      : [];
+    const currentFollowersCount =
+      performanceInsightsData?.totalFollows ??
+      performanceInsightsData?.total_follows ??
+      performanceInsightsData?.current_followers ??
+      0;
+    return calculateFollowerGrowthRate(dailyFollowersArray, currentFollowersCount);
+  }, [performanceInsightsData]);
+
   // Helper to get display text for content date range
   const getContentDateRangeDisplay = () => {
     if (contentDateRangeFilterValue) {
-      if (contentDateRangeFilterValue.range_type === 'custom') {
+      if (contentDateRangeFilterValue.range_type === 'custom' || contentDateRangeFilterValue.range_type === 'single_day') {
         const start = new Date(contentDateRangeFilterValue.start_date);
         const end = new Date(contentDateRangeFilterValue.end_date);
         const startDisplay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         const endDisplay = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (contentDateRangeFilterValue.start_date === contentDateRangeFilterValue.end_date) {
+          return startDisplay;
+        }
         return `${startDisplay} - ${endDisplay}`;
       }
       const presetLabels = {
         'today': 'Today',
         'yesterday': 'Yesterday',
+        'single_day': 'Single day',
         'today_yesterday': 'Today & Yesterday',
         'last_7_days': 'Last 7 days',
         'last_14_days': 'Last 14 days',
@@ -3543,80 +3929,91 @@ export default function AdsDashboardBootstrap() {
     { id: 'facebook', name: 'Facebook' },
     { id: 'instagram', name: 'Instagram' },
     { id: 'youtube', name: 'YouTube' },
-    { id: 'wix', name: 'Wix' },
   ];
 
-  // New data for content marketing charts
-  
-  // 1. Followers Count vs Platform - Use real data from page insights if available
+  // New data for content marketing charts (live data; no mock fallbacks)
+
+  // 1. Followers Count vs Page - When Instagram/Facebook selected use all 4 pages; else single page from insights
   const followersByPlatformData = useMemo(() => {
-    // If we have real page insights data, use it
-    if (pageInsightsData && pageInsightsData.current_followers > 0) {
-      // For now, show the selected page's followers
-      // If multiple pages/platforms are needed, we can aggregate later
-      return [
-        { platform: (selectedPage && pages.find(p => p.id === selectedPage)?.name) || 'Facebook', followers: pageInsightsData.current_followers }
-      ];
+    if (isEngagementSourceSelected && contentMarketingAllPagesInsights?.length > 0) {
+      return contentMarketingAllPagesInsights.map((p) => ({
+        page: p.name,
+        followers: p.current_followers || 0,
+      }));
     }
-    // Fallback to mock data
-    return [
-      { platform: 'Facebook', followers: 25000 },
-      { platform: 'Instagram', followers: 18000 },
-      { platform: 'YouTube', followers: 12000 },
-      { platform: 'LinkedIn', followers: 5000 },
-      { platform: 'Twitter', followers: 2500 },
-    ];
-  }, [pageInsightsData, selectedPage, pages]);
+    const insights = contentPageInsightsData || pageInsightsData;
+    const pageId = contentMarketingPage || selectedPage;
+    if (insights && insights.current_followers > 0) {
+      const pageName = (pageId && pages.find(p => p.id === pageId)?.name) || (contentPageInsightsData ? 'Page' : 'Facebook');
+      return [{ page: pageName, followers: insights.current_followers }];
+    }
+    return [];
+  }, [isEngagementSourceSelected, contentMarketingAllPagesInsights, contentPageInsightsData, contentMarketingPage, pageInsightsData, selectedPage, pages]);
 
-  // 2. Leads Count vs Source
-  const leadsBySourceData = [
-    { source: 'Facebook', leads: 850 },
-    { source: 'Instagram', leads: 620 },
-    { source: 'Online leads', leads: 450 },
-    { source: 'Incoming call', leads: 320 },
-    { source: 'Website Leads', leads: 280 },
-    { source: 'Comments', leads: 150 },
-    { source: 'Direct Message', leads: 170 },
-  ];
+  // 2. Leads Count vs Source - From platform metrics (e.g. Wix) or preloaded Meta leads by campaign/source
+  const leadsBySourceData = useMemo(() => {
+    if (contentPlatformLeadsBySource?.length > 0 && contentPlatformLeadsBySource.some((e) => (e.leads || 0) > 0)) {
+      return contentPlatformLeadsBySource.map((e) => ({ source: e.source || 'Other', leads: Number(e.leads) || 0 }));
+    }
+    const start = contentFilters?.startDate;
+    const end = contentFilters?.endDate;
+    if (!Array.isArray(preloadedLeads) || preloadedLeads.length === 0 || !start || !end) return [];
+    const bySource = {};
+    preloadedLeads.forEach((lead) => {
+      const dateStr = lead.created_time ? lead.created_time.split('T')[0] : (lead.Date || lead.DateChar || '');
+      if (dateStr && dateStr >= start && dateStr <= end) {
+        const source = lead.campaign_name || lead.Campaign || 'Other';
+        bySource[source] = (bySource[source] || 0) + 1;
+      }
+    });
+    return Object.entries(bySource)
+      .map(([source, leads]) => ({ source, leads }))
+      .sort((a, b) => b.leads - a.leads);
+  }, [contentPlatformLeadsBySource, preloadedLeads, contentFilters?.startDate, contentFilters?.endDate]);
 
-  // 3. Organic Revenue vs Date
-  const organicRevenueByDateData = [
-    { date: '01 Nov', revenue: 45000 },
-    { date: '05 Nov', revenue: 46500 },
-    { date: '10 Nov', revenue: 48000 },
-    { date: '15 Nov', revenue: 49500 },
-    { date: '20 Nov', revenue: 51000 },
-    { date: '25 Nov', revenue: 52500 },
-    { date: '30 Nov', revenue: 54000 },
-  ];
+  // 3. Organic Revenue vs Date - API returns period total only; show single point for selected range
+  const organicRevenueByDateData = useMemo(() => {
+    const total = contentMarketingRevenue?.totalRevenue;
+    const start = contentFilters?.startDate;
+    const end = contentFilters?.endDate;
+    if (total == null || total === 0 || !start || !end) return [];
+    const label = start === end ? formatDayMon(start) : [start, end].map((d) => formatDayMon(d)).join(' – ');
+    return [{ date: label, revenue: total }];
+  }, [contentMarketingRevenue?.totalRevenue, contentFilters?.startDate, contentFilters?.endDate]);
 
-  // 4. Leads Count vs Date
-  const leadsCountByDateData = [
-    { date: '01 Nov', leads: 2800 },
-    { date: '05 Nov', leads: 2900 },
-    { date: '10 Nov', leads: 3000 },
-    { date: '15 Nov', leads: 3100 },
-    { date: '20 Nov', leads: 3200 },
-    { date: '25 Nov', leads: 3300 },
-    { date: '30 Nov', leads: 3400 },
-  ];
+  // 4. Leads Count vs Date - From preloaded leads in content date range
+  const leadsCountByDateData = useMemo(() => {
+    const start = contentFilters?.startDate;
+    const end = contentFilters?.endDate;
+    if (!Array.isArray(preloadedLeads) || preloadedLeads.length === 0 || !start || !end) return [];
+    const byDate = {};
+    preloadedLeads.forEach((lead) => {
+      const dateStr = lead.created_time ? lead.created_time.split('T')[0] : (lead.Date || lead.DateChar || '');
+      if (dateStr && dateStr >= start && dateStr <= end) {
+        byDate[dateStr] = (byDate[dateStr] || 0) + 1;
+      }
+    });
+    const sorted = Object.entries(byDate).sort((a, b) => a[0].localeCompare(b[0]));
+    return sorted.map(([dateStr, leads]) => ({ date: formatDayMon(dateStr), leads }));
+  }, [preloadedLeads, contentFilters?.startDate, contentFilters?.endDate]);
 
-  // 5. Account Reach by Followers Count - Use real data from page insights if available
+  // 5. Account Reach by Followers Count - When Instagram/Facebook selected use all 4 pages; else single page
   const accountReachByFollowersData = useMemo(() => {
-    // If we have real page insights data, use it
-    if (pageInsightsData && pageInsightsData.current_followers > 0 && pageInsightsData.current_reach > 0) {
-      const pageName = (selectedPage && pages.find(p => p.id === selectedPage)?.name) || 'Facebook';
-      return [
-        { platform: pageName, followers: pageInsightsData.current_followers, reach: pageInsightsData.current_reach }
-      ];
+    if (isEngagementSourceSelected && contentMarketingAllPagesInsights?.length > 0) {
+      return contentMarketingAllPagesInsights.map((p) => ({
+        page: p.name,
+        followers: p.current_followers || 0,
+        reach: p.current_reach || 0,
+      }));
     }
-    // Fallback to mock data
-    return [
-      { platform: 'Facebook', followers: 25000, reach: 125000 },
-      { platform: 'Instagram', followers: 18000, reach: 95000 },
-      { platform: 'YouTube', followers: 12000, reach: 78000 },
-    ];
-  }, [pageInsightsData, selectedPage, pages]);
+    const insights = contentPageInsightsData || pageInsightsData;
+    const pageId = contentMarketingPage || selectedPage;
+    if (insights && (insights.current_followers > 0 || insights.current_reach > 0)) {
+      const pageName = (pageId && pages.find(p => p.id === pageId)?.name) || (contentPageInsightsData ? 'Page' : 'Facebook');
+      return [{ page: pageName, followers: insights.current_followers || 0, reach: insights.current_reach || 0 }];
+    }
+    return [];
+  }, [isEngagementSourceSelected, contentMarketingAllPagesInsights, contentPageInsightsData, contentMarketingPage, pageInsightsData, selectedPage, pages]);
 
 
   return (
@@ -3632,6 +4029,37 @@ export default function AdsDashboardBootstrap() {
           </div>
         </div>
       </div>
+
+      {/* Campaign Saturation Alert Banner */}
+      {saturationAlert && saturationAlert.saturated && saturationAlert.saturated.length > 0 && (
+        <div
+          className="saturation-alert-banner"
+          role="alert"
+          style={{
+            margin: '0 24px 16px',
+            padding: '14px 18px',
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: '8px',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px',
+          }}
+        >
+          <span style={{ fontSize: '1.25rem', flexShrink: 0 }} aria-hidden>⚠</span>
+          <div style={{ flex: 1 }}>
+            <strong style={{ color: '#b91c1c' }}>Campaign Saturation Detected</strong>
+            <p style={{ margin: '6px 0 0 0', color: '#991b1b', fontSize: '0.9375rem' }}>
+              {saturationAlert.saturated.slice(0, 3).map((c) => c.campaign_name || c.campaign_id).join(', ')}
+              {saturationAlert.saturated.length > 3 && ` +${saturationAlert.saturated.length - 3} more`}.
+              Recommendation: Change creatives or expand audience.
+            </p>
+            <a href="/ai-insights" style={{ marginTop: '8px', display: 'inline-block', color: '#b91c1c', fontWeight: 600, fontSize: '0.875rem' }}>
+              Run analysis on AI Insights →
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notifications */}
       {toast && (
@@ -3847,58 +4275,103 @@ export default function AdsDashboardBootstrap() {
                   <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
                       </button>
                 </div>
+            {/* All Projects - two-column dropdown (projects left, accounts on hover right) */}
+            <div className="col-12 col-md-auto filter-block projects-dropdown-wrapper">
+              <label className="filter-label"><span className="filter-emoji">📁</span> All Projects</label>
+              <div className="projects-dropdown" ref={projectsDropdownRef}>
+                <button
+                  type="button"
+                  className="projects-dropdown-trigger"
+                  onClick={() => setProjectsDropdownOpen((o) => !o)}
+                  aria-expanded={projectsDropdownOpen}
+                  aria-haspopup="listbox"
+                >
+                  <span className="projects-dropdown-trigger-text">
+                    {selectedProject || 'All Projects'}
+                  </span>
+                  <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
+                </button>
+                {projectsDropdownOpen && (
+                  <div className="projects-dropdown-panel">
+                    <div
+                      className="projects-dropdown-left"
+                      onMouseLeave={() => setHoveredProject(null)}
+                    >
+                      <div
+                        className={`projects-dropdown-project-row${selectedProject === '' ? ' projects-dropdown-project-row-selected' : ''}`}
+                        onMouseEnter={() => setHoveredProject('')}
+                        onClick={() => { setSelectedProject(''); setProjectsDropdownOpen(false); }}
+                      >
+                        All Projects
+                      </div>
+                      {PROJECT_ORDER.map((projectName) => (
+                        <div
+                          key={projectName}
+                          className={`projects-dropdown-project-row${selectedProject === projectName ? ' projects-dropdown-project-row-selected' : ''}`}
+                          onMouseEnter={() => setHoveredProject(projectName)}
+                          onClick={() => { setSelectedProject(projectName); setProjectsDropdownOpen(false); }}
+                        >
+                          {projectName}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="projects-dropdown-right">
+                      {(hoveredProject === '' || (hoveredProject === null && selectedProject === '')) ? (
+                        <div className="projects-dropdown-all-accounts">
+                          {PROJECT_ORDER.map((projectName) => {
+                            const accounts = adAccountsByProject[projectName] || [];
+                            return (
+                              <div key={projectName} className="projects-dropdown-project-group">
+                                <div className="projects-dropdown-group-label">{projectName}</div>
+                                {accounts.length === 0 ? (
+                                  <span className="projects-dropdown-placeholder small">No accounts matched</span>
+                                ) : (
+                                  <ul className="projects-dropdown-account-list">
+                                    {accounts.map((acct, idx) => (
+                                      <li key={`${projectName}-${acct.value}-${idx}`} className="projects-dropdown-account-item">{acct.displayName}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : hoveredProject === null ? (
+                        <span className="projects-dropdown-placeholder">Select a project to see accounts</span>
+                      ) : (adAccountsByProject[hoveredProject] || []).length === 0 ? (
+                        <span className="projects-dropdown-placeholder">No accounts matched</span>
+                      ) : (
+                        <ul className="projects-dropdown-account-list">
+                          {(adAccountsByProject[hoveredProject] || []).map((acct, idx) => (
+                            <li key={`${hoveredProject}-${acct.value}-${idx}`} className="projects-dropdown-account-item">{acct.displayName}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
             <div className="col-12 col-md-auto">
-              <label className="filter-label">
-                <span className="filter-emoji">🏢</span> Ad Account
-              </label>
-              <select
-                className="form-select form-select-sm"
-                value={selectedAdAccount || ''}
-                onChange={(e) => {
-                  const accountId = e.target.value || null;
-                  setSelectedAdAccount(accountId);
-                  // Clear campaign and ad selections and state when ad account changes
+              <MultiSelectFilter
+                label="Ad Account"
+                emoji="🏢"
+                options={selectedProject ? accountsForProject : (specifiedAdAccounts || [])}
+                selectedValues={selectedAdAccounts}
+                onChange={(values) => {
+                  setSelectedAdAccounts(values);
                   setSelectedCampaigns([]);
                   setSelectedAds([]);
-                  setCampaigns([]); // Clear campaigns state to trigger reload
-                  setAds([]); // Clear ads state
+                  setCampaigns([]);
+                  setAds([]);
                   setPage(1);
                 }}
-                
-                style={{ 
-                  fontSize: '0.875rem', 
-                  height: '36px',
-                  borderRadius: '5px',
-                  border: '1px solid rgba(0, 0, 0, 0.1)',
-                  background: 'var(--card, #ffffff)'
-                }}
-              >
-                <option value="">All Ad Accounts</option>
-                {(() => {
-                  if (adAccountsLoading) {
-                    return <option value="" disabled>Loading ad accounts...</option>;
-                  }
-                  
-                  if (!adAccounts || adAccounts.length === 0) {
-                    return <option value="" disabled>No ad accounts available</option>;
-                  }
-                  
-                  return adAccounts
-                    .filter(account => {
-                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                      return !displayName.toLowerCase().includes('read-only');
-                    })
-                    .map(account => {
-                      const displayName = account.account_name || account.name || `Account ${account.account_id || account.id}`;
-                      const value = account.account_id || account.id;
-                      return (
-                        <option key={value} value={value}>
-                          {displayName}
-                        </option>
-                      );
-                    });
-                })()}
-              </select>
+                placeholder="All Ad Accounts"
+                getOptionLabel={(opt) => opt.account_name || opt.name || `Account ${opt.account_id || opt.id}`}
+                getOptionValue={(opt) => normalizeAccountId(opt.account_id || opt.id)}
+                disabled={adAccountsLoading}
+                loading={adAccountsLoading}
+              />
             </div>
             <div className="col-12 col-md-auto">
               <MultiSelectFilter
@@ -3950,9 +4423,9 @@ export default function AdsDashboardBootstrap() {
               </button>
               <button
                 className="refresh-btn btn-outline-primary"
-                onClick={() => load(true)}
+                onClick={() => { loadAdAccounts(true); load(true); }}
                 disabled={loading}
-                title="Fetch latest from Meta (includes video metrics e.g. Hook/Hold rate)"
+                title="Fetch latest from Meta (includes ad accounts + video metrics e.g. Hook/Hold rate)"
               >
                 <span className="refresh-emoji">{loading ? "⏳" : "🔄"}</span>
                 {loading ? "Refreshing..." : "Refresh with live data"}
@@ -4026,26 +4499,26 @@ export default function AdsDashboardBootstrap() {
           </div>
         </div>
 
-        {/* 6. Hook Rate */}
+        {/* 6. Hook Rate — use video-performance API when available, else insights-derived */}
         <div className="col-6 col-md-4 col-lg-3 col-xl">
           <div className="kpi-card kpi-card-teal">
             <div className="kpi-card-body">
               <div className="kpi-icon">🎣</div>
               <small className="kpi-label">Hook Rate</small>
-              <div className="kpi-value">{formatPerc(totals.hookRate)}</div>
+              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.hookRate ?? totals.hookRate)}</div>
               <small className="kpi-subtitle">3s Views / Impressions</small>
             </div>
           </div>
         </div>
 
-        {/* 7. Hold Rate */}
+        {/* 7. Hold Rate — use video-performance API when available, else insights-derived */}
         <div className="col-6 col-md-4 col-lg-3 col-xl">
           <div className="kpi-card kpi-card-pink">
             <div className="kpi-card-body">
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
-              <div className="kpi-value">{formatPerc(totals.holdRate)}</div>
-              <small className="kpi-subtitle">ThruPlays / Video Views</small>
+              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</div>
+              <small className="kpi-subtitle">100% Watched / Video Play</small>
             </div>
           </div>
         </div>
@@ -4437,44 +4910,23 @@ export default function AdsDashboardBootstrap() {
                     <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem', width: '100%', tableLayout: 'auto' }}>
                         <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
                           <tr>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', whiteSpace: 'nowrap' }}>Lead Name</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '110px', whiteSpace: 'nowrap' }}>Phone Number</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '140px', whiteSpace: 'nowrap' }}>Date & Time</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px', maxWidth: '150px' }}>Street</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '80px', maxWidth: '120px' }}>City</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px', maxWidth: '150px' }}>Page</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Campaign</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Ad Name</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '180px' }}>Form</th>
-                        </tr>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '140px', whiteSpace: 'nowrap' }}>Date & Time</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Campaign</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '200px' }}>Ad Name</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', whiteSpace: 'nowrap' }}>Lead Name</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '110px', whiteSpace: 'nowrap' }}>Phone Number</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px' }}>Sugar Poll</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '80px', maxWidth: '120px' }}>City</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '100px', maxWidth: '150px' }}>Street</th>
+                            <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', minWidth: '120px', maxWidth: '180px' }}>Form Name</th>
+                          </tr>
                       </thead>
                       <tbody>
                         {leadDetails.length > 0 ? (
                           <>
                             {visibleLeads.map((lead, idx) => (
                               <tr key={lead.lead_id || lead.Id || lead.id || idx} style={{ cursor: 'pointer' }}>
-                                <td className="fw-medium" style={{ color: '#1e293b', maxWidth: '150px' }}>
-                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Name || lead.name || 'N/A'}>
-                                    {lead.Name || lead.name || 'N/A'}
-                                  </div>
-                                </td>
-                                <td style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{lead.Phone || lead.phone || 'N/A'}</td>
                                 <td style={{ color: '#64748b', whiteSpace: 'nowrap', fontSize: '0.75rem' }}>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
-                                <td style={{ color: '#64748b', maxWidth: '150px' }}>
-                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Street || lead.street || lead.address || 'N/A'}>
-                                    {lead.Street || lead.street || lead.address || 'N/A'}
-                                  </div>
-                                </td>
-                                <td style={{ color: '#64748b', maxWidth: '120px' }}>
-                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.City || lead.city || 'N/A'}>
-                                    {lead.City || lead.city || 'N/A'}
-                                  </div>
-                                </td>
-                                <td style={{ color: '#64748b', maxWidth: '150px' }}>
-                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.page_name || 'N/A'}>
-                                    {lead.page_name || 'N/A'}
-                                  </div>
-                                </td>
                                 <td style={{ color: '#64748b', maxWidth: '200px' }}>
                                   <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.campaign_name || 'N/A'}>
                                     {lead.campaign_name || 'N/A'}
@@ -4483,6 +4935,23 @@ export default function AdsDashboardBootstrap() {
                                 <td style={{ color: '#64748b', maxWidth: '200px' }}>
                                   <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.ad_name || 'N/A'}>
                                     {lead.ad_name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td className="fw-medium" style={{ color: '#1e293b', maxWidth: '150px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Name || lead.name || 'N/A'}>
+                                    {lead.Name || lead.name || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{lead.Phone || lead.phone || 'N/A'}</td>
+                                <td style={{ color: '#64748b', maxWidth: '150px' }}>{lead.SugarPoll || lead.sugar_poll || (lead.field_data && lead.field_data['Sugar Poll']) || 'N/A'}</td>
+                                <td style={{ color: '#64748b', maxWidth: '120px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.City || lead.city || 'N/A'}>
+                                    {lead.City || lead.city || 'N/A'}
+                                  </div>
+                                </td>
+                                <td style={{ color: '#64748b', maxWidth: '150px' }}>
+                                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lead.Street || lead.street || lead.address || 'N/A'}>
+                                    {lead.Street || lead.street || lead.address || 'N/A'}
                                   </div>
                                 </td>
                                 <td style={{ color: '#64748b', maxWidth: '180px' }}>
@@ -4500,7 +4969,7 @@ export default function AdsDashboardBootstrap() {
                           </>
                         ) : (
                           <tr>
-                            <td colSpan="7" className="text-center py-4" style={{ color: '#64748b' }}>
+                            <td colSpan="9" className="text-center py-4" style={{ color: '#64748b' }}>
                               {leadsLoading ? (
                                 <span>Loading leads...</span>
                               ) : leadsError ? (
@@ -4781,11 +5250,7 @@ export default function AdsDashboardBootstrap() {
                     <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.8rem' }}>
                       <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10 }}>
                         <tr>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Lead Name</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Phone Number</th>
                           <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Date & Time</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Street</th>
-                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>City</th>
                           <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                             Campaign
                             <i className="fas fa-info-circle ms-1" style={{ fontSize: '0.6rem', opacity: 0.6 }} title="Campaign name associated with the lead"></i>
@@ -4794,6 +5259,11 @@ export default function AdsDashboardBootstrap() {
                             Ad Name
                             <i className="fas fa-info-circle ms-1" style={{ fontSize: '0.6rem', opacity: 0.6 }} title="Ad name associated with the lead"></i>
                           </th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Lead Name</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Phone Number</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Sugar Poll</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>City</th>
+                          <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Street</th>
                           <th className="fw-bold" style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Form Name</th>
                         </tr>
                       </thead>
@@ -4804,20 +5274,21 @@ export default function AdsDashboardBootstrap() {
                               .slice((filteredLeadsPageNum - 1) * filteredLeadsPerPage, filteredLeadsPageNum * filteredLeadsPerPage)
                               .map((lead, idx) => (
                                 <tr key={lead.id || lead.lead_id || idx}>
-                                  <td>{lead.Name || 'N/A'}</td>
-                                  <td>{lead.Phone || 'N/A'}</td>
                                   <td>{formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time)}</td>
-                                  <td>{lead.Street || 'N/A'}</td>
-                                  <td>{lead.City || 'N/A'}</td>
                                   <td>{lead.campaign_name || 'N/A'}</td>
                                   <td>{lead.ad_name || 'N/A'}</td>
+                                  <td>{lead.Name || 'N/A'}</td>
+                                  <td>{lead.Phone || 'N/A'}</td>
+                                  <td>{lead.SugarPoll || lead.sugar_poll || (lead.field_data && lead.field_data['Sugar Poll']) || 'N/A'}</td>
+                                  <td>{lead.City || 'N/A'}</td>
+                                  <td>{lead.Street || 'N/A'}</td>
                                   <td>{lead.form_name || 'N/A'}</td>
                                 </tr>
                               ))}
                           </>
                         ) : (
                           <tr>
-                            <td colSpan="8" className="text-center py-5 text-muted">
+                            <td colSpan="9" className="text-center py-5 text-muted">
                               <div>
                                 <p className="mb-2">No leads data available.</p>
                                 <small>Please check your Meta API connection or filters.</small>
@@ -4891,10 +5362,10 @@ export default function AdsDashboardBootstrap() {
                     <small className="text-muted">Real-time insights from Meta Ads API</small>
                   </div>
                 </div>
-                <div className="table-responsive">
+                <div className="table-responsive" style={{ maxHeight: '500px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', minWidth: '800px' }}>
                 {sortedAdBreakdown.length > 0 ? (
-                  <table className="table table-hover align-middle mb-0">
-                    <thead className="table-light">
+                  <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
+                    <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: '#f8f9fa' }}>
                       <tr>
                         <SortableHeader
                           field="ad_name"
@@ -5127,7 +5598,7 @@ export default function AdsDashboardBootstrap() {
                           <td className="text-end fw-medium">{formatMoney(ad.cpl)}</td>
                           <td className="text-end">{formatNum(ad.conversions)}</td>
                           <td className="text-end">{formatPerc(ad.hookRate)}</td>
-                          <td className="text-end">{formatPerc(ad.holdRate)}</td>
+                          <td className="text-end">{formatPerc(ad.holdRate ?? 0)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -5142,14 +5613,14 @@ export default function AdsDashboardBootstrap() {
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.leads, 0))}</td>
                         <td className="text-end">{formatMoney(totals.cpl)}</td>
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.conversions, 0))}</td>
-                        <td className="text-end">{formatPerc(totals.hookRate)}</td>
-                        <td className="text-end">{formatPerc(totals.holdRate)}</td>
+                        <td className="text-end">{formatPerc(videoPerformanceTotals?.hookRate ?? totals.hookRate)}</td>
+                        <td className="text-end">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</td>
                       </tr>
                     </tfoot>
                   </table>
                 ) : (
                   <div className="text-center py-5" style={{ color: '#64748b' }}>
-                    <p className="mb-0">No ad data available. Please select a Campaign filter and ensure leads are loaded, or check your Meta API connection.</p>
+                    <p className="mb-0">No ad data available. Check your Time Range, Project, and Ad Account filters, or verify your Meta API connection.</p>
                 </div>
                 )}
               </div>
@@ -5207,37 +5678,6 @@ export default function AdsDashboardBootstrap() {
                   <i className="fas fa-chevron-down text-secondary opacity-50 small"></i>
                 </button>
               </div>
-              {/* PAGE Filter - single selection only (Content Marketing) */}
-              <div className="col-12 col-md-auto">
-                <MultiSelectFilter
-                  label="PAGE"
-                  emoji="📄"
-                  options={pages}
-                  selectedValues={contentMarketingPage ? [contentMarketingPage] : []}
-                  onChange={(values) => {
-                    setContentMarketingPage(values?.length ? values[0] : null);
-                  }}
-                  placeholder="Select a Page"
-                  getOptionLabel={(opt) => opt.name}
-                  getOptionValue={(opt) => opt.id}
-                  singleSelect
-                />
-              </div>
-              {/* Platform Filter */}
-              <div className="col-12 col-md-auto">
-                <MultiSelectFilter
-                  label="Platform"
-                  emoji="🌐"
-                  options={platformOptions}
-                  selectedValues={selectedPlatforms}
-                  onChange={(values) => {
-                    setSelectedPlatforms(values);
-                  }}
-                  placeholder="All Platforms"
-                  getOptionLabel={(opt) => opt.name}
-                  getOptionValue={(opt) => opt.id}
-                />
-              </div>
               {/* Source Filter */}
               <div className="col-12 col-md-auto">
                 <MultiSelectFilter
@@ -5261,6 +5701,24 @@ export default function AdsDashboardBootstrap() {
                   getOptionValue={(opt) => opt.id}
                 />
               </div>
+              {/* PAGE Filter - when Instagram or Facebook is selected in Source (Content Marketing) */}
+              {isEngagementSourceSelected && (
+                <div className="col-12 col-md-auto">
+                  <MultiSelectFilter
+                    label="PAGE"
+                    emoji="📄"
+                    options={contentMarketingPageOptions}
+                    selectedValues={contentMarketingPage ? [contentMarketingPage] : []}
+                    onChange={(values) => {
+                      setContentMarketingPage(values?.length ? values[0] : null);
+                    }}
+                    placeholder={pagesLoading ? "Loading pages…" : "Select a Page"}
+                    getOptionLabel={(opt) => opt.name}
+                    getOptionValue={(opt) => opt.id}
+                    singleSelect
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -5291,21 +5749,29 @@ export default function AdsDashboardBootstrap() {
           </div>
         )}
         
-        {/* Info message if no page is selected (Content Marketing PAGE filter) */}
-        {pages.length === 0 && (
+        {/* Info message if no pages loaded (Content Marketing PAGE filter) */}
+        {!pagesLoading && pages.length === 0 && (
           <div className="alert alert-info mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
             <small>
               <i className="fas fa-info-circle me-1"></i>
-              No pages available. Please ensure your Meta Access Token has access to pages.
+              No pages available. Ensure your Meta token has <strong>pages_show_list</strong> (or use a User token with page access), or set <strong>META_PAGE_ID</strong> in server/.env to your Facebook Page ID.
             </small>
           </div>
         )}
         
-        {pages.length > 0 && !contentMarketingPage && !selectedPage && (
+        {isEngagementSourceSelected && pages.length > 0 && !contentMarketingPage && !selectedPage && (
           <div className="alert alert-info mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
             <small>
               <i className="fas fa-info-circle me-1"></i>
-              Please select a page from the filters above to view insights.
+              Please select a page from the filters above to view engagement insights.
+            </small>
+          </div>
+        )}
+        {!isEngagementSourceSelected && (
+          <div className="alert alert-info mb-3" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
+            <small>
+              <i className="fas fa-info-circle me-1"></i>
+              Select <strong>Instagram</strong> or <strong>Facebook</strong> in the Source filter and choose a page to view engagement metrics (Views, Follows, Reached, etc.). Revenue cards below reflect the selected source(s).
             </small>
           </div>
         )}
@@ -5322,7 +5788,7 @@ export default function AdsDashboardBootstrap() {
                   {performanceInsightsLoading ? (
                     <span className="spinner-border spinner-border-sm" role="status"></span>
                   ) : (
-                    formatNum(performanceInsightsData?.total_views || 0)
+                    formatNum(performanceInsightsData?.total_views ?? performanceInsightsData?.totalViews ?? 0)
                   )}
                 </div>
                 {performanceInsightsData && (
@@ -5344,7 +5810,7 @@ export default function AdsDashboardBootstrap() {
                   {performanceInsightsLoading ? (
                     <span className="spinner-border spinner-border-sm" role="status"></span>
                   ) : (
-                    formatNum(performanceInsightsData?.total_interactions || 0)
+                    formatNum(performanceInsightsData?.total_interactions ?? performanceInsightsData?.totalInteractions ?? 0)
                   )}
                 </div>
                 {performanceInsightsData && (
@@ -5356,17 +5822,39 @@ export default function AdsDashboardBootstrap() {
             </div>
           </div>
 
-          {/* 1. Follows */}
+          {/* 1. Follows (period count: new follows in selected range, Meta-style) */}
           <div className="col-6 col-md-4 col-lg-3 col-xl">
             <div className="kpi-card kpi-card-primary">
-              <div className="kpi-card-body">
+              <div className="kpi-card-body d-flex flex-column">
+                <div className="d-flex align-items-center justify-content-between mb-1">
+                  <small className="kpi-label">Follows</small>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-light border-0 py-1 px-2"
+                    title="Export to Excel (Meta format)"
+                    onClick={handleDownloadFollowsExcel}
+                    disabled={performanceInsightsLoading || downloadingFollowsExcel || !performanceInsightsData || !((performanceInsightsData?.data?.daily_subscriber_change ?? performanceInsightsData?.daily_subscriber_change ?? performanceInsightsData?.fan_adds)?.length)}
+                  >
+                    {downloadingFollowsExcel ? (
+                      <span className="spinner-border spinner-border-sm" role="status" aria-label="Exporting"></span>
+                    ) : (
+                      <i className="fas fa-file-excel" style={{ fontSize: '0.85rem' }}></i>
+                    )}
+                  </button>
+                </div>
                 <div className="kpi-icon">👥</div>
-                <small className="kpi-label">Follows</small>
                 <div className="kpi-value">
                   {performanceInsightsLoading ? (
                     <span className="spinner-border spinner-border-sm" role="status"></span>
                   ) : (
-                    formatNum(performanceInsightsData?.total_follows || 0)
+                    formatNum(
+                      performanceInsightsData?.totalFollowsDelta ??
+                      performanceInsightsData?.data?.total_follows ??
+                      performanceInsightsData?.total_follows ??
+                      performanceInsightsData?.totalFollows ??
+                      performanceInsightsData?.current_followers ??
+                      0
+                    )
                   )}
                 </div>
                 {performanceInsightsData && (
@@ -5388,12 +5876,34 @@ export default function AdsDashboardBootstrap() {
                   {performanceInsightsLoading ? (
                     <span className="spinner-border spinner-border-sm" role="status"></span>
                   ) : (
-                    formatNum(performanceInsightsData?.total_reached || 0)
+                    formatNum(performanceInsightsData?.total_reached ?? performanceInsightsData?.totalReached ?? 0)
                   )}
                 </div>
                 {performanceInsightsData && (
                   <small className={`kpi-change ${performanceInsightsData.reachChange >= 0 ? 'kpi-change-positive' : 'kpi-change-negative'}`}>
                     {formatChange(performanceInsightsData.reachChange)}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 2.1 Follower Growth Rate */}
+          <div className="col-6 col-md-4 col-lg-3 col-xl">
+            <div className="kpi-card kpi-card-primary">
+              <div className="kpi-card-body">
+                <div className="kpi-icon">📊</div>
+                <small className="kpi-label">Follower Growth Rate</small>
+                <div className="kpi-value">
+                  {performanceInsightsLoading ? (
+                    <span className="spinner-border spinner-border-sm" role="status"></span>
+                  ) : (
+                    `${(followerGrowthResult.growthRate ?? 0).toFixed(2)}%`
+                  )}
+                </div>
+                {performanceInsightsData && followerGrowthResult.totalNewFollowers >= 0 && (
+                  <small className="kpi-change kpi-change-positive">
+                    {formatNum(followerGrowthResult.totalNewFollowers)} new followers in {getContentDateRangeDisplay().toLowerCase()}
                   </small>
                 )}
               </div>
@@ -5535,10 +6045,88 @@ export default function AdsDashboardBootstrap() {
                   </small>
                 )}
                 <small className="kpi-subtitle">Last 28 days</small>
+                {unfollowsReportDaily.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-link btn-sm p-0 mt-1 text-muted"
+                    style={{ fontSize: '0.75rem' }}
+                    onClick={() => setShowUnfollowsReport((v) => !v)}
+                  >
+                    {showUnfollowsReport ? 'Hide report' : 'View report'}
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
+
+        {/* Unfollows daily report (last 28 days derivation) */}
+        {showUnfollowsReport && unfollowsReportDaily.length > 0 && (
+          <div className="mb-4">
+            <div className="card">
+              <div className="card-body p-3">
+                <h6 className="mb-2">Unfollows report (last 28 days)</h6>
+                <p className="text-muted small mb-2">
+                  Daily follower count and how total unfollows are derived. Negative daily change = unfollows; positive = follows. Total row: Follower count = sum of all daily counts; Follows/Unfollows = sum over 28 days.
+                </p>
+                <div className="table-responsive" style={{ maxHeight: 400, overflow: 'auto' }}>
+                  <table className="table table-sm table-bordered mb-0">
+                    <thead className="table-light" style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                      <tr>
+                        <th>Date</th>
+                        <th>Follower count</th>
+                        <th>Daily change</th>
+                        <th>Follows</th>
+                        <th>Unfollows</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {unfollowsReportDaily.map((row, i) => (
+                        <tr key={i}>
+                          <td>{row.date}</td>
+                          <td>{formatNum(row.follower_count)}</td>
+                          <td>{row.daily_change != null ? (row.daily_change >= 0 ? '+' : '') + formatNum(row.daily_change) : '–'}</td>
+                          <td>{row.follows != null ? formatNum(row.follows) : '–'}</td>
+                          <td>{row.unfollows != null ? formatNum(row.unfollows) : '–'}</td>
+                        </tr>
+                      ))}
+                      <tr className="table-secondary fw-semibold">
+                        <td>Total</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.follower_count ?? 0), 0))}</td>
+                        <td>–</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.follows ?? 0), 0))}</td>
+                        <td>{formatNum(unfollowsReportDaily.reduce((s, r) => s + (r.unfollows ?? 0), 0))}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
+                    onClick={() => {
+                      const headers = ['Date', 'Follower count', 'Daily change', 'Follows', 'Unfollows'];
+                      const rows = unfollowsReportDaily.map((r) => [r.date, r.follower_count, r.daily_change ?? '', r.follows ?? '', r.unfollows ?? '']);
+                      const totalFollows = unfollowsReportDaily.reduce((s, r) => s + (r.follows ?? 0), 0);
+                      const totalUnfollows = unfollowsReportDaily.reduce((s, r) => s + (r.unfollows ?? 0), 0);
+                      const totalFollowerCount = unfollowsReportDaily.reduce((s, r) => s + (r.follower_count ?? 0), 0);
+                      rows.push(['Total', totalFollowerCount, '', totalFollows, totalUnfollows]);
+                      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+                      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                      const a = document.createElement('a');
+                      a.href = URL.createObjectURL(blob);
+                      a.download = `unfollows-report-${unfollowsReportDaily[0]?.date || 'start'}-to-${unfollowsReportDaily[unfollowsReportDaily.length - 1]?.date || 'end'}.csv`;
+                      a.click();
+                      URL.revokeObjectURL(a.href);
+                    }}
+                  >
+                    Download CSV
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Platform-Specific Metrics (shown when Platform filter is selected) */}
         {selectedPlatforms && selectedPlatforms.length > 0 && (
@@ -5788,38 +6376,38 @@ export default function AdsDashboardBootstrap() {
       
       
         {/* Content Marketing Charts */}
-        {/* Chart 1: Followers Count vs Platform & Chart 2: Leads Count vs Source */}
+        {/* Chart 1: Followers Count vs Page & Chart 2: Leads Count vs Source */}
         <div className="row g-4 mb-4">
           <div className="col-12 col-lg-6">
             <div className="chart-card">
               <div className="chart-card-body">
                 <div className="d-flex justify-content-between align-items-center">
                   <strong className="chart-title">
-                    <span className="chart-emoji">👥</span> Followers Count vs Platform
+                    <span className="chart-emoji">👥</span> Followers Count vs Page
                   </strong>
-                  {pageInsightsLoading && (
+                  {(pageInsightsLoading || contentMarketingAllPagesInsightsLoading) && (
                     <small className="text-muted">
                       <span className="spinner-border spinner-border-sm me-1" role="status"></span>
                       Loading...
                     </small>
                   )}
                 </div>
-                {pageInsightsError && (
+                {(pageInsightsError || contentMarketingAllPagesInsightsError) && (
                   <div className="alert alert-warning mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
                     <small>
                       <i className="fas fa-exclamation-triangle me-1"></i>
-                      {pageInsightsError.message}
-                      {pageInsightsError.details && (
+                      {contentMarketingAllPagesInsightsError || pageInsightsError?.message}
+                      {pageInsightsError?.details && (
                         <div className="mt-1" style={{ fontSize: '0.8rem' }}>{pageInsightsError.details}</div>
                       )}
                     </small>
                   </div>
                 )}
-                {!selectedPage && (
+                {!selectedPage && !contentMarketingPage && followersByPlatformData.length === 0 && (
                   <div className="alert alert-info mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
                     <small>
                       <i className="fas fa-info-circle me-1"></i>
-                      Please select a page to view real followers data
+                      {isEngagementSourceSelected ? 'Select a page for KPIs above, or wait for follower counts to load.' : 'Please select a page to view real followers data'}
                     </small>
                   </div>
                 )}
@@ -5828,7 +6416,7 @@ export default function AdsDashboardBootstrap() {
                     <BarChart data={followersByPlatformData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                       <XAxis 
-                        dataKey="platform" 
+                        dataKey="page" 
                         tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
                         axisLine={false}
                         tickLine={false}
@@ -6126,7 +6714,7 @@ export default function AdsDashboardBootstrap() {
                     </small>
                   </div>
                 )}
-                {!selectedPage && (
+                {!selectedPage && !contentMarketingPage && (
                   <div className="alert alert-info mt-2 mb-2" role="alert" style={{ fontSize: '0.85rem', padding: '8px 12px' }}>
                     <small>
                       <i className="fas fa-info-circle me-1"></i>
@@ -6139,7 +6727,7 @@ export default function AdsDashboardBootstrap() {
                     <BarChart data={accountReachByFollowersData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                       <XAxis 
-                        dataKey="platform" 
+                        dataKey="page" 
                         tick={{ fontSize: 11, fill: '#64748b', fontWeight: 500 }}
                         axisLine={false}
                         tickLine={false}

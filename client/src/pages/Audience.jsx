@@ -69,7 +69,7 @@ const fetchDemographicInsights = async (from, to) => {
     const token = getAuthToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country,region`, { headers });
+    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country`, { headers });
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.details || err.error || res.statusText);
@@ -95,6 +95,59 @@ const fetchInstagramAudienceDemographics = async (pageId, timeframe) => {
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     const res = await fetch(`${API_BASE}/api/meta/instagram-audience-demographics?page_id=${encodeURIComponent(pageId)}&timeframe=${encodeURIComponent(timeframe)}`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
+// Instagram reach by follow_type (Meta: metric=reach, period=day, metric_type=total_value, breakdown=follow_type)
+const fetchInstagramReachByFollowType = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/reach-by-follow-type?page_id=${encodeURIComponent(pageId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return { data: json.data || null, message: json.message || null };
+};
+
+// Instagram online_followers — best posting times (heatmap, peak hours, recommendation)
+const fetchInstagramOnlineFollowers = async (pageId) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const tz = typeof Intl !== 'undefined' && Intl.DateTimeFormat?.().resolvedOptions?.().timeZone;
+    const params = new URLSearchParams({ page_id: pageId });
+    if (tz) params.set('timezone', tz);
+    const res = await fetch(
+        `${API_BASE}/api/meta/instagram/online-followers?${params.toString()}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    return await res.json();
+};
+
+// Facebook Page audience — followers, age/gender, cities, countries (for Audience page when platform=Facebook)
+const fetchFacebookPageAudience = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/facebook-page-audience?page_id=${encodeURIComponent(pageId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        { headers }
+    );
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.details || err.error || res.statusText);
@@ -139,11 +192,16 @@ export default function Audience() {
         { id: 'threads', name: 'Threads' },
         { id: 'whatsapp', name: 'WhatsApp' },
     ];
-    const [platformFilter, setPlatformFilter] = useState(() => platformFilterOptions[0]);
+    const [platformFilters, setPlatformFilters] = useState([]);
 
     // PAGE filter (Content Marketing style)
     const [pages, setPages] = useState([]);
     const [audiencePage, setAudiencePage] = useState(null);
+
+    // PAGE filter shown when Facebook or Instagram is selected
+    const isInstagramSelected = platformFilters && platformFilters.some((p) => (p?.id || p) === 'instagram');
+    const isFacebookSelected = platformFilters && platformFilters.some((p) => (p?.id || p) === 'facebook');
+    const showPageFilter = isInstagramSelected || isFacebookSelected;
 
     // Live data from Meta (Page Insights + Daily Ad Insights + Demographics)
     const [pageInsightsData, setPageInsightsData] = useState(null);
@@ -158,7 +216,18 @@ export default function Audience() {
     const [igAudienceData, setIgAudienceData] = useState(null);
     const [igAudienceLoading, setIgAudienceLoading] = useState(false);
     const [igAudienceError, setIgAudienceError] = useState(null);
+    const [reachByFollowTypeData, setReachByFollowTypeData] = useState(null);
+    const [reachByFollowTypeMessage, setReachByFollowTypeMessage] = useState(null);
+    const [reachByFollowTypeLoading, setReachByFollowTypeLoading] = useState(false);
+    const [reachByFollowTypeError, setReachByFollowTypeError] = useState(null);
+    const [onlineFollowersInsight, setOnlineFollowersInsight] = useState(null);
+    const [onlineFollowersMessage, setOnlineFollowersMessage] = useState(null); // backend message when sample/empty
+    const [onlineFollowersLoading, setOnlineFollowersLoading] = useState(false);
+    const [onlineFollowersError, setOnlineFollowersError] = useState(null);
     const [heatmapTooltip, setHeatmapTooltip] = useState(null); // { dayIndex, hour, x, y }
+    const [fbAudienceData, setFbAudienceData] = useState(null);
+    const [fbAudienceLoading, setFbAudienceLoading] = useState(false);
+    const [fbAudienceError, setFbAudienceError] = useState(null);
 
     useEffect(() => {
         const loadPages = async () => {
@@ -168,9 +237,22 @@ export default function Audience() {
         loadPages();
     }, []);
 
-    // Fetch page insights when PAGE and time range are set
+    // When neither Facebook nor Instagram is selected, clear PAGE so next time they see "Select a Page"
     useEffect(() => {
-        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+        if (!showPageFilter) {
+            setAudiencePage(null);
+        }
+    }, [showPageFilter]);
+
+    // Fetch page insights when PAGE and time range are set (Facebook or Instagram selected)
+    useEffect(() => {
+        if (!showPageFilter) {
+            setPageInsightsData(null);
+            setPageInsightsError(null);
+            return;
+        }
+        const pageId = audiencePage?.id ?? audiencePage;
+        if (!pageId || !contentFilters.startDate || !contentFilters.endDate) {
             setPageInsightsData(null);
             setPageInsightsError(null);
             return;
@@ -178,7 +260,7 @@ export default function Audience() {
         let cancelled = false;
         setPageInsightsLoading(true);
         setPageInsightsError(null);
-        fetchPageInsights(audiencePage, contentFilters.startDate, contentFilters.endDate)
+        fetchPageInsights(pageId, contentFilters.startDate, contentFilters.endDate)
             .then((data) => {
                 if (!cancelled) setPageInsightsData(data);
             })
@@ -189,7 +271,29 @@ export default function Audience() {
                 if (!cancelled) setPageInsightsLoading(false);
             });
         return () => { cancelled = true; };
-    }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+    }, [showPageFilter, audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Facebook Page audience (followers, demographics) when Facebook + PAGE selected
+    useEffect(() => {
+        if (!isFacebookSelected || !audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+            setFbAudienceData(null);
+            setFbAudienceError(null);
+            return;
+        }
+        const pageId = audiencePage?.id ?? audiencePage;
+        let cancelled = false;
+        setFbAudienceLoading(true);
+        setFbAudienceError(null);
+        fetchFacebookPageAudience(pageId, contentFilters.startDate, contentFilters.endDate)
+            .then((data) => { if (!cancelled) setFbAudienceData(data); })
+            .catch((err) => {
+                if (!cancelled) setFbAudienceError(err?.message || 'Failed to load Facebook audience');
+            })
+            .finally(() => {
+                if (!cancelled) setFbAudienceLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [isFacebookSelected, audiencePage, contentFilters.startDate, contentFilters.endDate]);
 
     // Fetch daily ad account insights (impressions, reach, clicks) for Page performance chart
     useEffect(() => {
@@ -212,9 +316,15 @@ export default function Audience() {
         return () => { cancelled = true; };
     }, [contentFilters.startDate, contentFilters.endDate]);
 
-    // Fetch Instagram audience demographics (city + country) when PAGE is selected
+    // Fetch Instagram audience demographics (city + country) when PAGE is selected (only when Instagram selected)
     useEffect(() => {
-        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+        if (!isInstagramSelected) {
+            setIgAudienceData(null);
+            setIgAudienceError(null);
+            return;
+        }
+        const pageId = audiencePage?.id ?? audiencePage;
+        if (!pageId || !contentFilters.startDate || !contentFilters.endDate) {
             setIgAudienceData(null);
             setIgAudienceError(null);
             return;
@@ -226,7 +336,7 @@ export default function Audience() {
         let cancelled = false;
         setIgAudienceLoading(true);
         setIgAudienceError(null);
-        fetchInstagramAudienceDemographics(audiencePage, timeframe)
+        fetchInstagramAudienceDemographics(pageId, timeframe)
             .then((data) => { if (!cancelled) setIgAudienceData(data); })
             .catch((err) => {
                 if (!cancelled) setIgAudienceError(err?.message || 'Failed to load Instagram audience');
@@ -236,6 +346,67 @@ export default function Audience() {
             });
         return () => { cancelled = true; };
     }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Instagram reach by follow_type (Followers vs Non-Followers) for the right-side card (only when Instagram selected)
+    useEffect(() => {
+        if (!isInstagramSelected) {
+            setReachByFollowTypeData(null);
+            setReachByFollowTypeMessage(null);
+            setReachByFollowTypeError(null);
+            return;
+        }
+        if (!audiencePage || !contentFilters.startDate || !contentFilters.endDate) {
+            setReachByFollowTypeData(null);
+            setReachByFollowTypeMessage(null);
+            setReachByFollowTypeError(null);
+            return;
+        }
+        let cancelled = false;
+        setReachByFollowTypeLoading(true);
+        setReachByFollowTypeError(null);
+        setReachByFollowTypeMessage(null);
+        fetchInstagramReachByFollowType(audiencePage?.id ?? audiencePage, contentFilters.startDate, contentFilters.endDate)
+            .then((res) => {
+                if (cancelled) return;
+                setReachByFollowTypeData(res?.data ?? null);
+                setReachByFollowTypeMessage(res?.message ?? null);
+            })
+            .catch((err) => {
+                if (!cancelled) setReachByFollowTypeError(err?.message || 'Failed to load reach by follow type');
+            })
+            .finally(() => {
+                if (!cancelled) setReachByFollowTypeLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [isInstagramSelected, audiencePage, contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Instagram online_followers (best posting times, heatmap) when PAGE is selected
+    useEffect(() => {
+        if (!audiencePage) {
+            setOnlineFollowersInsight(null);
+            setOnlineFollowersMessage(null);
+            setOnlineFollowersError(null);
+            return;
+        }
+        let cancelled = false;
+        setOnlineFollowersLoading(true);
+        setOnlineFollowersError(null);
+        setOnlineFollowersMessage(null);
+        fetchInstagramOnlineFollowers(audiencePage?.id ?? audiencePage)
+            .then((data) => {
+                if (!cancelled) {
+                    setOnlineFollowersInsight(data);
+                    setOnlineFollowersMessage(data?.message ?? null);
+                }
+            })
+            .catch((err) => {
+                if (!cancelled) setOnlineFollowersError(err?.message || 'Failed to load best posting times');
+            })
+            .finally(() => {
+                if (!cancelled) setOnlineFollowersLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [isInstagramSelected, audiencePage]);
 
     // Fetch demographic insights (age/gender, country) when time range is set
     useEffect(() => {
@@ -267,7 +438,7 @@ export default function Audience() {
     }, [contentFilters.startDate, contentFilters.endDate]);
 
     // --- MOCK DATA (fallbacks when API has no data) ---
-    const initialData = [
+    const _initialData = [
         { age: '18-24', men: 9, women: 4 },
         { age: '25-34', men: 31, women: 18 },
         { age: '35-44', men: 17, women: 9 },
@@ -302,8 +473,29 @@ export default function Audience() {
         { name: "Kuwait", val: 0.4, flag: "🇰🇼" },
     ];
 
-    // Followers and Non-Followers (for right-side chart; mock data — can hook to API later)
-    const followersNonFollowersData = { followers: 23, nonFollowers: 77 };
+    // Followers and Non-Followers: Instagram = reach by follow_type; Facebook = page fans (non-followers N/A)
+    const followersNonFollowersData = (() => {
+        const source = isFacebookSelected && (fbAudienceData || fbAudienceLoading) ? 'facebook' : 'instagram';
+        const total = source === 'facebook'
+            ? (fbAudienceData?.total_value ?? 0)
+            : (reachByFollowTypeData?.total_value ?? 0);
+        const followerVal = source === 'facebook'
+            ? (fbAudienceData?.follower_value ?? 0)
+            : (reachByFollowTypeData?.follower_value ?? 0);
+        const nonFollowerVal = source === 'facebook'
+            ? (fbAudienceData?.non_follower_value ?? 0)
+            : (reachByFollowTypeData?.non_follower_value ?? 0);
+        const followersPct = total > 0 ? (followerVal / total) * 100 : (followerVal > 0 ? 100 : 0);
+        const nonFollowersPct = total > 0 ? (nonFollowerVal / total) * 100 : 0;
+        return {
+            follower_value: followerVal,
+            non_follower_value: nonFollowerVal,
+            total_value: total,
+            followersPct,
+            nonFollowersPct,
+        };
+    })();
+    const formatReachNum = (n) => (typeof n === 'number' ? n.toLocaleString('en-IN') : '0');
 
     const platformData = [
         { name: 'Facebook', reach: 480, results: 0 },
@@ -316,9 +508,28 @@ export default function Audience() {
         { name: 'WhatsApp Bus', reach: 0, results: 0 },
     ];
 
-    // When your viewers are on Instagram — mock 7×24 grid (Mon–Sun × 0–23). Higher in evening and weekends.
+    // Selected page display name for "When your viewers are on Instagram" title
+    const selectedPageName = audiencePage && pages?.length ? (pages.find((p) => p.id === audiencePage)?.name ?? null) : null;
+
+    // When your viewers are on Instagram — use online_followers API data or fallback mock 7×24 grid
     const HEATMAP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const heatmapGrid = React.useMemo(() => {
+        const heatmap = onlineFollowersInsight?.heatmap_data || [];
+        const maxVal = onlineFollowersInsight?.max_followers || 1;
+        if (heatmap.length >= 24) {
+            const byHour = {};
+            heatmap.forEach(({ hour, value }) => { byHour[hour] = value; });
+            const grid = [];
+            for (let d = 0; d < 7; d++) {
+                const row = [];
+                for (let h = 0; h < 24; h++) {
+                    const raw = byHour[h] ?? 0;
+                    row.push(maxVal > 0 ? Math.min(1, raw / maxVal) : 0);
+                }
+                grid.push(row);
+            }
+            return grid;
+        }
         const grid = [];
         for (let d = 0; d < 7; d++) {
             const row = [];
@@ -332,9 +543,22 @@ export default function Audience() {
             grid.push(row);
         }
         return grid;
-    }, []);
+    }, [onlineFollowersInsight]);
 
-    const getHeatmapTooltipLabel = (value) => (value >= 0.6 ? 'Many' : value >= 0.35 ? 'Some' : 'Few');
+    const heatmapHourMeta = React.useMemo(() => {
+        const heatmap = onlineFollowersInsight?.heatmap_data || [];
+        const out = {};
+        heatmap.forEach(({ hour, value, activity_label }) => {
+            out[hour] = { value, activity_label };
+        });
+        return out;
+    }, [onlineFollowersInsight]);
+
+    const getHeatmapTooltipLabel = (value, hour) => {
+        const meta = heatmapHourMeta[hour];
+        if (meta?.activity_label) return meta.activity_label;
+        return value >= 0.6 ? 'Many' : value >= 0.35 ? 'Some' : 'Few';
+    };
     const getLocalTimezoneLabel = () => {
         const offset = -new Date().getTimezoneOffset();
         const sign = offset >= 0 ? '+' : '-';
@@ -344,11 +568,15 @@ export default function Audience() {
         return `GMT ${sign}${String(h).padStart(2, '0')}${m ? String(m).padStart(2, '0') : ''}`;
     };
 
-    // Page performance chart: prefer Ad Account daily insights (impressions, reach, clicks); fallback to Page insights (impressions, reach, clicks: 0)
+    // Page performance chart: when a page is selected, use page-specific reach/impressions; for clicks use page when available, else fall back to ad account (so Clicks line shows values when page_consumptions is 0)
     const pagePerformanceChartData = (() => {
-        const reachArr = (dailyInsightsData || pageInsightsData)?.reach || [];
-        const impressionsArr = (dailyInsightsData || pageInsightsData)?.impressions || [];
-        const clicksArr = (dailyInsightsData || pageInsightsData)?.clicks || [];
+        const pageSource = audiencePage ? pageInsightsData : null;
+        const dailySource = dailyInsightsData;
+        const reachArr = (pageSource?.reach || dailySource?.reach) || [];
+        const impressionsArr = (pageSource?.impressions || dailySource?.impressions) || [];
+        const pageClicks = pageSource?.clicks || [];
+        const hasPageClicks = pageClicks.length > 0 && pageClicks.some((c) => Number(c?.value) > 0);
+        const clicksArr = (audiencePage && hasPageClicks) ? pageClicks : (dailySource?.clicks || []);
         if (!reachArr.length && !impressionsArr.length && !clicksArr.length) return null;
         const byDate = new Map();
         const add = (arr, key) => {
@@ -373,11 +601,42 @@ export default function Audience() {
         return sorted.length ? sorted : null;
     })();
 
-    // Age & Gender chart: build from demographics age_gender_breakdown (aggregate by age bucket, male/female)
-    // Match Meta Audience: 18-24 through 65+ (Meta does not show 13-17 in Instagram Audience)
+    // Age & Gender chart: when a page is selected, use Instagram or Facebook page audience; else use Ads demographics.
     const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const buildAgeGenderFromBreakdowns = (ageRows, genderRows) => {
+        if (!ageRows?.length || !genderRows?.length) return null;
+        let totalMale = 0;
+        let totalFemale = 0;
+        genderRows.forEach((r) => {
+            const v = Number(r.value) || 0;
+            const g = (r.gender || '').toString().toLowerCase();
+            if (g === 'm' || g === 'male') totalMale += v;
+            else if (g === 'f' || g === 'female') totalFemale += v;
+        });
+        const totalGender = totalMale + totalFemale;
+        const maleRatio = totalGender > 0 ? totalMale / totalGender : 0.5;
+        const femaleRatio = totalGender > 0 ? totalFemale / totalGender : 0.5;
+        const out = [];
+        ageRows.forEach((r) => {
+            const age = (r.age || '').toString().trim();
+            if (!age) return;
+            const val = Number(r.value) || 0;
+            out.push({ age, gender: 'male', reach: Math.round(val * maleRatio) });
+            out.push({ age, gender: 'female', reach: Math.round(val * femaleRatio) });
+        });
+        return out.length ? out : null;
+    };
+    const ageGenderBreakdownForChart = (() => {
+        if (audiencePage && isFacebookSelected && fbAudienceData?.age_breakdown?.length && fbAudienceData?.gender_breakdown?.length) {
+            return buildAgeGenderFromBreakdowns(fbAudienceData.age_breakdown, fbAudienceData.gender_breakdown);
+        }
+        if (audiencePage && igAudienceData?.age_breakdown?.length && igAudienceData?.gender_breakdown?.length) {
+            return buildAgeGenderFromBreakdowns(igAudienceData.age_breakdown, igAudienceData.gender_breakdown);
+        }
+        return demographicsData?.age_gender_breakdown || null;
+    })();
     const ageGenderChartData = (() => {
-        const rows = demographicsData?.age_gender_breakdown || [];
+        const rows = ageGenderBreakdownForChart || [];
         if (!rows.length) return null;
         const byAge = {};
         AGE_BUCKETS.forEach((b) => { byAge[b] = { age: b, men: 0, women: 0 }; });
@@ -401,15 +660,15 @@ export default function Audience() {
         return [...ageGenderChartData, { age: 'All Ages', men: totalMen, women: totalWomen }];
     })();
 
-    // Top towns/cities from Instagram audience (city-level) when available
+    // Top towns/cities from Instagram or Facebook page audience (city-level) when available
     const topCitiesFromIg = (() => {
-        const rows = igAudienceData?.city_breakdown || [];
+        const rows = (isFacebookSelected ? fbAudienceData?.city_breakdown : null) || igAudienceData?.city_breakdown || [];
         if (!rows.length) return null;
         const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
         if (total === 0) return null;
         return rows
             .map((r) => ({
-                name: r.city || 'Unknown',
+                name: r.city || r.name || 'Unknown',
                 val: Math.round(((Number(r.value) || 0) / total) * 1000) / 10,
             }))
             .sort((a, b) => b.val - a.val)
@@ -452,9 +711,9 @@ export default function Audience() {
             flag: countryFlagMap[code || (raw || '').slice(0, 2).toUpperCase()] || globe,
         };
     };
-    // Top countries from Instagram audience when available
+    // Top countries from Instagram or Facebook page audience when available
     const topCountriesFromIg = (() => {
-        const rows = igAudienceData?.country_breakdown || [];
+        const rows = (isFacebookSelected ? fbAudienceData?.country_breakdown : null) || igAudienceData?.country_breakdown || [];
         if (!rows.length) return null;
         const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
         if (total === 0) return null;
@@ -595,27 +854,28 @@ export default function Audience() {
                             label="Platform"
                             emoji="🌐"
                             options={platformFilterOptions}
-                            selectedValues={platformFilter ? [platformFilter] : []}
-                            onChange={(values) => setPlatformFilter(values?.length ? values[0] : platformFilterOptions[0])}
+                            selectedValues={platformFilters}
+                            onChange={(values) => setPlatformFilters(values || [])}
                             placeholder="Select platform"
                             getOptionLabel={(opt) => opt.name}
                             getOptionValue={(opt) => opt.id}
-                            singleSelect
                         />
                     </div>
-                    <div className="col-12 col-md-auto">
-                        <MultiSelectFilter
-                            label="PAGE"
-                            emoji="📄"
-                            options={pages}
-                            selectedValues={audiencePage ? [audiencePage] : []}
-                            onChange={(values) => setAudiencePage(values?.length ? values[0] : null)}
-                            placeholder="Select a Page"
-                            getOptionLabel={(opt) => opt.name}
-                            getOptionValue={(opt) => opt.id}
-                            singleSelect
-                        />
-                    </div>
+                    {showPageFilter && (
+                        <div className="col-12 col-md-auto">
+                            <MultiSelectFilter
+                                label="PAGE"
+                                emoji="📄"
+                                options={pages}
+                                selectedValues={audiencePage ? [audiencePage] : []}
+                                onChange={(values) => setAudiencePage(values?.length ? values[0] : null)}
+                                placeholder="Select a Page"
+                                getOptionLabel={(opt) => opt.name}
+                                getOptionValue={(opt) => opt.id}
+                                singleSelect
+                            />
+                        </div>
+                    )}
                 </div>
             </div>
         </motion.div>
@@ -663,6 +923,13 @@ export default function Audience() {
                         <div className="filter-card-body">
                             <label className="filter-label d-block audience-followers-label">
                                 <span className="filter-emoji">👥</span> Followers and Non-Followers
+                                {(reachByFollowTypeLoading || (isFacebookSelected && fbAudienceLoading)) && <span className="ms-2 text-muted small">Loading...</span>}
+                                {reachByFollowTypeError && !reachByFollowTypeLoading && !isFacebookSelected && (
+                                    <span className="ms-2 text-danger small" title={reachByFollowTypeError}>Error</span>
+                                )}
+                                {isFacebookSelected && fbAudienceError && !fbAudienceLoading && (
+                                    <span className="ms-2 text-danger small" title={fbAudienceError}>Error</span>
+                                )}
                             </label>
                             <div className="audience-followers-chart">
                                 <div className="audience-followers-row">
@@ -671,11 +938,11 @@ export default function Audience() {
                                         <motion.div
                                             className="audience-followers-bar"
                                             initial={{ width: 0 }}
-                                            animate={{ width: `${followersNonFollowersData.followers}%` }}
+                                            animate={{ width: `${followersNonFollowersData.followersPct}%` }}
                                             transition={{ duration: 0.6, ease: 'easeOut' }}
                                         />
                                     </div>
-                                    <span className="audience-followers-pct">{followersNonFollowersData.followers}%</span>
+                                    <span className="audience-followers-pct">{formatReachNum(followersNonFollowersData.follower_value)}</span>
                                 </div>
                                 <div className="audience-followers-row">
                                     <span className="audience-followers-label">From non-followers</span>
@@ -683,13 +950,46 @@ export default function Audience() {
                                         <motion.div
                                             className="audience-followers-bar"
                                             initial={{ width: 0 }}
-                                            animate={{ width: `${followersNonFollowersData.nonFollowers}%` }}
+                                            animate={{ width: `${followersNonFollowersData.nonFollowersPct}%` }}
                                             transition={{ duration: 0.6, delay: 0.1, ease: 'easeOut' }}
                                         />
                                     </div>
-                                    <span className="audience-followers-pct">{followersNonFollowersData.nonFollowers}%</span>
+                                    <span className="audience-followers-pct">{formatReachNum(followersNonFollowersData.non_follower_value)}</span>
                                 </div>
                             </div>
+                            {!reachByFollowTypeLoading && !fbAudienceLoading && followersNonFollowersData.total_value === 0 && (reachByFollowTypeMessage || (isFacebookSelected && !fbAudienceData)) && (
+                                <div className="mt-2">
+                                    {isFacebookSelected ? (
+                                        <>
+                                            {fbAudienceError ? (
+                                                <p className="small text-muted mb-0" title={fbAudienceError}>
+                                                    {fbAudienceError}
+                                                </p>
+                                            ) : (
+                                                <p className="small text-muted mb-0">
+                                                    No follower data for this page. Ensure the page has at least 100 likes and is connected to your app in Meta Business Suite. Non-follower reach is not available for Facebook Pages.
+                                                </p>
+                                            )}
+                                            {fbAudienceError && (fbAudienceError.includes('Page not accessible') || fbAudienceError.includes('token')) && (
+                                                <p className="small text-muted mb-0 mt-1">
+                                                    To fix: Add this page in Meta Business Suite (Business Settings → Accounts → Pages) and ensure your app has a valid Page access token with read_insights permission.
+                                                </p>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="small text-muted mb-0" title={reachByFollowTypeMessage}>
+                                                {reachByFollowTypeMessage}
+                                            </p>
+                                            {reachByFollowTypeMessage && reachByFollowTypeMessage.includes('Page not accessible') && (
+                                                <p className="small text-muted mb-0 mt-1">
+                                                    To fix: Add this page in Meta Business Suite (Business Settings → Accounts → Pages) and ensure your app has access. Use a Page that is connected to your app for full data.
+                                                </p>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </motion.div>
                 </div>
@@ -708,7 +1008,7 @@ export default function Audience() {
                         📊 Page performance
                     </h5>
                     <small className="text-secondary text-muted">
-                        {audiencePage ? `Audience insights for selected page (${getContentDateRangeDisplay()})` : 'Select a page and time range to view performance'}
+                        {!showPageFilter ? 'Select Facebook or Instagram in the Platform filter to show the Page filter and view audience data' : audiencePage ? `Audience insights for selected page (${getContentDateRangeDisplay()})` : 'Select a page and time range to view performance'}
                     </small>
                 </motion.div>
                 <motion.div className="mt-4" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.3, duration: 0.6, ease: 'easeOut' }}>
@@ -763,6 +1063,14 @@ export default function Audience() {
                                     </div>
                                 </div>
                             )
+                        ) : !showPageFilter ? (
+                            <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
+                                <div className="text-center">
+                                    <span className="d-block mb-2" style={{ fontSize: '2.5rem' }}>🌐</span>
+                                    <p className="fw-medium mb-0">Select Facebook or Instagram to view audience and performance</p>
+                                    <small>Select <strong>Facebook</strong> or <strong>Instagram</strong> in the Platform filter to show the Page filter and load data</small>
+                                </div>
+                            </div>
                         ) : (
                             <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
                                 <div className="text-center">
@@ -819,10 +1127,10 @@ export default function Audience() {
                                     </div>
                                 </div>
 
-                                {demographicsError && (
-                                    <div className="alert alert-warning py-2 small mb-3" role="alert">{demographicsError}</div>
+                                {(demographicsError || (isFacebookSelected && audiencePage && fbAudienceError)) && (
+                                    <div className="alert alert-warning py-2 small mb-3" role="alert">{isFacebookSelected && fbAudienceError ? fbAudienceError : demographicsError}</div>
                                 )}
-                                {demographicsLoading && (
+                                {(demographicsLoading || (isFacebookSelected && audiencePage && fbAudienceLoading)) && (
                                     <div className="d-flex align-items-center gap-2 text-muted small mb-3">
                                         <div className="spinner-border spinner-border-sm" role="status" /><span>Loading demographics...</span>
                                     </div>
@@ -887,12 +1195,14 @@ export default function Audience() {
                                         🏙️ Top towns/cities
                                     </h6>
                                     <small className="text-muted d-block mb-2">
-                                        {topCitiesFromIg ? 'From Instagram audience (city-level)' : 'Region-level data from Meta Ads Insights'}
+                                        {topCitiesFromIg ? (isFacebookSelected ? 'From Facebook Page audience (city-level)' : 'From Instagram audience (city-level)') : 'Region-level data from Meta Ads Insights'}
                                     </small>
-                                    {(igAudienceLoading && audiencePage) || demographicsLoading ? (
+                                    {(igAudienceLoading && audiencePage && isInstagramSelected) || (isFacebookSelected && fbAudienceLoading) || demographicsLoading ? (
                                         <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
-                                    ) : igAudienceError && audiencePage ? (
+                                    ) : igAudienceError && audiencePage && isInstagramSelected ? (
                                         <div className="text-muted small mb-2">{igAudienceError}</div>
+                                    ) : isFacebookSelected && fbAudienceError ? (
+                                        <div className="text-muted small mb-2">{fbAudienceError}</div>
                                     ) : null}
                                     <div className="d-flex flex-column gap-4">
                                         {topTownsCitiesDisplay.length > 0 ? (
@@ -933,9 +1243,9 @@ export default function Audience() {
                                         🌍 Top Countries
                                     </h6>
                                     {topCountriesFromIg ? (
-                                        <small className="text-muted d-block mb-2">From Instagram audience</small>
+                                        <small className="text-muted d-block mb-2">{isFacebookSelected ? 'From Facebook Page audience' : 'From Instagram audience'}</small>
                                     ) : null}
-                                    {(igAudienceLoading && audiencePage) || demographicsLoading ? (
+                                    {(igAudienceLoading && audiencePage && isInstagramSelected) || (isFacebookSelected && fbAudienceLoading) || demographicsLoading ? (
                                         <div className="d-flex align-items-center gap-2 text-muted small mb-2"><div className="spinner-border spinner-border-sm" role="status" /><span>Loading...</span></div>
                                     ) : null}
                                     <div className="d-flex flex-column gap-4">
@@ -966,7 +1276,8 @@ export default function Audience() {
                                 </div>
                             </motion.div>
 
-                            {/* 3. When your viewers are on Instagram — heatmap (mock data) */}
+                            {/* 3. When your viewers are on Instagram — best times + heatmap (Instagram only) */}
+                            {isInstagramSelected && (
                             <motion.div
                                 variants={itemVariants}
                                 className="mt-5 audience-heatmap-section"
@@ -981,6 +1292,9 @@ export default function Audience() {
                                     transition={{ duration: 0.35, delay: 0.05 }}
                                 >
                                     When your viewers are on Instagram
+                                    {selectedPageName && <span className="text-muted fw-normal"> — {selectedPageName}</span>}
+                                    {onlineFollowersLoading && <span className="ms-2 text-muted small fw-normal">Loading...</span>}
+                                    {onlineFollowersError && !onlineFollowersLoading && <span className="ms-2 text-danger small fw-normal" title={onlineFollowersError}>Error</span>}
                                 </motion.h6>
                                 <motion.small
                                     className="text-muted d-block mb-3 audience-heatmap-subtitle"
@@ -990,6 +1304,35 @@ export default function Audience() {
                                 >
                                     Your local time ({getLocalTimezoneLabel()}) · {getContentDateRangeDisplay()}
                                 </motion.small>
+                                {onlineFollowersInsight?.source === 'media_views_7d' && (
+                                    <div className="alert alert-info py-2 px-3 mb-3 small">
+                                        {onlineFollowersMessage || 'Based on when your content got the most views in the last 7 days.'}
+                                    </div>
+                                )}
+                                {onlineFollowersInsight?.is_sample_data && !onlineFollowersInsight?.source && (
+                                    <div className="alert alert-info py-2 px-3 mb-3 small">
+                                        {onlineFollowersMessage ? (
+                                            <>Sample pattern — {onlineFollowersMessage}</>
+                                        ) : (
+                                            'Sample pattern — connect Instagram or check permissions for real data.'
+                                        )}
+                                    </div>
+                                )}
+                                {onlineFollowersInsight?.best_times?.length > 0 && (
+                                    <motion.div className="mb-3 p-3 rounded-3 border bg-light" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}>
+                                        <div className="small fw-bold text-dark mb-2">Best posting times (top 3)</div>
+                                        <div className="d-flex flex-wrap gap-2 mb-2">
+                                            {onlineFollowersInsight.best_times.map((t, i) => (
+                                                <span key={t.hour} className="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 px-2 py-1">
+                                                    {t.label} — {(t.followers || 0).toLocaleString('en-IN')} {onlineFollowersInsight?.source === 'media_views_7d' ? 'views' : 'online'} · {t.activity_label}
+                                                </span>
+                                            ))}
+                                        </div>
+                                        <div className="small text-muted">{onlineFollowersInsight.recommendation_text}</div>
+                                    </motion.div>
+                                )}
+                                {onlineFollowersInsight?.heatmap_data?.length > 0 && (
+                                <>
                                 <motion.div
                                     className="audience-heatmap-wrapper"
                                     initial={{ opacity: 0 }}
@@ -1066,10 +1409,13 @@ export default function Audience() {
                                     >
                                         <strong>{heatmapTooltip.dayLabel} {String(heatmapTooltip.hour).padStart(2, '0')}:00</strong>
                                         <br />
-                                        {getHeatmapTooltipLabel(heatmapTooltip.value)} of your viewers are on Instagram
+                                        {getHeatmapTooltipLabel(heatmapTooltip.value, heatmapTooltip.hour)} of your viewers are on Instagram
                                     </motion.div>
                                 )}
+                                </>
+                                )}
                             </motion.div>
+                            )}
                         </>
                     ) : (
                         /* ================= PLATFORM VIEW ================= */
