@@ -839,6 +839,7 @@ export default function BestPerformingReel() {
                                 placeholder="All Platforms"
                                 getOptionLabel={(opt) => opt.name}
                                 getOptionValue={(opt) => opt.id}
+                                singleSelect
                             />
                         </div>
                         {isEngagementPlatformSelected && (
