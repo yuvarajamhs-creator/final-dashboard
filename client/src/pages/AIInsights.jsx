@@ -746,7 +746,7 @@ export default function AIInsights() {
                             <div className="summary-card-meta">{adsData.lastMonth.platform}</div>
                             <div className="summary-card-metric">
                                 <span className="metric-label">CPL</span>
-                                <span className="metric-value">${adsData.lastMonth.cpl}</span>
+                                <span className="metric-value">₹{adsData.lastMonth.cpl}</span>
                             </div>
                             <div style={{ marginTop: '8px' }}>
                                 <span className="metric-badge badge-scale">{adsData.lastMonth.action}</span>
@@ -837,7 +837,7 @@ export default function AIInsights() {
                             <div className="perf-meta">
                                 <i className="fas fa-layer-group"></i> {currentAd.platform}
                                 <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
-                                ${currentAd.spend} Spend
+                                ₹{currentAd.spend} Spend
                                 <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
                                 {currentAd.leads} Leads
                             </div>

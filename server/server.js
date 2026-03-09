@@ -1105,6 +1105,10 @@ let insightsSyncIntervalId = null;
 const { startTokenRefreshScheduler } = require('./jobs/metaTokenRefresh');
 let tokenRefreshIntervalId = null;
 
+// Initialize story snapshots scheduler (captures stories into DB so "Top Stories by Views" has data after 24h)
+const { startStorySnapshotsScheduler } = require('./jobs/storySnapshotsSync');
+let storySnapshotsIntervalId = null;
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   // Start leads sync scheduler
@@ -1126,5 +1130,12 @@ app.listen(PORT, () => {
     tokenRefreshIntervalId = startTokenRefreshScheduler();
   } catch (error) {
     console.error('Error starting token refresh scheduler:', error.message);
+  }
+
+  // Start story snapshots scheduler (every 6h; saves stories to instagram_story_snapshots for Top Stories by Views)
+  try {
+    storySnapshotsIntervalId = startStorySnapshotsScheduler();
+  } catch (error) {
+    console.error('Error starting story snapshots scheduler:', error.message);
   }
 });

@@ -43,4 +43,4 @@ To show **existing** story data on the Stories tab (in addition to live stories 
 3. Click **Run**.
 4. In Supabase: **Settings** → **API** → **Reload schema** (optional).
 
-Table created: `instagram_story_snapshots`. The app will save story metrics when it fetches them (within the 24h window) and merge stored stories with live API results so the Stories tab shows both.
+Table created: `instagram_story_snapshots`. The app saves story metrics when it fetches them (within the 24h window) and merges stored stories with live API results. A **scheduled job** (see `server/jobs/storySnapshotsSync.js`) runs every 6 hours when `META_PAGE_ID` or `META_PAGE_IDS` is set, so the table is filled even when no one is viewing the Stories tab—enabling "Top Stories by Views" to show data after the 24h API window.

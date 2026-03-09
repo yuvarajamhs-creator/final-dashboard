@@ -109,6 +109,23 @@ const fetchDemographicInsights = async (from, to) => {
     return await res.json();
 };
 
+// Facebook Page audience — age/gender, cities, countries (for Age & Gender chart when Platform=Facebook and a page is selected)
+const fetchFacebookPageAudience = async (pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(
+        `${API_BASE}/api/meta/facebook-page-audience?page_id=${encodeURIComponent(pageId)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        { headers }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || res.statusText);
+    }
+    const json = await res.json();
+    return json.data || null;
+};
+
 const fetchFacebookContentInsights = async (pageId, from, to) => {
     const token = getAuthToken();
     const headers = { 'Content-Type': 'application/json' };
@@ -194,6 +211,11 @@ export default function BestPerformingReel() {
     const [adsDemographicsData, setAdsDemographicsData] = useState(null);
     const [loadingAdsDemographics, setLoadingAdsDemographics] = useState(false);
     const [adsDemographicsError, setAdsDemographicsError] = useState(null);
+
+    // Facebook Page audience (age/gender) for Age & Gender chart when Platform=Facebook and a page is selected
+    const [fbAudienceData, setFbAudienceData] = useState(null);
+    const [fbAudienceLoading, setFbAudienceLoading] = useState(false);
+    const [fbAudienceError, setFbAudienceError] = useState(null);
 
     useEffect(() => {
         const loadPages = async () => {
@@ -357,6 +379,32 @@ export default function BestPerformingReel() {
             .finally(() => { if (!cancelled) setLoadingAdsDemographics(false); });
         return () => { cancelled = true; };
     }, [contentFilters.startDate, contentFilters.endDate]);
+
+    // Fetch Facebook Page audience (age/gender) when Platform=Facebook and a page is selected — so Age & Gender chart updates per page
+    useEffect(() => {
+        if (!isFacebookSelected || !reelPage || !contentFilters.startDate || !contentFilters.endDate) {
+            setFbAudienceData(null);
+            setFbAudienceError(null);
+            return;
+        }
+        const pageId = reelPage != null && typeof reelPage === 'object' && reelPage.id != null
+            ? String(reelPage.id)
+            : String(reelPage ?? '');
+        if (!pageId) {
+            setFbAudienceData(null);
+            setFbAudienceError(null);
+            return;
+        }
+        let cancelled = false;
+        setFbAudienceData(null); // clear previous page's data so chart doesn't show stale data when switching pages
+        setFbAudienceLoading(true);
+        setFbAudienceError(null);
+        fetchFacebookPageAudience(pageId, contentFilters.startDate, contentFilters.endDate)
+            .then((data) => { if (!cancelled) setFbAudienceData(data); })
+            .catch((err) => { if (!cancelled) setFbAudienceError(err?.message || 'Failed to load Facebook Page audience'); })
+            .finally(() => { if (!cancelled) setFbAudienceLoading(false); });
+        return () => { cancelled = true; };
+    }, [isFacebookSelected, reelPage, contentFilters.startDate, contentFilters.endDate]);
 
     const handleContentDateRangeApply = (payload) => {
         if (!payload.start_date || !payload.end_date) return;
@@ -661,32 +709,52 @@ export default function BestPerformingReel() {
         return { list, label, subtitle };
     })();
 
-    // Age & Gender Distribution: when a page is selected, use Instagram audience (per-page); else use Ads demographics (single ad account).
+    // Age & Gender Distribution: when a page is selected, use Instagram or Facebook page audience (per-page); else use Ads demographics (single ad account).
     const AGE_BUCKETS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'];
+    const buildAgeGenderFromBreakdowns = (ageRows, genderRows) => {
+        if (!ageRows?.length || !genderRows?.length) return null;
+        let totalMale = 0;
+        let totalFemale = 0;
+        genderRows.forEach((r) => {
+            const v = Number(r.value) || 0;
+            const g = (r.gender || '').toString().toLowerCase();
+            if (g === 'm' || g === 'male') totalMale += v;
+            else if (g === 'f' || g === 'female') totalFemale += v;
+        });
+        const totalGender = totalMale + totalFemale;
+        const maleRatio = totalGender > 0 ? totalMale / totalGender : 0.5;
+        const femaleRatio = totalGender > 0 ? totalFemale / totalGender : 0.5;
+        const out = [];
+        ageRows.forEach((r) => {
+            const age = (r.age || r.age_range || '').toString().trim();
+            if (!age) return;
+            const val = Number(r.value) || 0;
+            out.push({ age, gender: 'male', reach: Math.round(val * maleRatio) });
+            out.push({ age, gender: 'female', reach: Math.round(val * femaleRatio) });
+        });
+        return out.length ? out : null;
+    };
+    // Facebook API returns age_breakdown as [{ age, gender, value }]; build chart rows directly. Instagram/Ads use other shapes.
+    const buildAgeGenderFromFacebookBreakdown = (ageBreakdown) => {
+        if (!ageBreakdown?.length) return null;
+        const out = [];
+        ageBreakdown.forEach((r) => {
+            const age = (r.age || '').toString().trim();
+            if (!age || !AGE_BUCKETS.includes(age)) return;
+            const g = (r.gender || '').toString().toLowerCase();
+            const gender = g === 'female' || g === 'f' ? 'female' : 'male';
+            const reach = Math.round(Number(r.value) || 0);
+            if (reach > 0) out.push({ age, gender, reach });
+        });
+        return out.length ? out : null;
+    };
     const ageGenderBreakdownForChart = (() => {
+        if (reelPage && isFacebookSelected && fbAudienceData?.age_breakdown?.length) {
+            const fbRows = buildAgeGenderFromFacebookBreakdown(fbAudienceData.age_breakdown);
+            if (fbRows && fbRows.length > 0) return fbRows;
+        }
         if (reelPage && demographicsData?.age_breakdown?.length && demographicsData?.gender_breakdown?.length) {
-            const ageRows = demographicsData.age_breakdown;
-            const genderRows = demographicsData.gender_breakdown;
-            let totalMale = 0;
-            let totalFemale = 0;
-            genderRows.forEach((r) => {
-                const v = Number(r.value) || 0;
-                const g = (r.gender || '').toString().toLowerCase();
-                if (g === 'm' || g === 'male') totalMale += v;
-                else if (g === 'f' || g === 'female') totalFemale += v;
-            });
-            const totalGender = totalMale + totalFemale;
-            const maleRatio = totalGender > 0 ? totalMale / totalGender : 0.5;
-            const femaleRatio = totalGender > 0 ? totalFemale / totalGender : 0.5;
-            const out = [];
-            ageRows.forEach((r) => {
-                const age = (r.age || r.age_range || '').toString().trim();
-                if (!age) return;
-                const val = Number(r.value) || 0;
-                out.push({ age, gender: 'male', reach: Math.round(val * maleRatio) });
-                out.push({ age, gender: 'female', reach: Math.round(val * femaleRatio) });
-            });
-            return out.length ? out : null;
+            return buildAgeGenderFromBreakdowns(demographicsData.age_breakdown, demographicsData.gender_breakdown);
         }
         return adsDemographicsData?.age_gender_breakdown || null;
     })();
@@ -712,7 +780,10 @@ export default function BestPerformingReel() {
         const totalWomen = ageGenderChartData.reduce((s, row) => s + (Number(row.women) || 0), 0);
         return [...ageGenderChartData, { age: 'All Ages', men: totalMen, women: totalWomen }];
     })();
-    const ageGenderChartFromInstagram = Boolean(reelPage && demographicsData?.age_breakdown?.length && demographicsData?.gender_breakdown?.length);
+    const ageGenderChartFromInstagram = Boolean(reelPage && isInstagramSelected && demographicsData?.age_breakdown?.length && demographicsData?.gender_breakdown?.length);
+    const ageGenderChartFromFacebook = Boolean(
+        reelPage && isFacebookSelected && fbAudienceData?.age_breakdown?.length && buildAgeGenderFromFacebookBreakdown(fbAudienceData.age_breakdown)?.length > 0
+    );
 
     // 3. CONTENT LIST FOR TABS — live data only; no sample/placeholder when no page or no media
     const emptyList = [];
@@ -839,7 +910,6 @@ export default function BestPerformingReel() {
                                 placeholder="All Platforms"
                                 getOptionLabel={(opt) => opt.name}
                                 getOptionValue={(opt) => opt.id}
-                                singleSelect
                             />
                         </div>
                         {isEngagementPlatformSelected && (
@@ -1052,12 +1122,17 @@ export default function BestPerformingReel() {
                                                     <small className="text-secondary text-muted d-block">
                                                         {ageGenderChartFromInstagram
                                                             ? 'Audience breakdown by demographics (Instagram audience — selected page)'
-                                                            : 'Audience breakdown by demographics (Meta Ads Insights)'}
+                                                            : ageGenderChartFromFacebook
+                                                                ? 'Audience breakdown by demographics (Facebook Page audience — selected page)'
+                                                                : 'Audience breakdown by demographics (Meta Ads Insights)'}
                                                     </small>
                                                 </div>
                                             </div>
-                                            {!ageGenderChartFromInstagram && adsDemographicsError && (
+                                            {!ageGenderChartFromInstagram && !ageGenderChartFromFacebook && adsDemographicsError && (
                                                 <div className="text-muted small mb-2">{adsDemographicsError}</div>
+                                            )}
+                                            {isFacebookSelected && reelPage && fbAudienceError && !ageGenderChartFromFacebook && (
+                                                <div className="text-muted small mb-2">{fbAudienceError}</div>
                                             )}
                                             <div style={{ width: '100%', height: 350 }}>
                                                 <ResponsiveContainer width="100%" height="100%">
@@ -1089,12 +1164,16 @@ export default function BestPerformingReel() {
                                                 </div>
                                             </div>
                                         </>
-                                    ) : (loadingAdsDemographics || (reelPage && loadingDemographics)) ? (
+                                    ) : (loadingAdsDemographics || (reelPage && loadingDemographics) || (isFacebookSelected && reelPage && fbAudienceLoading)) ? (
                                         <div className="d-flex align-items-center justify-content-center text-muted" style={{ minHeight: 320 }}>
                                             <div className="text-center">
                                                 <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
                                                 <p className="mb-0 small">
-                                                    {reelPage && loadingDemographics ? 'Loading Instagram audience…' : 'Loading Age & Gender demographics…'}
+                                                    {reelPage && loadingDemographics
+                                                        ? 'Loading Instagram audience…'
+                                                        : isFacebookSelected && reelPage && fbAudienceLoading
+                                                            ? 'Loading Facebook Page audience…'
+                                                            : 'Loading Age & Gender demographics…'}
                                                 </p>
                                             </div>
                                         </div>
@@ -1339,7 +1418,7 @@ export default function BestPerformingReel() {
                                     {!reelPage
                                         ? 'Select a page to see top content by views.'
                                         : activeTab === 'stories'
-                                            ? 'No stories for this period. Stories are available for about 24 hours after posting—post a story and check back within 24 hours.'
+                                            ? 'Stories are available from Instagram for about 24 hours. We show saved snapshots when we have them—post a story and open this tab within 24h to capture it, or ensure the server story-snapshot job is running (META_PAGE_ID, every 6h).'
                                             : isFacebookSelected
                                                 ? (mediaInsights?.message || 'No video content for this Page. The Page may have no native videos or video posts, or insights may be unavailable.')
                                                 : 'No content for this period. Try a different time range or tab.'}

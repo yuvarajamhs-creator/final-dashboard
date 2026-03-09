@@ -100,9 +100,36 @@ async function fetchVideoPerformanceFromMeta(adAccountId, accessToken, since, un
       getActionValue(row.action_values, "video_play") ||
       getActionValue(row.action_values, "video_view");
     const videoPlay = plays;
+    const video3sViews =
+      getTopLevel(row, "video_3_sec_watched_actions") ||
+      getActionValueFromRow(row, "video_3_sec_watched_actions") ||
+      getActionValueFromRow(row, "video_view_3s") ||
+      getActionValueFromRow(row, "video_views_3s") ||
+      0;
+    const videoThruPlays =
+      getTopLevel(row, "video_thruplay_watched_actions") ||
+      getActionValueFromRow(row, "video_thruplay_watched_actions") ||
+      0;
+    const videoViews =
+      getTopLevel(row, "video_view") ||
+      getActionValueFromRow(row, "video_view") ||
+      getActionValueFromRow(row, "video_views") ||
+      0;
     const p100Watched = getVideoCompletionFromRow(row);
     let hookRate = impressions > 0 ? (plays / impressions) * 100 : 0;
-    let holdRate = videoPlay > 0 ? (p100Watched / videoPlay) * 100 : 0;
+    // Hold Rate = (ThruPlays or p75/p100) / 3-sec views × 100 when 3s available; else p100/plays
+    const holdNumerator = videoThruPlays > 0 ? videoThruPlays : p100Watched;
+    let holdRate =
+      video3sViews > 0 && holdNumerator > 0
+        ? (holdNumerator / video3sViews) * 100
+        : videoPlay > 0
+          ? (p100Watched / videoPlay) * 100
+          : 0;
+    if (holdRate === 0 && video3sViews > 0 && videoViews > 0) {
+      holdRate = Math.min(100, (videoViews / video3sViews) * 100);
+    } else if (holdRate === 0 && video3sViews > 0 && videoPlay > 0) {
+      holdRate = Math.min(100, (videoPlay / video3sViews) * 100);
+    }
     hookRate = Math.round(hookRate * 100) / 100;
     holdRate = Math.round(holdRate * 100) / 100;
     return {

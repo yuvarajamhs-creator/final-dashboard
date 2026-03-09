@@ -407,10 +407,10 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       const spend = num(d.spend);
       const cpl = leadCount > 0 ? spend / leadCount : 0;
       
-      // Video metrics for Hook Rate and Hold Rate
+      // Video metrics for Hook Rate and Hold Rate (Meta API: video_thruplay_watched_actions, video_3_sec_watched_actions)
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
-      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || 0;
-      const videoThruPlays = aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || aggs['video_3_sec_watched_actions'] || 0;
+      const videoThruPlays = aggs['video_thruplay_watched_actions'] || aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
 
       // Prefer server-enriched values when present (from insightsService.enrichInsightsRow), else compute client-side with same fallbacks as server
       const plays = (d.videoPlays != null && d.videoPlays !== '') ? num(d.videoPlays) : (getTopLevelActionValue(d, 'video_play_actions') || getTopLevelActionValue(d, 'video_play') || getTopLevelActionValue(d, 'video_view') || getActionValue(d, 'video_play_actions') || getActionValue(d, 'video_play') || getActionValue(d, 'video_view') || 0);
@@ -419,14 +419,21 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       let holdRate = serverHoldRate;
       if (holdRate == null || (typeof holdRate === 'number' && Number.isNaN(holdRate))) {
         holdRate = 0;
-        if (plays > 0 && fullViews > 0) {
+        const holdNumerator = videoThruPlays > 0 ? videoThruPlays : fullViews;
+        if (video3sViews > 0 && holdNumerator > 0) {
+          holdRate = parseFloat(((holdNumerator / video3sViews) * 100).toFixed(2));
+        } else if (plays > 0 && fullViews > 0) {
           holdRate = parseFloat(((fullViews / plays) * 100).toFixed(2));
         } else if (plays > 0 && videoThruPlays > 0) {
           holdRate = parseFloat(((videoThruPlays / plays) * 100).toFixed(2));
-        } else if (videoViews > 0 && videoThruPlays >= 0) {
+        } else if (videoViews > 0 && videoThruPlays > 0) {
           holdRate = parseFloat(((videoThruPlays / videoViews) * 100).toFixed(2));
         } else if (video3sViews > 0 && videoThruPlays >= 0) {
           holdRate = parseFloat(((videoThruPlays / video3sViews) * 100).toFixed(2));
+        } else if (video3sViews > 0 && videoViews > 0) {
+          holdRate = parseFloat((Math.min(100, (videoViews / video3sViews) * 100)).toFixed(2));
+        } else if (video3sViews > 0 && plays > 0) {
+          holdRate = parseFloat((Math.min(100, (plays / video3sViews) * 100)).toFixed(2));
         }
       }
 
@@ -2909,8 +2916,9 @@ export default function AdsDashboardBootstrap() {
       // Use same leads as cards: aggregated from insights (row.leads per ad). Table and cards show same data.
       const leadsCount = ad.leads || 0;
       const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
-      // Hold Rate = (video_p100_watched_actions / video_play_actions) * 100; show null when no plays
-      const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0));
+      // Hold Rate = (ThruPlays or p100) / 3s views when available; else p100/plays or ThruPlays/videoViews
+      const holdNum = (ad.videoThruPlays || 0) > 0 ? ad.videoThruPlays : ad.videoP100Watched;
+      const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.video3sViews > 0 && holdNum > 0 ? parseFloat(((holdNum / ad.video3sViews) * 100).toFixed(2)) : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0)));
       return {
         ad_id: ad.ad_id,
         ad_name: ad.ad_name,

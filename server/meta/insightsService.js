@@ -134,8 +134,10 @@ function enrichInsightsRow(row) {
   const aggs = transformActions(row.actions || []);
   const values = transformActions(row.action_values || []);
   const videoViews = aggs.video_view || aggs.video_views || 0;
-  const video3sViews = aggs.video_view_3s || aggs.video_views_3s || aggs.video_view_3s_autoplayed || aggs.video_views_3s_autoplayed || 0;
-  const videoThruPlays = aggs.video_thruplay || aggs.video_views_thruplay || 0;
+  const video3sViews =
+    aggs.video_view_3s || aggs.video_views_3s || aggs.video_view_3s_autoplayed || aggs.video_views_3s_autoplayed
+    || aggs.video_3_sec_watched_actions || 0;
+  const videoThruPlays = aggs.video_thruplay_watched_actions || aggs.video_thruplay || aggs.video_views_thruplay || 0;
 
   const plays =
     getTopLevelActionValue(row, 'video_play_actions') ||
@@ -146,16 +148,23 @@ function enrichInsightsRow(row) {
     getActionValue(row, 'video_view') ||
     0;
   const fullViews = getVideoCompletionCount(row, aggs, values);
-
+  // Hold Rate = (ThruPlays or p75/p100 completion) / 3-sec views × 100 when 3s views available; else fallbacks
   let hold_rate = 0;
-  if (plays > 0 && fullViews > 0) {
+  const holdNumerator = videoThruPlays > 0 ? videoThruPlays : fullViews;
+  if (video3sViews > 0 && holdNumerator > 0) {
+    hold_rate = Math.round((holdNumerator / video3sViews) * 10000) / 100;
+  } else if (plays > 0 && fullViews > 0) {
     hold_rate = Math.round((fullViews / plays) * 10000) / 100;
   } else if (plays > 0 && videoThruPlays > 0) {
     hold_rate = Math.round((videoThruPlays / plays) * 10000) / 100;
-  } else if (videoViews > 0 && videoThruPlays >= 0) {
+  } else if (videoViews > 0 && videoThruPlays > 0) {
     hold_rate = Math.round((videoThruPlays / videoViews) * 10000) / 100;
   } else if (video3sViews > 0 && videoThruPlays >= 0) {
     hold_rate = Math.round((videoThruPlays / video3sViews) * 10000) / 100;
+  } else if (video3sViews > 0 && videoViews > 0) {
+    hold_rate = Math.min(100, Math.round((videoViews / video3sViews) * 10000) / 100);
+  } else if (video3sViews > 0 && plays > 0) {
+    hold_rate = Math.min(100, Math.round((plays / video3sViews) * 10000) / 100);
   }
 
   return {
