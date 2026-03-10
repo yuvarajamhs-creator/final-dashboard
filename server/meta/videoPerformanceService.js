@@ -116,9 +116,26 @@ async function fetchVideoPerformanceFromMeta(adAccountId, accessToken, since, un
       getActionValueFromRow(row, "video_views") ||
       0;
     const p100Watched = getVideoCompletionFromRow(row);
+    const p50Watched =
+      getTopLevel(row, "video_p50_watched_actions") ||
+      getActionValueFromRow(row, "video_p50_watched_actions") ||
+      getActionValueFromRow(row, "video_p50_watched") ||
+      0;
+    const p75Watched =
+      getTopLevel(row, "video_p75_watched_actions") ||
+      getActionValueFromRow(row, "video_p75_watched_actions") ||
+      getActionValueFromRow(row, "video_p75_watched") ||
+      0;
     let hookRate = impressions > 0 ? (plays / impressions) * 100 : 0;
-    // Hold Rate = (ThruPlays or p75/p100) / 3-sec views × 100 when 3s available; else p100/plays
-    const holdNumerator = videoThruPlays > 0 ? videoThruPlays : p100Watched;
+    // Hold Rate = (p50 or p75) / 3-sec views × 100 — works for ALL campaign types (Conversions, Lead Gen, etc.). ThruPlay only exists for Video Views campaigns.
+    const holdNumerator =
+      p50Watched > 0
+        ? p50Watched
+        : p75Watched > 0
+          ? p75Watched
+          : videoThruPlays > 0
+            ? videoThruPlays
+            : p100Watched;
     let holdRate =
       video3sViews > 0 && holdNumerator > 0
         ? (holdNumerator / video3sViews) * 100

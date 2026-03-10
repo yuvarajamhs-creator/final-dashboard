@@ -119,6 +119,18 @@
   margin-right: 0;
 }
 
+/* Stable widths for Ad Account, Campaign, Ad Name filters so dropdown position doesn't shift when selection changes */
+.filter-card .dashboard-filter-col-stable {
+  min-width: 200px;
+  max-width: 280px;
+}
+@media (min-width: 768px) {
+  .filter-card .dashboard-filter-col-stable.dashboard-filter-col-campaign {
+    min-width: 220px;
+    max-width: 320px;
+  }
+}
+
 /* Ad Name filter column: prevent collapse when row wraps */
 .ad-name-filter-col {
   min-width: 160px;

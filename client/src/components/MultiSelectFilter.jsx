@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import './MultiSelectFilter.css';
 
 const DEFAULT_STATUS_COLORS = {
@@ -32,26 +33,38 @@ const MultiSelectFilter = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [openAbove, setOpenAbove] = useState(false);
+  const [menuPosition, setMenuPosition] = useState(null);
   const dropdownRef = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
 
-  // When opening, decide whether to show dropdown above or below to avoid viewport cut-off
-  useEffect(() => {
-    if (!isOpen || !dropdownRef.current) return;
-    const el = dropdownRef.current;
-    const rect = el.getBoundingClientRect();
+  // Position portaled menu with fixed coordinates from trigger — prevents shift when parent reflows
+  useLayoutEffect(() => {
+    if (!isOpen || !triggerRef.current) {
+      setMenuPosition(null);
+      return;
+    }
+    const rect = triggerRef.current.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
     const estimatedMenuHeight = 360;
-    setOpenAbove(spaceBelow < estimatedMenuHeight && rect.top > spaceBelow);
-  }, [isOpen]);
+    const openAbove = spaceBelow < estimatedMenuHeight && rect.top > spaceBelow;
+    const width = Math.min(Math.max(rect.width, 250), 320);
+    setMenuPosition({
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left,
+      width,
+      openAbove,
+    });
+  }, [isOpen, selectedValues, options]);
 
-  // Close dropdown when clicking outside
+  // Close dropdown when clicking outside (trigger area or portaled menu)
   useEffect(() => {
     const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setIsOpen(false);
-        setSearchTerm('');
-      }
+      if (dropdownRef.current && dropdownRef.current.contains(event.target)) return;
+      if (menuRef.current && menuRef.current.contains(event.target)) return;
+      setIsOpen(false);
+      setSearchTerm('');
     };
 
     if (isOpen) {
@@ -139,18 +152,31 @@ const MultiSelectFilter = ({
       </label>
       <div className="multi-select-dropdown">
         <button
+          ref={triggerRef}
           type="button"
           className={`multi-select-button ${isOpen ? 'open' : ''} ${disabled ? 'disabled' : ''}`}
           onClick={() => !disabled && setIsOpen(!isOpen)}
           disabled={disabled}
+          title={getDisplayText()}
         >
           <span className="multi-select-button-text">{getDisplayText()}</span>
           <i className={`fas fa-chevron-down multi-select-arrow ${isOpen ? 'rotated' : ''}`}></i>
         </button>
 
-        {isOpen && (
+        {isOpen && menuPosition && createPortal(
           <div
-            className={`multi-select-dropdown-menu ${openAbove ? 'open-above' : ''}`}
+            ref={menuRef}
+            className={`multi-select-dropdown-menu multi-select-dropdown-menu-portal ${menuPosition.openAbove ? 'open-above' : ''}`}
+            style={{
+              position: 'fixed',
+              left: menuPosition.left,
+              width: menuPosition.width,
+              minWidth: 250,
+              maxWidth: 320,
+              ...(menuPosition.openAbove
+                ? { bottom: window.innerHeight - menuPosition.top + 8, top: 'auto' }
+                : { top: menuPosition.bottom + 8, bottom: 'auto' }),
+            }}
           >
             {/* Search Input */}
             <div className="multi-select-search">
@@ -231,7 +257,8 @@ const MultiSelectFilter = ({
                 })
               )}
             </div>
-          </div>
+          </div>,
+          document.body
         )}
       </div>
     </div>

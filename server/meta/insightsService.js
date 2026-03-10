@@ -93,6 +93,16 @@ function getTopLevelActionValue(row, key) {
   return Number(v) || 0;
 }
 
+/** Get value for one action type (e.g. video_p50_watched_actions) from row/aggs/values. */
+function getActionCountForKey(row, aggs, values, key) {
+  const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
+  if (fromRow > 0) return fromRow;
+  const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
+  if (fromAggs > 0) return fromAggs;
+  const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
+  return fromValues > 0 ? fromValues : 0;
+}
+
 /** Get video "full views" (100% or best available completion) from row. Tries p100, p95, p75, p50, p25. */
 function getVideoCompletionCount(row, aggs, values) {
   const tryKeys = [
@@ -103,12 +113,8 @@ function getVideoCompletionCount(row, aggs, values) {
     'video_p25_watched_actions', 'video_p25_watched',
   ];
   for (const key of tryKeys) {
-    const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
-    if (fromRow > 0) return fromRow;
-    const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
-    if (fromAggs > 0) return fromAggs;
-    const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
-    if (fromValues > 0) return fromValues;
+    const v = getActionCountForKey(row, aggs, values, key);
+    if (v > 0) return v;
   }
   return 0;
 }
@@ -148,9 +154,11 @@ function enrichInsightsRow(row) {
     getActionValue(row, 'video_view') ||
     0;
   const fullViews = getVideoCompletionCount(row, aggs, values);
-  // Hold Rate = (ThruPlays or p75/p100 completion) / 3-sec views × 100 when 3s views available; else fallbacks
+  const p50 = getActionCountForKey(row, aggs, values, 'video_p50_watched_actions') || getActionCountForKey(row, aggs, values, 'video_p50_watched');
+  const p75 = getActionCountForKey(row, aggs, values, 'video_p75_watched_actions') || getActionCountForKey(row, aggs, values, 'video_p75_watched');
+  // Hold Rate = (p50 or p75) / 3-sec views × 100 — works for ALL campaign types; ThruPlay only for Video Views campaigns
   let hold_rate = 0;
-  const holdNumerator = videoThruPlays > 0 ? videoThruPlays : fullViews;
+  const holdNumerator = p50 > 0 ? p50 : (p75 > 0 ? p75 : (videoThruPlays > 0 ? videoThruPlays : fullViews));
   if (video3sViews > 0 && holdNumerator > 0) {
     hold_rate = Math.round((holdNumerator / video3sViews) * 10000) / 100;
   } else if (plays > 0 && fullViews > 0) {

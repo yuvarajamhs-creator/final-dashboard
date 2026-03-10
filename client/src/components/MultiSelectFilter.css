@@ -10,6 +10,7 @@
 
 .multi-select-button {
   width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -41,9 +42,13 @@
 
 .multi-select-button-text {
   flex: 1;
+  min-width: 0;
   text-align: left;
   color: #1e293b;
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .multi-select-arrow {
@@ -72,6 +77,12 @@
   overflow: hidden;
   min-width: 250px;
   animation: multi-select-menu-in 0.2s ease-out;
+}
+
+/* Portaled menu: position set by JS (fixed); prevents dropdown shift when parent reflows */
+.multi-select-dropdown-menu-portal {
+  position: fixed;
+  z-index: 1050;
 }
 
 /* Open upward when near bottom of viewport */

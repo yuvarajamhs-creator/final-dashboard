@@ -93,16 +93,22 @@ const getTopLevelActionValue = (row, key) => {
   return Number(v) || 0;
 };
 
+// Get value for one action type (e.g. video_p50_watched_actions) from row/aggs/values — for Hold Rate numerator
+const getActionCountForKey = (row, aggs, values, key) => {
+  const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
+  if (fromRow > 0) return fromRow;
+  const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
+  if (fromAggs > 0) return fromAggs;
+  const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
+  return fromValues > 0 ? fromValues : 0;
+};
+
 // Best available video completion (p100, p95, p75, p50, p25) so Hold Rate can show when Meta uses any of these
 const getVideoCompletionCount = (row, aggs, values) => {
   const tryKeys = ['video_p100_watched_actions', 'video_p100_watched', 'video_p95_watched_actions', 'video_p95_watched', 'video_p75_watched_actions', 'video_p75_watched', 'video_p50_watched_actions', 'video_p50_watched', 'video_p25_watched_actions', 'video_p25_watched'];
   for (const key of tryKeys) {
-    const fromRow = getTopLevelActionValue(row, key) || getActionValue(row, key);
-    if (fromRow > 0) return fromRow;
-    const fromAggs = (aggs && aggs[key]) ? Number(aggs[key]) || 0 : 0;
-    if (fromAggs > 0) return fromAggs;
-    const fromValues = (values && values[key]) ? Number(values[key]) || 0 : 0;
-    if (fromValues > 0) return fromValues;
+    const v = getActionCountForKey(row, aggs, values, key);
+    if (v > 0) return v;
   }
   return 0;
 };
@@ -407,10 +413,12 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       const spend = num(d.spend);
       const cpl = leadCount > 0 ? spend / leadCount : 0;
       
-      // Video metrics for Hook Rate and Hold Rate (Meta API: video_thruplay_watched_actions, video_3_sec_watched_actions)
+      // Video metrics for Hook Rate and Hold Rate (p50/p75 work for ALL campaign types; ThruPlay only for Video Views)
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
-      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || aggs['video_3_sec_watched_actions'] || 0;
+      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || aggs['video_3_sec_watched_actions'] || aggs['video_continuous_2_sec_watched_actions'] || aggs['video_15_sec_watched_actions'] || 0;
       const videoThruPlays = aggs['video_thruplay_watched_actions'] || aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+      const videoP50Watched = getActionCountForKey(d, aggs, values, 'video_p50_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p50_watched');
+      const videoP75Watched = getActionCountForKey(d, aggs, values, 'video_p75_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p75_watched');
 
       // Prefer server-enriched values when present (from insightsService.enrichInsightsRow), else compute client-side with same fallbacks as server
       const plays = (d.videoPlays != null && d.videoPlays !== '') ? num(d.videoPlays) : (getTopLevelActionValue(d, 'video_play_actions') || getTopLevelActionValue(d, 'video_play') || getTopLevelActionValue(d, 'video_view') || getActionValue(d, 'video_play_actions') || getActionValue(d, 'video_play') || getActionValue(d, 'video_view') || 0);
@@ -419,7 +427,7 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       let holdRate = serverHoldRate;
       if (holdRate == null || (typeof holdRate === 'number' && Number.isNaN(holdRate))) {
         holdRate = 0;
-        const holdNumerator = videoThruPlays > 0 ? videoThruPlays : fullViews;
+        const holdNumerator = videoP50Watched > 0 ? videoP50Watched : (videoP75Watched > 0 ? videoP75Watched : (videoThruPlays > 0 ? videoThruPlays : fullViews));
         if (video3sViews > 0 && holdNumerator > 0) {
           holdRate = parseFloat(((holdNumerator / video3sViews) * 100).toFixed(2));
         } else if (plays > 0 && fullViews > 0) {
@@ -428,12 +436,18 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
           holdRate = parseFloat(((videoThruPlays / plays) * 100).toFixed(2));
         } else if (videoViews > 0 && videoThruPlays > 0) {
           holdRate = parseFloat(((videoThruPlays / videoViews) * 100).toFixed(2));
-        } else if (video3sViews > 0 && videoThruPlays >= 0) {
+        } else if (video3sViews > 0 && videoThruPlays > 0) {
+          // Fixed: was `>= 0` which is always true and always produced 0/N = 0
           holdRate = parseFloat(((videoThruPlays / video3sViews) * 100).toFixed(2));
         } else if (video3sViews > 0 && videoViews > 0) {
           holdRate = parseFloat((Math.min(100, (videoViews / video3sViews) * 100)).toFixed(2));
         } else if (video3sViews > 0 && plays > 0) {
           holdRate = parseFloat((Math.min(100, (plays / video3sViews) * 100)).toFixed(2));
+        } else if (impressions > 0 && fullViews > 0) {
+          // Fallback: p100 / impressions (works for all campaign types when video play data is absent)
+          holdRate = parseFloat((Math.min(100, (fullViews / impressions) * 100)).toFixed(2));
+        } else if (impressions > 0 && videoThruPlays > 0) {
+          holdRate = parseFloat((Math.min(100, (videoThruPlays / impressions) * 100)).toFixed(2));
         }
       }
 
@@ -462,6 +476,8 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         holdRate: holdRate,
         videoPlays: plays,
         videoP100Watched: fullViews,
+        videoP50Watched: videoP50Watched,
+        videoP75Watched: videoP75Watched,
         videoViews: videoViews,
         video3sViews: video3sViews,
         videoThruPlays: videoThruPlays,
@@ -516,36 +532,77 @@ const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adId
 // Returns { hookRate, holdRate } or null on failure/no data.
 const fetchVideoPerformanceTotals = async (accountIds, since, until) => {
   if (!accountIds || accountIds.length === 0 || !since || !until) return null;
+
   const token = getAuthToken();
   const headers = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+
   let allRows = [];
+
+  // 1. Fetch data from all accounts
   const settled = await Promise.allSettled(
     accountIds.map((id) => {
       const aid = String(id).replace(/^act_/, "");
       if (!aid) return Promise.resolve([]);
+      
       const url = `${API_BASE}/api/meta/video-performance?adAccountId=${encodeURIComponent(aid)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
-      return fetch(url, { headers }).then((r) => r.json()).then((body) => (body.success && Array.isArray(body.data) ? body.data : []));
+      
+      return fetch(url, { headers })
+        .then((r) => r.json())
+        .then((body) => (body.success && Array.isArray(body.data) ? body.data : []))
+        .catch(() => []); // Error handling for individual calls
     })
   );
+
   settled.forEach((s) => {
-    if (s.status === "fulfilled" && Array.isArray(s.value)) allRows = allRows.concat(s.value);
+    if (s.status === "fulfilled" && Array.isArray(s.value)) {
+      allRows = allRows.concat(s.value);
+    }
   });
-  if (allRows.length === 0) return null;
+
+  if (allRows.length === 0) return { hookRate: 0, holdRate: 0 };
+
+  // 2. Initialize counters
   let totalImpressions = 0;
-  let weightedHook = 0;
   let totalPlays = 0;
-  let weightedHold = 0;
+  let weightedHookSum = 0;
+  let weightedHoldSum = 0;
+
+  // 3. Calculate Weighted Sums
   allRows.forEach((row) => {
     const imp = Number(row.impressions) || 0;
     const plays = Number(row.plays) || 0;
+
+    // Hook Rate — compute from 3s views / impressions since API doesn't return hookRate
+    const threeSecViews = Number(row.video_3_sec_watched_actions ?? row.video3SecViews ?? row.video3sViews ?? 0);
+    const hook = Number(row.hookRate ?? row.hook_rate) || (imp > 0 && threeSecViews > 0 ? threeSecViews / imp : 0);
+
+    // Hold Rate — compute from raw milestone fields since API doesn't return holdRate
+    const p25  = Number(row.video_p25_watched_actions  ?? row.videoP25  ?? 0);
+    const p50  = Number(row.video_p50_watched_actions  ?? row.videoP50  ?? 0);
+    const p75  = Number(row.video_p75_watched_actions  ?? row.videoP75  ?? 0);
+    const p100 = Number(row.video_p100_watched_actions ?? row.videoP100 ?? row.video_complete_watched_actions ?? 0);
+    const thruplay = Number(row.video_thruplay_watched_actions ?? row.videoThruplay ?? row.thruplay ?? 0);
+
+    const holdNumerator  = p50 > 0 ? p50 : (p75 > 0 ? p75 : (thruplay > 0 ? thruplay : (p100 > 0 ? p100 : p25)));
+    const holdDenominator = plays > 0 ? plays : (threeSecViews > 0 ? threeSecViews : imp);
+    const hold = holdDenominator > 0 && holdNumerator > 0 ? holdNumerator / holdDenominator : 0;
+
     totalImpressions += imp;
-    weightedHook += (Number(row.hookRate) || 0) * imp;
-    totalPlays += plays;
-    weightedHold += (Number(row.holdRate) || 0) * plays;
-  });
-  const hookRate = totalImpressions > 0 ? Math.round((weightedHook / totalImpressions) * 100) / 100 : 0;
-  const holdRate = totalPlays > 0 ? Math.round((weightedHold / totalPlays) * 100) / 100 : 0;
+    totalPlays += plays > 0 ? plays : imp;
+
+    weightedHookSum += hook * imp;
+    weightedHoldSum += hold * (plays > 0 ? plays : imp);  // ✅ now non-zero
+});
+
+  // 4. Final Average Calculation
+  // Important: No Math.round here! Let formatPerc handle the rounding.
+  const hookRate = totalImpressions > 0 ? weightedHookSum / totalImpressions : 0;
+  const holdRate = totalPlays > 0 ? weightedHoldSum / totalPlays : 0;
+
+  // Log for debugging - Check your console to see the raw numbers
+  console.log("Debug Metrics:", { totalPlays, weightedHoldSum, holdRate });
+
   return { hookRate, holdRate };
 };
 
@@ -2751,7 +2808,7 @@ export default function AdsDashboardBootstrap() {
     const t = {
       leads: 0, spend: 0, impressions: 0, clicks: 0, actions: {},
       onlineConv: 0, offlineConv: 0, l1Revenue: 0, l2Revenue: 0, totalRevenue: 0,
-      conversions: 0, videoViews: 0, video3sViews: 0, videoThruPlays: 0
+      conversions: 0, videoViews: 0, video3sViews: 0, videoThruPlays: 0, videoP50Watched: 0, videoP75Watched: 0
     };
     
     // Use filteredRows instead of data to respect all filters
@@ -2764,6 +2821,8 @@ export default function AdsDashboardBootstrap() {
       t.videoViews += r.videoViews || 0;
       t.video3sViews += r.video3sViews || 0;
       t.videoThruPlays += r.videoThruPlays || 0;
+      t.videoP50Watched += r.videoP50Watched || 0;
+      t.videoP75Watched += r.videoP75Watched || 0;
 
       // Online/Offline metrics (assumed mappings) - only calculate if sheets data not available
       const acts = r.actions || {};
@@ -2811,9 +2870,9 @@ export default function AdsDashboardBootstrap() {
         totalHookRateWeight += r.impressions;
       }
       
-      // For Hold Rate: weight by videoPlays (video_play_actions)
-      const plays = r.videoPlays || 0;
-      if (r.holdRate !== undefined && r.holdRate !== null && plays > 0) {
+      // For Hold Rate: weight by videoPlays, fallback to impressions if plays unavailable
+      const plays = r.videoPlays || r.impressions || 0;
+      if (r.holdRate != null && r.holdRate > 0 && plays > 0) {
         weightedHoldRate += r.holdRate * plays;
         totalHoldRateWeight += plays;
       }
@@ -2822,7 +2881,9 @@ export default function AdsDashboardBootstrap() {
     // Calculate weighted averages
     t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
                  (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
-    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight : 0;
+    const holdNum = t.videoP50Watched > 0 ? t.videoP50Watched : (t.videoP75Watched > 0 ? t.videoP75Watched : t.videoThruPlays);
+    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
+                 (t.video3sViews > 0 && holdNum > 0 ? parseFloat(((holdNum / t.video3sViews) * 100).toFixed(2)) : 0);
     
     t.roas = t.spend ? t.totalRevenue / t.spend : 0;
 
@@ -2883,6 +2944,8 @@ export default function AdsDashboardBootstrap() {
         videoThruPlays: 0,
         videoPlays: 0,
         videoP100Watched: 0,
+        videoP50Watched: 0,
+        videoP75Watched: 0,
         ad_status: row.ad_status || row.effective_status || 'ACTIVE',
         campaign_status: row.campaign_status || row.status || 'ACTIVE',
         hookRateSum: 0,
@@ -2900,14 +2963,17 @@ export default function AdsDashboardBootstrap() {
       cur.videoThruPlays += row.videoThruPlays || 0;
       cur.videoPlays += row.videoPlays || 0;
       cur.videoP100Watched += row.videoP100Watched || 0;
+      cur.videoP50Watched += row.videoP50Watched || 0;
+      cur.videoP75Watched += row.videoP75Watched || 0;
       if (row.hookRate != null && row.impressions > 0) {
         cur.hookRateSum += row.hookRate * row.impressions;
         cur.hookRateWeight += row.impressions;
       }
-      // Hold Rate: weight by videoPlays (holdRate is always a number now)
-      if ((row.holdRate ?? 0) >= 0 && (row.videoPlays || 0) > 0) {
-        cur.holdRateSum += row.holdRate * (row.videoPlays || 0);
-        cur.holdRateWeight += row.videoPlays || 0;
+      // Hold Rate: weight by videoPlays, fallback to impressions if plays unavailable
+      const holdWeight = (row.videoPlays || 0) > 0 ? row.videoPlays : (row.impressions || 0);
+      if ((row.holdRate ?? 0) > 0 && holdWeight > 0) {
+        cur.holdRateSum += row.holdRate * holdWeight;
+        cur.holdRateWeight += holdWeight;
       }
       adAgg.set(id, cur);
     });
@@ -2916,8 +2982,8 @@ export default function AdsDashboardBootstrap() {
       // Use same leads as cards: aggregated from insights (row.leads per ad). Table and cards show same data.
       const leadsCount = ad.leads || 0;
       const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
-      // Hold Rate = (ThruPlays or p100) / 3s views when available; else p100/plays or ThruPlays/videoViews
-      const holdNum = (ad.videoThruPlays || 0) > 0 ? ad.videoThruPlays : ad.videoP100Watched;
+      // Hold Rate = (p50 or p75) / 3s views — works for ALL campaign types; fallback ThruPlays/p100
+      const holdNum = (ad.videoP50Watched || 0) > 0 ? ad.videoP50Watched : (ad.videoP75Watched || 0) > 0 ? ad.videoP75Watched : (ad.videoThruPlays || 0) > 0 ? ad.videoThruPlays : ad.videoP100Watched;
       const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.video3sViews > 0 && holdNum > 0 ? parseFloat(((holdNum / ad.video3sViews) * 100).toFixed(2)) : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0)));
       return {
         ad_id: ad.ad_id,
@@ -4360,7 +4426,7 @@ export default function AdsDashboardBootstrap() {
                 )}
               </div>
             </div>
-            <div className="col-12 col-md-auto">
+            <div className="col-12 col-md-auto dashboard-filter-col-stable">
               <MultiSelectFilter
                 label="Ad Account"
                 emoji="🏢"
@@ -4381,7 +4447,7 @@ export default function AdsDashboardBootstrap() {
                 loading={adAccountsLoading}
               />
             </div>
-            <div className="col-12 col-md-auto">
+            <div className="col-12 col-md-auto dashboard-filter-col-stable dashboard-filter-col-campaign">
               <MultiSelectFilter
                 label="Campaign"
                 emoji="🎯"
@@ -4402,7 +4468,7 @@ export default function AdsDashboardBootstrap() {
                 loading={campaignsLoading}
               />
             </div>
-            <div className="col-12 col-md-auto ad-name-filter-col">
+            <div className="col-12 col-md-auto dashboard-filter-col-stable ad-name-filter-col">
               <MultiSelectFilter
                 label="Ad Name"
                 emoji="📢"
@@ -4525,7 +4591,7 @@ export default function AdsDashboardBootstrap() {
             <div className="kpi-card-body">
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
-              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</div>
+              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate )}</div>
               <small className="kpi-subtitle">100% Watched / Video Play</small>
             </div>
           </div>

@@ -20,7 +20,7 @@ export const PROJECT_AD_ACCOUNT_IDS = {
     '1990711071494666', // Integfarms 01
     '384231607347196',  // MHS Ad Account 2024
     '530615489114338',  // My Health School – Current
-    '1088771750122800', // My Health School 2025
+    '1088771750122808', // My Health School 2025
     '1398296668512853'  // Integfarm MHS 02
   ],
   'Paid Webinar': [
@@ -53,7 +53,7 @@ const ID_DISPLAY_NAME_FALLBACK = {
   '1990711071494666': 'Integfarms 01',
   '384231607347196': 'MHS Ad Account 2024',
   '530615489114338': 'My Health School – Current',
-  '1088771750122800': 'My Health School 2025',
+  '1088771750122808': 'My Health School 2025',
   '1398296668512853': 'Integfarm MHS 02',
   '332450076623103': 'MHS S-2',
   '1512093733230882': 'Integfarms 02',
