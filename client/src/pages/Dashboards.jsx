@@ -560,7 +560,8 @@ const fetchVideoPerformanceTotals = async (accountIds, since, until) => {
     }
   });
 
-  if (allRows.length === 0) return { hookRate: 0, holdRate: 0 };
+  // Return null (not zero) when API fails so ?? fallback to totals.hookRate/holdRate kicks in
+  if (allRows.length === 0) return null;
 
   // 2. Initialize counters
   let totalImpressions = 0;
@@ -573,35 +574,33 @@ const fetchVideoPerformanceTotals = async (accountIds, since, until) => {
     const imp = Number(row.impressions) || 0;
     const plays = Number(row.plays) || 0;
 
-    // Hook Rate — compute from 3s views / impressions since API doesn't return hookRate
+    // Hook Rate — use pre-computed hookRate from server; fallback to 3s/impressions
     const threeSecViews = Number(row.video_3_sec_watched_actions ?? row.video3SecViews ?? row.video3sViews ?? 0);
     const hook = Number(row.hookRate ?? row.hook_rate) || (imp > 0 && threeSecViews > 0 ? threeSecViews / imp : 0);
 
-    // Hold Rate — compute from raw milestone fields since API doesn't return holdRate
+    // Hold Rate — use pre-computed holdRate from server (server now calculates from p50/p75/thruplay/p100)
+    // Fallback: recalculate from raw milestone fields if server didn't pre-compute
+    const serverHold = Number(row.holdRate ?? row.hold_rate);
     const p25  = Number(row.video_p25_watched_actions  ?? row.videoP25  ?? 0);
     const p50  = Number(row.video_p50_watched_actions  ?? row.videoP50  ?? 0);
     const p75  = Number(row.video_p75_watched_actions  ?? row.videoP75  ?? 0);
-    const p100 = Number(row.video_p100_watched_actions ?? row.videoP100 ?? row.video_complete_watched_actions ?? 0);
+    const p100 = Number(row.video_p100_watched_actions ?? row.videoP100 ?? row.completedViews ?? 0);
     const thruplay = Number(row.video_thruplay_watched_actions ?? row.videoThruplay ?? row.thruplay ?? 0);
-
     const holdNumerator  = p50 > 0 ? p50 : (p75 > 0 ? p75 : (thruplay > 0 ? thruplay : (p100 > 0 ? p100 : p25)));
     const holdDenominator = plays > 0 ? plays : (threeSecViews > 0 ? threeSecViews : imp);
-    const hold = holdDenominator > 0 && holdNumerator > 0 ? holdNumerator / holdDenominator : 0;
+    const computedHold = holdDenominator > 0 && holdNumerator > 0 ? holdNumerator / holdDenominator : 0;
+    const hold = serverHold > 0 ? serverHold / 100 : computedHold;
 
     totalImpressions += imp;
     totalPlays += plays > 0 ? plays : imp;
 
     weightedHookSum += hook * imp;
-    weightedHoldSum += hold * (plays > 0 ? plays : imp);  // ✅ now non-zero
-});
+    weightedHoldSum += hold * (plays > 0 ? plays : imp);
+  });
 
   // 4. Final Average Calculation
-  // Important: No Math.round here! Let formatPerc handle the rounding.
   const hookRate = totalImpressions > 0 ? weightedHookSum / totalImpressions : 0;
   const holdRate = totalPlays > 0 ? weightedHoldSum / totalPlays : 0;
-
-  // Log for debugging - Check your console to see the raw numbers
-  console.log("Debug Metrics:", { totalPlays, weightedHoldSum, holdRate });
 
   return { hookRate, holdRate };
 };

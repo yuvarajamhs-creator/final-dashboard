@@ -58,7 +58,7 @@ async function fetchVideoPerformanceFromMeta(adAccountId, accessToken, since, un
   const params = {
     access_token: accessToken,
     level: "ad",
-    fields: "ad_id,ad_name,impressions,actions,action_values,video_play_actions,video_3_sec_watched_actions,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions",
+    fields: "ad_id,ad_name,impressions,actions,action_values,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions",
     limit: 1000,
   };
   if (since && until) {

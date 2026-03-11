@@ -1110,32 +1110,28 @@ const { startStorySnapshotsScheduler } = require('./jobs/storySnapshotsSync');
 let storySnapshotsIntervalId = null;
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  // Start leads sync scheduler
-  try {
-    leadsSyncIntervalId = startLeadsSyncScheduler();
-  } catch (error) {
-    console.error('Error starting leads sync scheduler:', error.message);
-  }
 
-  // Start insights sync scheduler (every 1 hour, fetch last 1.5h and upsert to DB)
-  try {
-    insightsSyncIntervalId = startInsightsSyncScheduler();
-  } catch (error) {
-    console.error('Error starting insights sync scheduler:', error.message);
-  }
+function startSchedulers() {
+  try { leadsSyncIntervalId = startLeadsSyncScheduler(); } catch (e) { console.error('Error starting leads sync scheduler:', e.message); }
+  try { insightsSyncIntervalId = startInsightsSyncScheduler(); } catch (e) { console.error('Error starting insights sync scheduler:', e.message); }
+  try { tokenRefreshIntervalId = startTokenRefreshScheduler(); } catch (e) { console.error('Error starting token refresh scheduler:', e.message); }
+  try { storySnapshotsIntervalId = startStorySnapshotsScheduler(); } catch (e) { console.error('Error starting story snapshots scheduler:', e.message); }
+}
 
-  // Start token refresh scheduler
-  try {
-    tokenRefreshIntervalId = startTokenRefreshScheduler();
-  } catch (error) {
-    console.error('Error starting token refresh scheduler:', error.message);
-  }
+function startServer(retries = 3) {
+  const server = app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+    startSchedulers();
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && retries > 0) {
+      console.warn(`Port ${PORT} in use — retrying in 2s... (${retries} attempts left)`);
+      setTimeout(() => startServer(retries - 1), 2000);
+    } else {
+      console.error('Server failed to start:', err.message);
+      process.exit(1);
+    }
+  });
+}
 
-  // Start story snapshots scheduler (every 6h; saves stories to instagram_story_snapshots for Top Stories by Views)
-  try {
-    storySnapshotsIntervalId = startStorySnapshotsScheduler();
-  } catch (error) {
-    console.error('Error starting story snapshots scheduler:', error.message);
-  }
-});
+startServer();
