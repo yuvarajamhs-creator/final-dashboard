@@ -333,7 +333,7 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       url += `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
     }
     if (useLive) {
-      url += '&live=1';
+      url += '&live=1&refresh=1';
     }
     // #region agent log
     fetch('http://127.0.0.1:7244/ingest/a31de4bd-79e0-4784-8d49-20b7d56ddf12',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Dashboards.jsx:fetchDashboardData',message:'insights request params',data:{from,to,campaignIds:campaignIds.slice(0,3),adIds:adIds.slice(0,3),allCampaigns,allAds,adAccountId,tzOffsetMin:new Date().getTimezoneOffset()},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1,H5'})}).catch(()=>{});
@@ -398,8 +398,8 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
     return data.map((d) => {
       const aggs = transformActions(d.actions || []);
       const values = transformActions(d.action_values || []);
-      // "leads" metric might be under actions with type "lead" or "on_facebook_lead"
-      const leadCount = aggs['lead'] || aggs['on_facebook_lead'] || aggs['onsite_conversion.lead_grouped'] || 0;
+      // Match Meta Ads Manager "Leads (Form)" - include all known lead action types
+      const leadCount = aggs['lead'] || aggs['leads'] || aggs['on_facebook_lead'] || aggs['onsite_conversion.lead_grouped'] || aggs['offsite_conversion.fb_pixel_lead'] || (Object.keys(aggs || {}).filter((k) => String(k).toLowerCase().includes('lead')).reduce((s, k) => s + (Number(aggs[k]) || 0), 0)) || 0;
       
       // Calculate conversions (purchase, complete_registration, etc.)
       const conversions = aggs['purchase'] || aggs['complete_registration'] || aggs['offsite_conversion.fb_pixel_purchase'] || 0;
@@ -1640,28 +1640,8 @@ export default function AdsDashboardBootstrap() {
         }
       }
 
-      // Filter to only include active campaigns and active ads
-      // API returns campaigns with all effective statuses
-      // This filters to show only active campaigns and ads
-      const filterByActiveStatus = (rowsToFilter) => {
-        return rowsToFilter.filter(r => {
-          // Get status values (may be null if API doesn't return them)
-          const campaignStatus = r.campaign_status || r.status;
-          const adStatus = r.ad_status || r.effective_status;
-          
-          // API returns all statuses, filter to show only active
-          // Only exclude if status is explicitly non-active
-          if (campaignStatus && campaignStatus !== 'ACTIVE') {
-            return false; // Explicitly not active
-          }
-          if (adStatus && adStatus !== 'ACTIVE') {
-            return false; // Explicitly not active
-          }
-          
-          // Include if: status is null (API filtered, assume active) OR status is ACTIVE
-          return true;
-        });
-      };
+      // Include all campaigns and ads (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.) to match Meta Ads Manager
+      const filterByActiveStatus = (rowsToFilter) => rowsToFilter;
 
       // Only filter by active campaigns if specific campaigns are selected
       // If all campaigns are selected, show all data without filtering
@@ -2756,14 +2736,7 @@ export default function AdsDashboardBootstrap() {
   const byCampaign = useMemo(() => {
     const map = new Map();
     data.forEach((r) => {
-      // API returns campaigns with all effective statuses
-      // Filter to only include active campaigns/ads
-      const campaignStatus = r.campaign_status || r.status;
-      const adStatus = r.ad_status || r.effective_status;
-      if (campaignStatus && campaignStatus !== 'ACTIVE') return;
-      if (adStatus && adStatus !== 'ACTIVE') return;
-      
-      // Include if status is null (API filtered) or ACTIVE
+      // Include all statuses (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.) to match Meta Ads Manager
       const key = r.campaign;
       const cur = map.get(key) || { campaign: key, leads: 0, spend: 0 };
       cur.leads += r.leads || 0;
@@ -2892,20 +2865,10 @@ export default function AdsDashboardBootstrap() {
 
   // Get all individual ad sets for Campaign Performance table (not aggregated)
   // Always show ALL campaigns and ad names regardless of filter selections
-  // Filter to only show active campaigns and active ads
+  // Include all statuses (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.) to match Meta Ads Manager
   const campaignPerformanceRows = useMemo(() => {
     return data
-      .filter(r => {
-        // Must have required fields
-        if (!r.ad_id || !r.ad_name || !r.campaign_id) return false;
-        // API returns campaigns with all effective statuses
-        // Filter to only include active campaigns/ads
-        const campaignStatus = r.campaign_status || r.status;
-        const adStatus = r.ad_status || r.effective_status;
-        if (campaignStatus && campaignStatus !== 'ACTIVE') return false;
-        if (adStatus && adStatus !== 'ACTIVE') return false;
-        return true; // Include if status is null (API filtered) or ACTIVE
-      })
+      .filter(r => r.ad_id && r.ad_name && r.campaign_id)
       .map(r => ({
         ...r,
         cpm: r.impressions > 0 ? (r.spend / (r.impressions / 1000)) : 0,
@@ -2923,10 +2886,7 @@ export default function AdsDashboardBootstrap() {
     const adAgg = new Map();
     sourceData.forEach(row => {
       if (!row.ad_id) return;
-      const campaignStatus = row.campaign_status || row.status;
-      const adStatus = row.ad_status || row.effective_status;
-      if (campaignStatus && campaignStatus !== 'ACTIVE') return;
-      if (adStatus && adStatus !== 'ACTIVE') return;
+      // Include all statuses (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.) to match Meta Ads Manager
 
       const id = row.ad_id;
       const cur = adAgg.get(id) || {
@@ -4497,7 +4457,10 @@ export default function AdsDashboardBootstrap() {
               </button>
               <button
                 className="refresh-btn btn-outline-primary"
-                onClick={() => { loadAdAccounts(true); load(true); }}
+                onClick={async () => {
+                  await loadAdAccounts(true);
+                  load(true);
+                }}
                 disabled={loading}
                 title="Fetch latest from Meta (includes ad accounts + video metrics e.g. Hook/Hold rate)"
               >

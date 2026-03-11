@@ -66,10 +66,9 @@ function cacheKey(from, to, adAccountId, campaignIdForKey, adIdForKey) {
   return `${from}|${to}|${adAccountId}|${campaignIdForKey || '*'}|${adIdForKey || '*'}`;
 }
 
-const STATUS_FILTER = [
-  { field: 'campaign.effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED', 'ARCHIVED', 'IN_REVIEW', 'REJECTED', 'PENDING_REVIEW', 'LEARNING', 'ENDED'] },
-  { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED', 'ARCHIVED', 'IN_REVIEW', 'REJECTED', 'PENDING_REVIEW', 'LEARNING', 'ENDED'] },
-];
+// No effective_status filter — matches Meta Ads Manager which shows all historical spend
+// regardless of the ad/campaign's current status (deleted, paused, campaign_paused, etc.)
+const STATUS_FILTER = [];
 
 /**
  * Get numeric value from a row's actions or action_values by action_type (for Hold Rate).
@@ -213,6 +212,7 @@ async function fetchInsightsFromMetaLive(opts) {
     isAllAds = true,
     campaignIds = [],
     adIds = [],
+    skipCache = false,
   } = opts || {};
 
   const normId = (id) => (id && String(id).replace(/^act_/, '')) || '';
@@ -225,9 +225,11 @@ async function fetchInsightsFromMetaLive(opts) {
   const adIdForKey = isAllAds ? '' : adIds.join(',');
   const key = cacheKey(from, to, accId, campaignIdForKey, adIdForKey);
   const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && hit.expires > now) {
-    return hit.data;
+  if (!skipCache) {
+    const hit = cache.get(key);
+    if (hit && hit.expires > now) {
+      return hit.data;
+    }
   }
 
   const run = async () => {
@@ -240,7 +242,7 @@ async function fetchInsightsFromMetaLive(opts) {
       level: 'ad',
       time_increment: 1,
       time_range: timeRange,
-      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop',
+      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_3_sec_watched_actions,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
       limit: 1000,
       filtering: JSON.stringify(filtering),
     };

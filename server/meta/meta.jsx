@@ -614,6 +614,7 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
               isAllAds,
               campaignIds,
               adIds,
+              skipCache,
             });
             if (liveData && liveData.length > 0) {
               await upsertInsights(adAccountId, liveData).catch((e) => console.warn("Insights upsert after live:", e.message));
