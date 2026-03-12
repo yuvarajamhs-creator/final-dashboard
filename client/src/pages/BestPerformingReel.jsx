@@ -507,16 +507,19 @@ export default function BestPerformingReel() {
         url: m.permalink || '#',
         title: (m.caption && m.caption.slice(0, 50)) || `${typeLabel} ${idx + 1}`,
         type: typeLabel,
-        views: m.views || m.video_views || 0,
+        views: m.views || m.video_views || m.reach || 0,
         watch: Math.round((Number(m.video_avg_time_watched || 0) * Number(m.video_views || m.views || 0))),
         likes: m.likes || 0,
-        shares: 0,
+        shares: m.shares ?? 0,
         comments: m.comments || 0,
+        saved: m.saved ?? 0,
+        follows: m.follows ?? 0,
         rate: m.hook_rate != null ? `${m.hook_rate}%` : 'N/A',
         avgView: m.video_avg_time_watched != null ? m.video_avg_time_watched.toFixed(2) : 'N/A',
         subChange: 0,
         imgColor: ['#fb923c', '#fdba74', '#fca5a5', '#86efac', '#fde047'][idx % 5],
         permalink: m.permalink,
+        thumbnail_url: m.thumbnail_url || m.media_url || null,
         timestamp: m.timestamp,
     });
     const livePostsList = mediaForTab.filter((m) => (m.product_type || 'FEED') === 'FEED').map((m, idx) => mediaToTableRow(m, idx, 'Post'));
@@ -527,14 +530,15 @@ export default function BestPerformingReel() {
         return mediaToTableRow(m, idx, typeLabel);
     });
     const topContentByViews = [...mediaForTab]
-        .sort((a, b) => (b.views || b.video_views || 0) - (a.views || a.video_views || 0))
+        .sort((a, b) => (b.views || b.video_views || b.reach || 0) - (a.views || a.video_views || a.reach || 0))
         .slice(0, 20)
         .map((m, idx) => ({
             id: m.media_id || idx,
             title: (m.caption && m.caption.slice(0, 50)) || `Content ${idx + 1}`,
             timestamp: m.timestamp,
             thumbnail_url: m.thumbnail_url || m.media_url || null,
-            views: m.views || m.video_views || 0,
+            // For Reels: views = 3s plays; for Posts/Stories: fall back to reach (unique accounts that saw the post)
+            views: m.views || m.video_views || m.reach || 0,
             likes: m.likes || 0,
             comments: m.comments || 0,
             shares: m.shares ?? 0,
@@ -569,7 +573,7 @@ export default function BestPerformingReel() {
             if (t < start || t > end) return;
             const dateStr = ts.split('T')[0];
             if (!byDate[dateStr]) byDate[dateStr] = { date: formatChartDate(dateStr), views: 0, eng: 0 };
-            byDate[dateStr].views += Number(m.views ?? m.video_views ?? 0) || 0;
+            byDate[dateStr].views += Number(m.views ?? m.video_views ?? m.reach ?? 0) || 0;
             byDate[dateStr].eng += Number(m.total_interactions ?? (m.likes || 0) + (m.comments || 0) + (m.saved || 0) + (m.shares || 0)) || 0;
         });
         return Object.keys(byDate).sort().map((k) => byDate[k]);
@@ -1418,7 +1422,7 @@ export default function BestPerformingReel() {
                                     {!reelPage
                                         ? 'Select a page to see top content by views.'
                                         : activeTab === 'stories'
-                                            ? 'Stories are available from Instagram for about 24 hours. We show saved snapshots when we have them—post a story and open this tab within 24h to capture it, or ensure the server story-snapshot job is running (META_PAGE_ID, every 6h).'
+                                            ? 'No stories found for this page in the selected time range. Instagram stories expire after 24 hours — try selecting a recent period when stories were posted.'
                                             : isFacebookSelected
                                                 ? (mediaInsights?.message || 'No video content for this Page. The Page may have no native videos or video posts, or insights may be unavailable.')
                                                 : 'No content for this period. Try a different time range or tab.'}

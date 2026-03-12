@@ -186,6 +186,8 @@ async function fetchMediaInsights(media, accessToken) {
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}/insights`;
 
   // Reels: views (3s+), reach, ig_reels_avg_watch_time. Do not request "plays" (deprecated in Meta v22.0+).
+  // ig_reels_video_follow_count is fetched in a SEPARATE call so that if it fails (error #100),
+  // it cannot zero-out the main metrics (views, likes, comments, saved, shares).
   if (reel) {
     const data = await rateLimiter.schedule(() =>
       graphApiGet(baseUrl, {
@@ -211,6 +213,7 @@ async function fetchMediaInsights(media, accessToken) {
         comments: 0,
         saved: 0,
         shares: 0,
+        follows: 0,
         hook_rate: null,
         hold_rate: null,
         availability: "not_supported",
@@ -232,6 +235,18 @@ async function fetchMediaInsights(media, accessToken) {
     const comments = metrics.comments ?? 0;
     const saved = metrics.saved ?? 0;
     const shares = metrics.shares ?? 0;
+
+    // Fetch follow count in an isolated call — failure here must not affect main metrics above
+    let follows = 0;
+    const followData = await rateLimiter.schedule(() =>
+      graphApiGet(baseUrl, {
+        metric: "ig_reels_video_follow_count",
+        access_token: accessToken,
+      })
+    );
+    if (followData && Array.isArray(followData.data) && followData.data.length > 0) {
+      follows = extractMetricValue(followData.data[0]);
+    }
 
     const totalPlays = Number(plays) || 0;
     const hook_rate = calcHookRate(views, totalPlays) ?? (reach > 0 ? calcHookRate(views, reach) : null);
@@ -256,6 +271,7 @@ async function fetchMediaInsights(media, accessToken) {
       comments,
       saved,
       shares,
+      follows,
       hook_rate,
       hold_rate,
       availability: "available",

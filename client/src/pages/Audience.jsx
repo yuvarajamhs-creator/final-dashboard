@@ -65,11 +65,13 @@ const fetchPageInsights = async (pageId, from, to) => {
     return json.data || null;
 };
 
-const fetchDemographicInsights = async (from, to) => {
+const fetchDemographicInsights = async (from, to, pageId) => {
     const token = getAuthToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(`${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country`, { headers });
+    let url = `${API_BASE}/api/meta/insights/demographics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&breakdowns=age,gender,country`;
+    if (pageId) url += `&page_id=${encodeURIComponent(pageId)}`;
+    const res = await fetch(url, { headers });
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.details || err.error || res.statusText);
@@ -408,7 +410,7 @@ export default function Audience() {
         return () => { cancelled = true; };
     }, [isInstagramSelected, audiencePage]);
 
-    // Fetch demographic insights (age/gender, country) when time range is set
+    // Fetch demographic insights (age/gender, country) when time range is set — pass page_id when Facebook page selected
     useEffect(() => {
         if (!contentFilters.startDate || !contentFilters.endDate) {
             setDemographicsData(null);
@@ -418,7 +420,8 @@ export default function Audience() {
         let cancelled = false;
         setDemographicsLoading(true);
         setDemographicsError(null);
-        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate)
+        const pageId = isFacebookSelected && audiencePage ? (audiencePage?.id ?? audiencePage) : null;
+        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate, pageId)
             .then((payload) => {
                 if (!cancelled) {
                     setDemographicsData({
@@ -435,7 +438,7 @@ export default function Audience() {
                 if (!cancelled) setDemographicsLoading(false);
             });
         return () => { cancelled = true; };
-    }, [contentFilters.startDate, contentFilters.endDate]);
+    }, [contentFilters.startDate, contentFilters.endDate, isFacebookSelected, audiencePage]);
 
     // --- MOCK DATA (fallbacks when API has no data) ---
     const _initialData = [

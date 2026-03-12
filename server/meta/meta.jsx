@@ -710,7 +710,7 @@ router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) =>
       });
     }
 
-    const { from, to, breakdowns, ad_account_id, is_all_campaigns, is_all_ads, campaign_id, ad_id } = req.query;
+    const { from, to, breakdowns, ad_account_id, is_all_campaigns, is_all_ads, campaign_id, ad_id, page_id } = req.query;
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     let fromDate = from;
     let toDate = to;
@@ -735,6 +735,7 @@ router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) =>
     const isAllAds = is_all_ads === '1' || is_all_ads === 'true';
     const campaignIds = (campaign_id || '').split(',').map((s) => s.trim()).filter(Boolean);
     const adIds = (ad_id || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const pageIdFilter = page_id ? String(page_id).trim() : null;
 
     const payload = await fetchDemographicInsightsSplit({
       accessToken: credentials.accessToken,
@@ -746,6 +747,7 @@ router.get("/insights/demographics", optionalAuthMiddleware, async (req, res) =>
       isAllAds,
       campaignIds,
       adIds,
+      pageId: pageIdFilter,
     });
 
     return res.json(payload);
@@ -1981,16 +1983,39 @@ router.get("/facebook-page-audience", optionalAuthMiddleware, async (req, res) =
       }
     };
 
-    const [fansData, cityData, countryData, genderAgeData] = await Promise.all([
-      fetchOneMetric("page_fans"),
-      fetchOneMetric("page_fans_city"),
-      fetchOneMetric("page_fans_country"),
+    const fetchMediaViewByFollowers = async () => {
+      try {
+        const { data } = await axios.get(insightsUrl, {
+          params: {
+            access_token: accessToken,
+            metric: "page_media_view",
+            period,
+            since,
+            until,
+            breakdown: "is_from_followers",
+          },
+          timeout: 15000,
+        });
+        return data.data || [];
+      } catch (err) {
+        if (err?.response?.data?.error?.code === 100) {
+          console.warn("[Facebook Page Audience] page_media_view+breakdown not supported:", err?.response?.data?.error?.message);
+        }
+        return [];
+      }
+    };
+
+    const [fansData, cityData, countryData, genderAgeData, mediaViewData] = await Promise.all([
+      fetchOneMetric("page_follows"),
+      fetchOneMetric("page_follows_city"),
+      fetchOneMetric("page_follows_country"),
       fetchOneMetric("page_fans_gender_age"),
+      fetchMediaViewByFollowers(),
     ]);
 
     let followerCount = 0;
     if (fansData && fansData.length > 0) {
-      const metric = fansData.find((m) => m.name === "page_fans");
+      const metric = fansData.find((m) => m.name === "page_follows");
       if (metric && metric.values && metric.values.length > 0) {
         const last = metric.values[metric.values.length - 1];
         followerCount = parseInt(last.value || 0, 10) || 0;
@@ -2013,9 +2038,46 @@ router.get("/facebook-page-audience", optionalAuthMiddleware, async (req, res) =
       }
     }
 
+    let followerValue = followerCount;
+    let nonFollowerValue = 0;
+    let totalValue = followerCount;
+    if (mediaViewData && mediaViewData.length > 0) {
+      let fromFollowersSum = 0;
+      let fromNonFollowersSum = 0;
+      mediaViewData.forEach((entry) => {
+        const vals = entry.values || [];
+        const b = entry.breakdowns || entry.breakdown || [];
+        const bVal = Array.isArray(b) && b[0] ? (b[0].is_from_followers ?? b[0]["is_from_followers"]) : (b && b.is_from_followers);
+        const nameMatch = (entry.name || "").match(/is_from_followers[=:]\s*(\w+)/i);
+        const isFromFollowers = bVal !== undefined ? (bVal === "Yes" || bVal === true || String(bVal).toLowerCase() === "true") : (nameMatch && nameMatch[1] && /yes|true/i.test(nameMatch[1]));
+        vals.forEach((v) => {
+          const val = v.value;
+          if (typeof val === "number") {
+            if (isFromFollowers) fromFollowersSum += val;
+            else fromNonFollowersSum += val;
+          } else if (val && typeof val === "object" && !Array.isArray(val)) {
+            Object.entries(val).forEach(([k, n]) => {
+              const num = parseInt(n, 10) || 0;
+              if (k === "Yes" || k === "true" || String(k).toLowerCase() === "yes" || k === "1") fromFollowersSum += num;
+              else if (k === "No" || k === "false" || String(k).toLowerCase() === "no" || k === "0") fromNonFollowersSum += num;
+            });
+          }
+        });
+      });
+      if (fromFollowersSum > 0 || fromNonFollowersSum > 0) {
+        followerValue = fromFollowersSum;
+        nonFollowerValue = fromNonFollowersSum;
+        totalValue = fromFollowersSum + fromNonFollowersSum;
+        if (followerValue === 0 && followerCount > 0 && nonFollowerValue > 0) {
+          followerValue = followerCount;
+          totalValue = followerCount + nonFollowerValue;
+        }
+      }
+    }
+
     const city_breakdown = [];
     if (cityData && cityData.length > 0) {
-      const metric = cityData.find((m) => m.name === "page_fans_city");
+      const metric = cityData.find((m) => m.name === "page_follows_city");
       if (metric && metric.values && metric.values.length > 0) {
         const last = metric.values[metric.values.length - 1];
         const val = last.value;
@@ -2031,7 +2093,7 @@ router.get("/facebook-page-audience", optionalAuthMiddleware, async (req, res) =
 
     const country_breakdown = [];
     if (countryData && countryData.length > 0) {
-      const metric = countryData.find((m) => m.name === "page_fans_country");
+      const metric = countryData.find((m) => m.name === "page_follows_country");
       if (metric && metric.values && metric.values.length > 0) {
         const last = metric.values[metric.values.length - 1];
         const val = last.value;
@@ -2074,9 +2136,9 @@ router.get("/facebook-page-audience", optionalAuthMiddleware, async (req, res) =
     return res.json({
       data: {
         follower_count: followerCount,
-        follower_value: followerCount,
-        non_follower_value: 0,
-        total_value: followerCount,
+        follower_value: followerValue,
+        non_follower_value: nonFollowerValue,
+        total_value: totalValue,
         age_breakdown,
         gender_breakdown,
         city_breakdown,
@@ -3163,186 +3225,260 @@ router.get("/facebook/media-insights", optionalAuthMiddleware, async (req, res) 
         message: "Page not accessible with current token.",
       });
     }
-    const baseUrl = `https://graph.facebook.com/${META_API_VERSION}`;
+    const baseUrl = `https://graph.facebook.com/${META_PAGE_INSIGHTS_API_VERSION}`;
     let metaErrorMessage = null;
+
+    const extractInsightValue = (metricsArr) => {
+      if (!Array.isArray(metricsArr) || metricsArr.length === 0) return 0;
+      const m0 = metricsArr[0];
+      if (m0.total_value != null && m0.total_value.value != null) {
+        return parseInt(String(m0.total_value.value), 10) || 0;
+      }
+      if (m0.values && m0.values.length > 0 && m0.values[0].value != null) {
+        return parseInt(String(m0.values[0].value), 10) || 0;
+      }
+      return 0;
+    };
+
+    const media = [];
+    let totalViews = 0;
+    const pushMedia = (item) => {
+      totalViews += item.views || 0;
+      media.push(item);
+    };
+
+    // --- Engagement for PAGE POSTS (Post nodes support reactions, comments, shares) ---
+    const fetchPostEngagement = async (postId) => {
+      let likes = 0, comments = 0, shares = 0;
+      try {
+        const engRes = await axios.get(`${baseUrl}/${postId}`, {
+          params: { access_token: accessToken, fields: "reactions.summary(true).limit(0),comments.summary(true).limit(0),shares" },
+          timeout: 8000,
+          validateStatus: () => true,
+        });
+        if (!engRes.data?.error) {
+          const eng = engRes.data || {};
+          likes = parseInt(eng?.reactions?.summary?.total_count || 0, 10) || 0;
+          comments = parseInt(eng?.comments?.summary?.total_count || 0, 10) || 0;
+          shares = parseInt(eng?.shares?.count ?? 0, 10) || 0;
+        } else {
+          // Fallback for post engagement
+          const fallbackRes = await axios.get(`${baseUrl}/${postId}`, {
+            params: { access_token: accessToken, fields: "likes.summary(true),comments.summary(true),shares" },
+            timeout: 8000,
+            validateStatus: () => true,
+          });
+          if (!fallbackRes.data?.error) {
+            const eng = fallbackRes.data || {};
+            likes = parseInt(eng?.likes?.summary?.total_count || 0, 10) || 0;
+            comments = parseInt(eng?.comments?.summary?.total_count || 0, 10) || 0;
+            shares = parseInt(eng?.shares?.count ?? 0, 10) || 0;
+          }
+        }
+      } catch (_) { /* silent */ }
+      return { likes, comments, shares };
+    };
+
+    // --- Engagement for VIDEO nodes (Video nodes only support likes + comments, NOT reactions/shares) ---
+    const fetchVideoEngagement = async (videoId) => {
+      let likes = 0, comments = 0;
+      try {
+        const engRes = await axios.get(`${baseUrl}/${videoId}`, {
+          params: { access_token: accessToken, fields: "likes.summary(true),comments.summary(true)" },
+          timeout: 8000,
+          validateStatus: () => true,
+        });
+        if (!engRes.data?.error) {
+          const eng = engRes.data || {};
+          likes = parseInt(eng?.likes?.summary?.total_count || 0, 10) || 0;
+          comments = parseInt(eng?.comments?.summary?.total_count || 0, 10) || 0;
+        }
+      } catch (_) { /* silent */ }
+      return { likes, comments, shares: 0 };
+    };
+
+    // --- Video views via video_insights (works in v24.0) ---
+    const fetchVideoViewsById = async (videoId) => {
+      if (!videoId) return 0;
+      try {
+        const vidInsRes = await axios.get(`${baseUrl}/${videoId}/video_insights`, {
+          params: { access_token: accessToken, metric: "total_video_views", period: "lifetime" },
+          timeout: 8000,
+          validateStatus: () => true,
+        });
+        if (!vidInsRes.data?.error) {
+          const val = extractInsightValue(vidInsRes.data?.data);
+          if (val > 0) return val;
+        }
+      } catch (_) { /* silent */ }
+      return 0;
+    };
+
+    // ====================================================================
+    // STEP 1: Fetch /published_posts (all post types with engagement)
+    //   - Only use fields that work in v24.0 (NO object_id, type, status_type)
+    //   - attachments is used to identify video posts and extract target video ID
+    // ====================================================================
+    let postsData = [];
+    const postsRes = await axios.get(`${baseUrl}/${pageId}/published_posts`, {
+      params: {
+        access_token: accessToken,
+        fields: "id,permalink_url,created_time,message,full_picture",
+        limit: 25,
+      },
+      timeout: 15000,
+      validateStatus: () => true,
+    });
+    if (postsRes.data?.error) {
+      metaErrorMessage = postsRes.data.error.message || "Published posts API error";
+      console.warn("[Facebook media-insights] /published_posts error:", metaErrorMessage);
+    }
+    postsData = postsRes.data?.data || [];
+
+    // ====================================================================
+    // STEP 2: Fetch /videos (gives video IDs + views via video_insights)
+    // ====================================================================
+    let videosData = [];
     const videosRes = await axios.get(`${baseUrl}/${pageId}/videos`, {
       params: {
         access_token: accessToken,
-        fields: "id,permalink_url,created_time,title,description,length,likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
+        fields: "id,permalink_url,created_time,title,description,picture",
         limit: 25,
       },
       timeout: 15000,
       validateStatus: () => true,
     });
     if (videosRes.data?.error) {
-      metaErrorMessage = videosRes.data.error.message || "Videos API error";
-      console.warn("[Facebook media-insights] /videos error:", metaErrorMessage, "code:", videosRes.data.error.code);
+      if (!metaErrorMessage) metaErrorMessage = videosRes.data.error.message || "Videos API error";
+      console.warn("[Facebook media-insights] /videos error:", videosRes.data.error.message);
     }
-    let videoList = videosRes.data?.data || [];
-    const media = [];
-    let totalViews = 0;
+    videosData = videosRes.data?.data || [];
 
-    const pushMedia = (item) => {
-      totalViews += item.views || 0;
-      media.push(item);
-    };
-
-    if (Array.isArray(videoList) && videoList.length > 0) {
-      for (const v of videoList) {
-        let views = 0;
-        try {
-          const insRes = await axios.get(`${baseUrl}/${v.id}/video_insights`, {
-            params: {
-              access_token: accessToken,
-              metric: "total_video_views",
-              period: "lifetime",
-            },
-            timeout: 8000,
-            validateStatus: () => true,
-          });
-          const metrics = insRes.data?.data;
-          if (Array.isArray(metrics) && metrics.length > 0) {
-            const m0 = metrics[0];
-            if (m0.total_value != null && m0.total_value.value != null) {
-              views = parseInt(String(m0.total_value.value), 10) || 0;
-            } else if (m0.values && m0.values.length > 0 && m0.values[0].value != null) {
-              views = parseInt(String(m0.values[0].value), 10) || 0;
-            }
-          }
-        } catch (_) {
-          /* ignore per-video insight failure */
+    // ====================================================================
+    // STEP 3: Get views for ALL videos in parallel (video_insights works!)
+    // ====================================================================
+    const videoViewsMap = {};
+    const videoDataMap = {};
+    if (videosData.length > 0) {
+      const viewResults = await Promise.allSettled(
+        videosData.map(async (v) => {
+          const views = await fetchVideoViewsById(v.id);
+          return { id: v.id, views, video: v };
+        })
+      );
+      for (const r of viewResults) {
+        if (r.status === "fulfilled" && r.value) {
+          videoViewsMap[r.value.id] = r.value.views;
+          videoDataMap[r.value.id] = r.value.video;
         }
-        const likes = parseInt(v.likes?.summary?.total_count || 0, 10) || 0;
-        const comments = parseInt(v.comments?.summary?.total_count || 0, 10) || 0;
-        const shares = parseInt(v.shares?.count ?? 0, 10) || 0;
-        pushMedia({
-          media_id: v.id,
-          permalink: v.permalink_url || null,
-          timestamp: v.created_time || null,
-          caption: (v.title || v.description || "").slice(0, 500) || null,
-          media_type: "VIDEO",
-          product_type: "FEED",
-          views,
-          video_views: views,
-          likes,
-          comments,
-          shares,
-          total_interactions: likes + comments + shares,
-          availability: "available",
-        });
       }
     }
 
-    // Fallback: when /videos is empty, use published_posts with video attachments (video-in-posts)
-    if (media.length === 0) {
-      const postsRes = await axios.get(`${baseUrl}/${pageId}/published_posts`, {
-        params: {
-          access_token: accessToken,
-          fields: "id,permalink_url,created_time,message,full_picture,attachments{media_type,type,target{id}},likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
-          limit: 25,
-        },
-        timeout: 15000,
-        validateStatus: () => true,
-      });
-      if (postsRes.data?.error) {
-        metaErrorMessage = postsRes.data.error.message || "Published posts API error";
-        console.warn("[Facebook media-insights] /published_posts error:", metaErrorMessage, "code:", postsRes.data.error.code);
+    // Build a set to track which video IDs were matched to posts
+    const matchedVideoIds = new Set();
+
+    // ====================================================================
+    // STEP 4: Process published_posts — get engagement + match video views
+    // ====================================================================
+    if (postsData.length > 0) {
+      const postResults = await Promise.allSettled(
+        postsData.map(async (p) => {
+          // Determine if this post is a video: check if any video in videosData
+          // was created at the same time or has a matching permalink
+          const postTime = p.created_time ? new Date(p.created_time).getTime() : 0;
+          const postPermalink = (p.permalink_url || "").replace(/\/$/, "");
+
+          let matchedVideoId = null;
+          let matchedViews = 0;
+
+          for (const [vId, vData] of Object.entries(videoDataMap)) {
+            const vTime = vData.created_time ? new Date(vData.created_time).getTime() : 0;
+            const vPermalink = (vData.permalink_url || "").replace(/\/$/, "");
+            // Match by permalink or by timestamp within 60 seconds
+            if ((vPermalink && postPermalink && vPermalink === postPermalink) ||
+                (postTime && vTime && Math.abs(postTime - vTime) < 60000)) {
+              matchedVideoId = vId;
+              matchedViews = videoViewsMap[vId] || 0;
+              break;
+            }
+          }
+
+          if (matchedVideoId) matchedVideoIds.add(matchedVideoId);
+
+          const engagement = await fetchPostEngagement(p.id);
+
+          return {
+            media_id: p.id,
+            permalink: p.permalink_url || null,
+            timestamp: p.created_time || null,
+            caption: (p.message || "").slice(0, 500) || null,
+            media_type: matchedVideoId ? "VIDEO" : "IMAGE",
+            product_type: "FEED",
+            thumbnail_url: p.full_picture || null,
+            views: matchedViews,
+            video_views: matchedViews,
+            likes: engagement.likes,
+            comments: engagement.comments,
+            shares: engagement.shares,
+            saved: 0,
+            follows: 0,
+            reach: 0,
+            total_interactions: engagement.likes + engagement.comments + engagement.shares,
+            availability: "available",
+          };
+        })
+      );
+
+      for (const result of postResults) {
+        if (result.status === "fulfilled" && result.value) {
+          pushMedia(result.value);
+        }
       }
-      const posts = postsRes.data?.data || [];
-      const isVideoAttachment = (a) => {
-        const t = (a.media_type || a.type || "").toLowerCase();
-        return t === "video" || t.includes("video");
-      };
-      const videoPosts = posts.filter((p) => {
-        const att = p.attachments?.data || [];
-        return att.some(isVideoAttachment);
-      });
-      for (const p of videoPosts) {
-        let views = 0;
-        const videoAttachment = (p.attachments?.data || []).find(isVideoAttachment);
-        const videoId = videoAttachment?.target?.id || null;
-        if (videoId) {
-          try {
-            const vidInsRes = await axios.get(`${baseUrl}/${videoId}/video_insights`, {
-              params: {
-                access_token: accessToken,
-                metric: "total_video_views",
-                period: "lifetime",
-              },
-              timeout: 8000,
-              validateStatus: () => true,
-            });
-            const metrics = vidInsRes.data?.data;
-            if (Array.isArray(metrics) && metrics.length > 0) {
-              const m0 = metrics[0];
-              if (m0.total_value != null && m0.total_value.value != null) {
-                views = parseInt(String(m0.total_value.value), 10) || 0;
-              } else if (m0.values && m0.values.length > 0 && m0.values[0].value != null) {
-                views = parseInt(String(m0.values[0].value), 10) || 0;
-              }
-            }
-          } catch (_) {
-            /* fall through to post insights */
-          }
+    }
+
+    // ====================================================================
+    // STEP 5: Add unmatched videos (videos not in published_posts)
+    //   - Video nodes use different engagement fields (likes, comments only)
+    // ====================================================================
+    const unmatchedVideoIds = Object.keys(videoDataMap).filter((id) => !matchedVideoIds.has(id));
+    if (unmatchedVideoIds.length > 0) {
+      const unmatchedResults = await Promise.allSettled(
+        unmatchedVideoIds.map(async (vId) => {
+          const v = videoDataMap[vId];
+          const views = videoViewsMap[vId] || 0;
+          const engagement = await fetchVideoEngagement(vId);
+
+          return {
+            media_id: vId,
+            permalink: v.permalink_url || null,
+            timestamp: v.created_time || null,
+            caption: (v.title || v.description || "").slice(0, 500) || null,
+            media_type: "VIDEO",
+            product_type: "FEED",
+            thumbnail_url: v.picture || null,
+            views,
+            video_views: views,
+            likes: engagement.likes,
+            comments: engagement.comments,
+            shares: engagement.shares,
+            saved: 0,
+            follows: 0,
+            reach: 0,
+            total_interactions: engagement.likes + engagement.comments + engagement.shares,
+            availability: "available",
+          };
+        })
+      );
+
+      for (const result of unmatchedResults) {
+        if (result.status === "fulfilled" && result.value) {
+          pushMedia(result.value);
         }
-        if (views === 0) {
-          try {
-            const insRes = await axios.get(`${baseUrl}/${p.id}/insights`, {
-              params: {
-                access_token: accessToken,
-                metric: "post_video_views,post_video_views_organic,post_video_views_paid,post_impressions",
-                period: "lifetime",
-              },
-              timeout: 8000,
-              validateStatus: () => true,
-            });
-            const metrics = insRes.data?.data || [];
-            let organic = 0;
-            let paid = 0;
-            let impressions = 0;
-            for (const m of metrics) {
-              const name = (m.name || "").toLowerCase();
-              const fromTotal = m.total_value != null && m.total_value.value != null;
-              const val = fromTotal
-                ? parseInt(String(m.total_value.value), 10) || 0
-                : (m.values && m.values[0] && m.values[0].value != null ? parseInt(String(m.values[0].value), 10) : 0);
-              if (name === "post_video_views" && val > 0) {
-                views = val;
-                break;
-              }
-              if (name === "post_video_views_organic") organic = val;
-              if (name === "post_video_views_paid") paid = val;
-              if (name === "post_impressions") impressions = val;
-            }
-            if (views === 0 && (organic > 0 || paid > 0)) views = organic + paid;
-            if (views === 0 && impressions > 0) views = impressions;
-          } catch (_) {
-            /* ignore */
-          }
-        }
-        const likes = parseInt(p.likes?.summary?.total_count || 0, 10) || 0;
-        const comments = parseInt(p.comments?.summary?.total_count || 0, 10) || 0;
-        const shares = parseInt(p.shares?.count ?? 0, 10) || 0;
-        pushMedia({
-          media_id: p.id,
-          permalink: p.permalink_url || null,
-          timestamp: p.created_time || null,
-          caption: (p.message || "").slice(0, 500) || null,
-          media_type: "VIDEO",
-          product_type: "FEED",
-          views,
-          video_views: views,
-          likes,
-          comments,
-          shares,
-          total_interactions: likes + comments + shares,
-          availability: "available",
-          thumbnail_url: p.full_picture || null,
-        });
       }
     }
 
     media.sort((a, b) => (b.views || 0) - (a.views || 0));
+    console.log("[Facebook media-insights] page", pageId, "→", postsData.length, "posts,", videosData.length, "videos →", media.length, "items, totalViews:", totalViews);
     const payload = {
       media,
       byContentType: {
@@ -3358,9 +3494,10 @@ router.get("/facebook/media-insights", optionalAuthMiddleware, async (req, res) 
     res.json(payload);
   } catch (err) {
     console.error("[Facebook media-insights] Error:", err.message);
-    res.status(500).json({
-      error: "Failed to fetch Facebook video content",
-      details: err.message,
+    res.status(200).json({
+      media: [],
+      byContentType: { all: { views: 0 }, posts: { views: 0 }, reels: { views: 0 }, stories: { views: 0 } },
+      message: "Unable to load Facebook content. Please try again.",
     });
   }
 });
