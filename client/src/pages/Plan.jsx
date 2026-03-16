@@ -13,15 +13,15 @@ function getAuthHeaders() {
 export default function Plan() {
     // --- STATE ---
     const [tasks, setTasks] = useState([
-        { id: '1', title: "Video To Darshak", subtitle: "Video reach to target audience", current: 0, target: 100, unit: "%", icon: "fas fa-video", iconColor: "#6366f1", isCompleted: false },
-        { id: '2', title: "CTR", subtitle: "Click-through rate", current: 0, target: 100, unit: "%", icon: "fas fa-mouse-pointer", iconColor: "#0ea5e9", isCompleted: false },
-        { id: '3', title: "Hook Rate", subtitle: "Engagement hook performance", current: 0, target: 100, unit: "%", icon: "fas fa-fish", iconColor: "#f59e0b", isCompleted: false },
-        { id: '4', title: "Hold Rate", subtitle: "Audience retention hold rate", current: 0, target: 100, unit: "%", icon: "fas fa-hand-holding", iconColor: "#8b5cf6", isCompleted: false },
-        { id: '5', title: "Whats App Efficiency", subtitle: "WhatsApp conversion efficiency", current: 0, target: 100, unit: "%", icon: "fab fa-whatsapp", iconColor: "#25D366", isCompleted: false },
-        { id: '6', title: "Diabetes Ratio", subtitle: "Diabetes segment ratio", current: 0, target: 100, unit: "%", icon: "fas fa-chart-pie", iconColor: "#ec4899", isCompleted: false },
-        { id: '7', title: "Working Professionals", subtitle: "Working professionals segment", current: 0, target: 100, unit: "%", icon: "fas fa-briefcase", iconColor: "#0f766e", isCompleted: false },
-        { id: '8', title: "Optin Rate for Paid", subtitle: "Paid campaign opt-in rate", current: 0, target: 100, unit: "%", icon: "fas fa-ad", iconColor: "#dc2626", isCompleted: false },
-        { id: '9', title: "Optin Rate for YT", subtitle: "YouTube opt-in rate", current: 0, target: 100, unit: "%", icon: "fab fa-youtube", iconColor: "#FF0000", isCompleted: false },
+        { id: '1', title: "Video To Darshak", subtitle: "Video reach to target audience", current: 0, target: 15, unit: "", icon: "fas fa-video", iconColor: "#6366f1", isCompleted: false },
+        { id: '2', title: "CTR", subtitle: "Click-through rate", current: 0, target: 2, unit: "%", icon: "fas fa-mouse-pointer", iconColor: "#0ea5e9", isCompleted: false },
+        { id: '3', title: "Hook Rate", subtitle: "Engagement hook performance", current: 0, target: 30, unit: "%", icon: "fas fa-fish", iconColor: "#f59e0b", isCompleted: false },
+        { id: '4', title: "Hold Rate", subtitle: "Audience retention hold rate", current: 0, target: 40, unit: "%", icon: "fas fa-hand-holding", iconColor: "#8b5cf6", isCompleted: false },
+        { id: '5', title: "Whats App Efficiency", subtitle: "WhatsApp conversion efficiency", current: 0, target: 60, unit: "%", icon: "fab fa-whatsapp", iconColor: "#25D366", isCompleted: false },
+        { id: '6', title: "Diabetes Ratio", subtitle: "Diabetes segment ratio", current: 0, target: 60, unit: "%", icon: "fas fa-chart-pie", iconColor: "#ec4899", isCompleted: false },
+        { id: '7', title: "Working Professionals", subtitle: "Working professionals segment", current: 0, target: 30, unit: "%", icon: "fas fa-briefcase", iconColor: "#0f766e", isCompleted: false },
+        { id: '8', title: "Optin Rate for Paid", subtitle: "Paid campaign opt-in rate", current: 0, target: 5, unit: "%", icon: "fas fa-ad", iconColor: "#dc2626", isCompleted: false },
+        { id: '9', title: "Optin Rate for YT", subtitle: "YouTube opt-in rate", current: 0, target: 25, unit: "%", icon: "fab fa-youtube", iconColor: "#FF0000", isCompleted: false },
     ]);
 
     const [selectedDateRange, setSelectedDateRange] = useState('This Week');

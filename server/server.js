@@ -34,6 +34,10 @@ app.use("/api/plan", planRoutes);
 const uniqueLeadsRoutes = require("./routes/uniqueLeads");
 app.use("/api/unique-leads", uniqueLeadsRoutes);
 
+// YouTube Ads / Google Ads insights (dashboard metrics and charts)
+const youtubeInsightsRoutes = require("./routes/youtubeInsights");
+app.use("/api/youtube", youtubeInsightsRoutes);
+
 app.get("/", (req, res) => {
   res.send("Backend is running...");
 });

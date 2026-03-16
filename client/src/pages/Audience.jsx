@@ -318,9 +318,9 @@ export default function Audience() {
         return () => { cancelled = true; };
     }, [contentFilters.startDate, contentFilters.endDate]);
 
-    // Fetch Instagram audience demographics (city + country) when PAGE is selected (only when Instagram selected)
+    // Fetch Instagram audience demographics when a PAGE is selected (works for both Instagram and Facebook pages since each FB page has a linked IG account)
     useEffect(() => {
-        if (!isInstagramSelected) {
+        if (!isInstagramSelected && !isFacebookSelected) {
             setIgAudienceData(null);
             setIgAudienceError(null);
             return;
@@ -347,7 +347,7 @@ export default function Audience() {
                 if (!cancelled) setIgAudienceLoading(false);
             });
         return () => { cancelled = true; };
-    }, [audiencePage, contentFilters.startDate, contentFilters.endDate]);
+    }, [isInstagramSelected, isFacebookSelected, audiencePage, contentFilters.startDate, contentFilters.endDate]);
 
     // Fetch Instagram reach by follow_type (Followers vs Non-Followers) for the right-side card (only when Instagram selected)
     useEffect(() => {
@@ -420,8 +420,7 @@ export default function Audience() {
         let cancelled = false;
         setDemographicsLoading(true);
         setDemographicsError(null);
-        const pageId = isFacebookSelected && audiencePage ? (audiencePage?.id ?? audiencePage) : null;
-        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate, pageId)
+        fetchDemographicInsights(contentFilters.startDate, contentFilters.endDate, null)
             .then((payload) => {
                 if (!cancelled) {
                     setDemographicsData({
@@ -1169,7 +1168,7 @@ export default function Audience() {
                                                 </div>
                                             </div>
                                         </>
-                                    ) : demographicsLoading ? (
+                                    ) : (demographicsLoading || (audiencePage && (fbAudienceLoading || igAudienceLoading))) ? (
                                         <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
                                             <div className="text-center">
                                                 <div className="spinner-border mb-2" role="status"><span className="visually-hidden">Loading...</span></div>
@@ -1180,8 +1179,17 @@ export default function Audience() {
                                         <div className="d-flex align-items-center justify-content-center h-100 text-muted" style={{ minHeight: 320 }}>
                                             <div className="text-center">
                                                 <span className="d-block mb-2" style={{ fontSize: '2.5rem' }}>📊</span>
-                                                <p className="fw-medium mb-0">No demographic data for this period</p>
-                                                <small>Ensure META_AD_ACCOUNT_ID and token are set in server/.env and the ad account has activity in the selected time range.</small>
+                                                {isFacebookSelected ? (
+                                                    <>
+                                                        <p className="fw-medium mb-0">No demographic data available for this Facebook Page</p>
+                                                        <small>Facebook requires <strong>pages_read_engagement</strong> or <strong>read_insights</strong> permission to access age &amp; gender demographics. Ensure your app has these permissions approved and the page has at least 100 fans.</small>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <p className="fw-medium mb-0">No demographic data for this period</p>
+                                                        <small>Ensure META_AD_ACCOUNT_ID and token are set in server/.env and the ad account has activity in the selected time range.</small>
+                                                    </>
+                                                )}
                                             </div>
                                         </div>
                                     )}

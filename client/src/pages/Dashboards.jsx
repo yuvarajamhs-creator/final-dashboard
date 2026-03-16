@@ -213,6 +213,22 @@ const fetchContentMarketingRevenue = async (dateRange, source) => {
   }
 };
 
+// Fetch YouTube Ads / Google Ads insights (when Platform filter is YouTube)
+const fetchYouTubeInsights = async (from, to) => {
+  const token = getAuthToken();
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(
+    `${API_BASE}/api/youtube/insights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.details || err.error || res.statusText);
+  }
+  return res.json();
+};
+
 // Fetch Instagram insights for multiple IG Business Accounts (Content Marketing Dashboard)
 // Pass pageIds to resolve IG accounts from pages, or accountIds for direct IDs
 const fetchInstagramInsights = async ({ pageIds, accountIds, from, to }) => {
@@ -1396,6 +1412,11 @@ export default function AdsDashboardBootstrap() {
   const [contentPlatformSessionsBySource, setContentPlatformSessionsBySource] = useState([]);
   const [contentPlatformLeadsBySource, setContentPlatformLeadsBySource] = useState([]);
   const [contentPlatformMetricsError, setContentPlatformMetricsError] = useState(null);
+
+  // YouTube Ads metrics (shown when Platform filter is YouTube)
+  const [youtubeMetricsLoading, setYoutubeMetricsLoading] = useState(false);
+  const [youtubeMetricsError, setYoutubeMetricsError] = useState(null);
+  const [youtubeMetrics, setYoutubeMetrics] = useState(null);
   
   // Chart-specific Time Range Filter State for "Account Reach by Followers Count"
   const [chartTimeRange, setChartTimeRange] = useState(() => {
@@ -2607,6 +2628,29 @@ export default function AdsDashboardBootstrap() {
 
     fetchPlatformMetrics();
   }, [selectedPlatforms, contentFilters?.startDate, contentFilters?.endDate]);
+
+  // Fetch YouTube Ads insights when Platform filter is YouTube
+  useEffect(() => {
+    if (selectedPlatform !== 'youtube' || !dateFilters?.startDate || !dateFilters?.endDate) {
+      setYoutubeMetrics(null);
+      setYoutubeMetricsError(null);
+      return;
+    }
+    let cancelled = false;
+    setYoutubeMetricsLoading(true);
+    setYoutubeMetricsError(null);
+    fetchYouTubeInsights(dateFilters.startDate, dateFilters.endDate)
+      .then((data) => {
+        if (!cancelled) setYoutubeMetrics(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setYoutubeMetricsError(err?.message || 'Failed to load YouTube metrics');
+      })
+      .finally(() => {
+        if (!cancelled) setYoutubeMetricsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedPlatform, dateFilters?.startDate, dateFilters?.endDate]);
 
   // Fetch Google Sheets metrics on mount and poll every 30 seconds
   useEffect(() => {
@@ -4471,7 +4515,208 @@ export default function AdsDashboardBootstrap() {
         </div>
       </div>
 
-      {/* KPI Row - Animated Cards */}
+      {/* YouTube Metrics (only when Platform = YouTube) */}
+      {selectedPlatform === 'youtube' && (
+        <>
+          <div className="row g-3 mb-3 align-items-center">
+            <div className="col">
+              <h5 className="mb-0 text-dark d-flex align-items-center gap-2">
+                <span className="filter-emoji">📺</span> YouTube Ads Metrics
+              </h5>
+              <small className="text-muted">From YouTube / Google Ads for selected date range</small>
+            </div>
+            {youtubeMetricsError && (
+              <div className="col-auto">
+                <span className="text-danger small">{youtubeMetricsError}</span>
+              </div>
+            )}
+          </div>
+          {/* 2x5 card layout: Row 1 */}
+          <div className="row g-3 mb-3 row-cols-1 row-cols-sm-2 row-cols-lg-5">
+            <div className="col">
+              <div className="kpi-card kpi-card-primary">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">💰</div>
+                  <small className="kpi-label">Cost / Amount Spent</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatMoney(youtubeMetrics?.summary?.cost)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-success">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">👥</div>
+                  <small className="kpi-label">Conversions / Leads</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatNum(youtubeMetrics?.summary?.leads ?? youtubeMetrics?.summary?.conversions)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-warning">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">💵</div>
+                  <small className="kpi-label">Cost per Conversion / CPL</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatMoney(youtubeMetrics?.summary?.cpl)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-info">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">👁️</div>
+                  <small className="kpi-label">CPM</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : `₹${formatNum(youtubeMetrics?.summary?.cpm)}`}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-teal">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">📋</div>
+                  <small className="kpi-label">Opt-in Rate</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatPerc(youtubeMetrics?.summary?.optInRate)}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* Row 2 */}
+          <div className="row g-3 mb-4 row-cols-1 row-cols-sm-2 row-cols-lg-5">
+            <div className="col">
+              <div className="kpi-card kpi-card-success">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">🔗</div>
+                  <small className="kpi-label">Link Clicks</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatNum(youtubeMetrics?.summary?.linkClicks)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-purple">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">🖱️</div>
+                  <small className="kpi-label">CTR</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatPerc(youtubeMetrics?.summary?.ctr)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-orange">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">📈</div>
+                  <small className="kpi-label">ROAS</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : `${formatNum(youtubeMetrics?.summary?.roas)}x`}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-warning">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">✅</div>
+                  <small className="kpi-label">Total Conversions</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatNum(youtubeMetrics?.summary?.totalConversions)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="col">
+              <div className="kpi-card kpi-card-pink">
+                <div className="kpi-card-body">
+                  <div className="kpi-icon">📊</div>
+                  <small className="kpi-label">Conversion Rate %</small>
+                  <div className="kpi-value">{youtubeMetricsLoading ? '…' : formatPerc(youtubeMetrics?.summary?.conversionRate)}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* First row: Opt-in Rate vs Cost, Leads vs CPL */}
+          <div className="row g-4 mb-4">
+            <div className="col-12 col-lg-6">
+              <div className="chart-card">
+                <div className="chart-card-body">
+                  <strong className="chart-title"><span className="chart-emoji">📈</span> Opt-in Rate vs Cost / Amount Spent</strong>
+                  <div className="chart-container" style={{ minHeight: 280 }}>
+                    {youtubeMetrics?.chartOptInRateVsCost?.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={280}>
+                        <ComposedChart data={youtubeMetrics.chartOptInRateVsCost} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="left" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} />
+                          <Tooltip />
+                          <Legend />
+                          <Bar yAxisId="left" dataKey="cost" fill="#4F46E5" name="Cost (₹)" radius={[4, 4, 0, 0]} />
+                          <Line yAxisId="right" type="monotone" dataKey="optInRate" stroke="#10B981" strokeWidth={2} name="Opt-in Rate (%)" dot={{ r: 3 }} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="d-flex align-items-center justify-content-center text-muted" style={{ height: 280 }}>{youtubeMetricsLoading ? 'Loading…' : 'No data'}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="col-12 col-lg-6">
+              <div className="chart-card">
+                <div className="chart-card-body">
+                  <strong className="chart-title"><span className="chart-emoji">👥</span> Leads vs CPL</strong>
+                  <div className="chart-container" style={{ minHeight: 280 }}>
+                    {youtubeMetrics?.chartLeadsVsCpl?.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={280}>
+                        <ComposedChart data={youtubeMetrics.chartLeadsVsCpl} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="left" tick={{ fontSize: 10 }} />
+                          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} />
+                          <Tooltip />
+                          <Legend />
+                          <Bar yAxisId="left" dataKey="leads" fill="#10B981" name="Leads" radius={[4, 4, 0, 0]} />
+                          <Line yAxisId="right" type="monotone" dataKey="cpl" stroke="#F59E0B" strokeWidth={2} name="CPL (₹)" dot={{ r: 3 }} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="d-flex align-items-center justify-content-center text-muted" style={{ height: 280 }}>{youtubeMetricsLoading ? 'Loading…' : 'No data'}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* Second row: Link Clicks vs Landing Page Views */}
+          <div className="row g-4 mb-4">
+            <div className="col-12">
+              <div className="chart-card">
+                <div className="chart-card-body">
+                  <strong className="chart-title"><span className="chart-emoji">🔗</span> Link Clicks vs Landing Page Views</strong>
+                  <div className="chart-container" style={{ minHeight: 280 }}>
+                    {youtubeMetrics?.chartLinkClicksVsLandingPageViews?.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={280}>
+                        <AreaChart data={youtubeMetrics.chartLinkClicksVsLandingPageViews} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="ytLinkClicks" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4F46E5" stopOpacity={0.4} /><stop offset="95%" stopColor="#4F46E5" stopOpacity={0} /></linearGradient>
+                            <linearGradient id="ytLandingViews" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#10B981" stopOpacity={0.4} /><stop offset="95%" stopColor="#10B981" stopOpacity={0} /></linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                          <YAxis tick={{ fontSize: 10 }} />
+                          <Tooltip />
+                          <Legend />
+                          <Area type="monotone" dataKey="linkClicks" stroke="#4F46E5" fill="url(#ytLinkClicks)" name="Link Clicks" />
+                          <Area type="monotone" dataKey="landingPageViews" stroke="#10B981" fill="url(#ytLandingViews)" name="Landing Page Views" />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="d-flex align-items-center justify-content-center text-muted" style={{ height: 280 }}>{youtubeMetricsLoading ? 'Loading…' : 'No data'}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* KPI Row - Animated Cards (Meta / other platforms) */}
+      {selectedPlatform !== 'youtube' && (
+      <>
       <div className="row g-3 mb-4">
         {/* 1. Ad Spend */}
         <div className="col-6 col-md-4 col-lg-3 col-xl">
@@ -4680,9 +4925,11 @@ export default function AdsDashboardBootstrap() {
           </div>
         </div>
       </div>
+      </>
+      )}
 
-      {/* Charts */}
-{/* Spend vs Leads & Campaign performance */}
+      {/* Charts (Meta - hidden when YouTube selected) */}
+      {selectedPlatform !== 'youtube' && (
 <div className="row g-4 mb-4">
         <div className="col-12 col-lg-6">
           <div className="chart-card">
@@ -4843,6 +5090,7 @@ export default function AdsDashboardBootstrap() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Total Leads Table - Separate Row */}
       <div className="row g-4 mb-4">

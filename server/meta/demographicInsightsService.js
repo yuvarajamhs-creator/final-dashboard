@@ -108,16 +108,13 @@ function validateAndSplitBreakdowns(requestedBreakdowns) {
   };
 }
 
-function buildFiltering(isAllCampaigns, isAllAds, campaignIds, adIds, pageId) {
+function buildFiltering(isAllCampaigns, isAllAds, campaignIds, adIds) {
   const list = [...STATUS_FILTER];
   if (!isAllCampaigns && campaignIds && campaignIds.length > 0) {
     list.push({ field: 'campaign.id', operator: 'IN', value: campaignIds.map(String) });
   }
   if (!isAllAds && adIds && adIds.length > 0) {
     list.push({ field: 'ad.id', operator: 'IN', value: adIds.map(String) });
-  }
-  if (pageId) {
-    list.push({ field: 'ad.effective_object_story_id', operator: 'CONTAIN', value: String(pageId) });
   }
   return list;
 }
@@ -306,7 +303,6 @@ async function fetchDemographicInsightsSplit(opts) {
     isAllAds = true,
     campaignIds = [],
     adIds = [],
-    pageId = null,
   } = opts || {};
 
   const normId = normAccountId(adAccountId);
@@ -319,7 +315,7 @@ async function fetchDemographicInsightsSplit(opts) {
     console.log('[DemographicInsights] Invalid combination requested and split:', skipped.join(', '));
   }
 
-  const filtering = buildFiltering(isAllCampaigns, isAllAds, campaignIds, adIds, pageId);
+  const filtering = buildFiltering(isAllCampaigns, isAllAds, campaignIds, adIds);
   const errors = [];
 
   const promises = [];
