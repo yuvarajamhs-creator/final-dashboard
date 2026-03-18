@@ -118,6 +118,7 @@ export default function UniqueLeads() {
   const [showDupModal, setShowDupModal] = useState(false);
   const [selectedDupIds, setSelectedDupIds] = useState(new Set());
   const [deletingDupIds, setDeletingDupIds] = useState(new Set());
+  const [userIdSearch, setUserIdSearch] = useState('');
   const fileInputRef = useRef(null);
 
   const isDuplicatesView = tableViewFilter === 'duplicates';
@@ -428,6 +429,20 @@ export default function UniqueLeads() {
     ? (importResult?.imported ?? previewRows.length)
     : dbLeads.length;
 
+  const getRowUserId = (row) =>
+    (row.userId != null && String(row.userId).trim() !== '')
+      ? String(row.userId).trim()
+      : extractLast10(row.phoneNumber ?? row.phone ?? '');
+
+  const userIdSearchTrimmed = userIdSearch.trim().toLowerCase();
+  const filteredByUserId =
+    userIdSearchTrimmed === ''
+      ? displayRows
+      : displayRows.filter((row) => {
+          const uid = getRowUserId(row);
+          return uid.toLowerCase().includes(userIdSearchTrimmed);
+        });
+
   const FILTER_LABELS = {
     all: 'all imported',
     paid: 'Paid',
@@ -450,11 +465,15 @@ export default function UniqueLeads() {
         msg += ` ${importResult.errors} row(s) skipped (phone < 10 digits).`;
       return msg;
     }
+    const base = loadingDb ? ' Loading…' : '';
+    if (userIdSearchTrimmed) {
+      return `Showing ${filteredByUserId.length} of ${displayCount} lead(s) matching User ID.${base}`;
+    }
     if (tableViewFilter === 'all')
-      return `Showing all imported leads (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
+      return `Showing all imported leads (${displayCount} total).${base}`;
     if (tableViewFilter === 'duplicates')
-      return `Showing leads with multiple sources (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
-    return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} lead(s) (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
+      return `Showing leads with multiple sources (${displayCount} total).${base}`;
+    return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} lead(s) (${displayCount} total).${base}`;
   };
 
   const colSpan = isDuplicatesView ? 10 : 8;
@@ -585,6 +604,20 @@ export default function UniqueLeads() {
 
           <div className="unique-leads-meta-row">
             <p className="unique-leads-meta">{buildMeta()}</p>
+            <div className="unique-leads-userid-search-wrap">
+              <label htmlFor="unique-leads-userid-search" className="unique-leads-search-label">
+                Search by User ID
+              </label>
+              <input
+                id="unique-leads-userid-search"
+                type="text"
+                placeholder="Search User ID…"
+                value={userIdSearch}
+                onChange={(e) => setUserIdSearch(e.target.value)}
+                className="unique-leads-userid-search"
+                aria-label="Search by User ID"
+              />
+            </div>
             {isDuplicatesView && dbLeads.length > 0 && (
               <button
                 type="button"
@@ -630,14 +663,14 @@ export default function UniqueLeads() {
                       Loading…
                     </td>
                   </tr>
-                ) : displayRows.length === 0 ? (
+                ) : filteredByUserId.length === 0 ? (
                   <tr>
                     <td colSpan={colSpan} className="text-center py-4 text-secondary">
-                      No data to display. Import a file or select a category above.
+                      {userIdSearch.trim() ? 'No leads match the User ID search.' : 'No data to display. Import a file or select a category above.'}
                     </td>
                   </tr>
                 ) : isDuplicatesView ? (
-                  displayRows.map((row, idx) => {
+                  filteredByUserId.map((row, idx) => {
                     const userId = row.userId || extractLast10(row.phoneNumber ?? row.phone ?? '');
                     const id = row.id;
                     const isDeleting = id != null && deletingDupIds.has(id);
@@ -665,7 +698,7 @@ export default function UniqueLeads() {
                     );
                   })
                 ) : (
-                  displayRows.map((row, idx) => {
+                  filteredByUserId.map((row, idx) => {
                     const userId = row.userId || extractLast10(row.phoneNumber ?? row.phone ?? '');
                     return (
                       <tr key={idx}>

@@ -479,6 +479,41 @@
   flex-wrap: wrap;
 }
 
+/* User ID search box */
+.unique-leads-userid-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.unique-leads-search-label {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.unique-leads-userid-search {
+  width: 200px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text, #0f172a);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unique-leads-userid-search::placeholder {
+  color: #94a3b8;
+}
+
+.unique-leads-userid-search:focus {
+  outline: none;
+  border-color: #0f2d5e;
+  box-shadow: 0 0 0 2px rgba(15, 45, 94, 0.15);
+}
+
 /* Duplicate row selected */
 .unique-leads-row-selected {
   background-color: rgba(59, 130, 246, 0.08) !important;
