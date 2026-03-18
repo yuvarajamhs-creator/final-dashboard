@@ -216,14 +216,15 @@ router.post('/insights', async (req, res) => {
 
 function buildAdSlotFromReal(bestAd) {
   if (!bestAd || typeof bestAd !== 'object') {
-    return { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No ad data.', action: 'MONITOR' };
+    return { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No ad data.', action: 'MONITOR', dateStart: '', dateStop: '' };
   }
-  const spend = Number(bestAd.spend) || 0;
+  const spend = Math.round((Number(bestAd.spend) || 0) * 100) / 100;
   const leads = Number(bestAd.leads) || 0;
   const cpl = leads > 0 ? Math.round((spend / leads) * 100) / 100 : 0;
   const name = bestAd.name || bestAd.campaignName || bestAd.ad_name || 'Campaign';
-  const platform = bestAd.platform || bestAd.ad_account_name ? 'Meta' : 'Meta';
-  const reason = bestAd.reason || `Best performer in selected period: ${leads} leads at $${cpl.toFixed(2)} CPL.`;
+  const platform = bestAd.platform || 'Meta';
+  const fmtSpend = spend.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const reason = bestAd.reason || `Best performer: ${leads} leads, ₹${fmtSpend} spend, ₹${cpl.toFixed(2)} CPL.`;
   return {
     name: String(name).slice(0, 120),
     platform: String(platform).slice(0, 32),
@@ -231,28 +232,38 @@ function buildAdSlotFromReal(bestAd) {
     leads,
     cpl,
     reason: String(reason).slice(0, 400),
-    action: bestAd.action === 'PAUSE' || bestAd.action === 'SCALE' ? bestAd.action : 'MONITOR'
+    action: bestAd.action === 'PAUSE' || bestAd.action === 'SCALE' ? bestAd.action : 'MONITOR',
+    dateStart: bestAd.dateStart || '',
+    dateStop: bestAd.dateStop || ''
   };
 }
 
 function buildReelSlotFromReal(bestReel) {
   if (!bestReel || typeof bestReel !== 'object') {
-    return { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'No reel data.', action: 'MONITOR' };
+    return { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'No reel data.', action: 'MONITOR', timestamp: '', thumbnail_url: '', likes: 0, comments: 0, shares: 0, views: 0, permalink: '' };
   }
   const reach = Number(bestReel.reach) || 0;
   const engagements = Number(bestReel.engagements) || Number(bestReel.total_interactions) || 0;
   const saves = Number(bestReel.saves) || 0;
   const name = bestReel.name || (bestReel.caption && bestReel.caption.slice(0, 60)) || 'Reel';
   const platform = bestReel.platform || 'Instagram';
-  const reason = bestReel.reason || `Top content: ${(reach / 1000).toFixed(0)}K reach, ${engagements} engagements.`;
+  const fmtReach = reach >= 1000 ? `${(reach / 1000).toFixed(1)}K` : String(reach);
+  const reason = bestReel.reason || `Top content: ${fmtReach} reach, ${engagements.toLocaleString('en-IN')} engagements, ${saves} saves.`;
   return {
     name: String(name).slice(0, 120),
     platform: String(platform).slice(0, 32),
     reach,
     engagements,
     saves,
+    likes: Number(bestReel.likes) || 0,
+    comments: Number(bestReel.comments) || 0,
+    shares: Number(bestReel.shares) || 0,
+    views: Number(bestReel.views) || 0,
     reason: String(reason).slice(0, 400),
-    action: bestReel.action === 'REPURPOSE' || bestReel.action === 'BOOST' ? bestReel.action : 'MONITOR'
+    action: bestReel.action === 'REPURPOSE' || bestReel.action === 'BOOST' ? bestReel.action : 'MONITOR',
+    timestamp: bestReel.timestamp || '',
+    thumbnail_url: bestReel.thumbnail_url || '',
+    permalink: bestReel.permalink || ''
   };
 }
 

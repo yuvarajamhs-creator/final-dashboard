@@ -1,18 +1,15 @@
 /**
  * YouTube Ads / Google Ads insights for the Ads Analytics Dashboard.
  * GET /api/youtube/insights?from=YYYY-MM-DD&to=YYYY-MM-DD
- * Returns summary metrics and chart data. Wire to Google Ads API when credentials are available.
+ *
+ * When Google Ads credentials are fully configured, fetches live data.
+ * Otherwise falls back to stub data for UI development / demo.
  */
 const express = require('express');
 const router = express.Router();
 const { optionalAuthMiddleware } = require('../auth');
+const { credentialsReady, fetchYouTubeAdsMetrics } = require('../services/googleAdsService');
 
-/**
- * GET /api/youtube/insights
- * Query: from (YYYY-MM-DD), to (YYYY-MM-DD)
- * Returns: summary (cost, conversions, cpl, cpm, optInRate, linkClicks, ctr, roas, totalConversions, conversionRate),
- *          chartOptInRateVsCost, chartLeadsVsCpl, chartLinkClicksVsLandingPageViews
- */
 router.get('/insights', optionalAuthMiddleware, async (req, res) => {
   try {
     const from = (req.query.from || '').trim();
@@ -25,8 +22,21 @@ router.get('/insights', optionalAuthMiddleware, async (req, res) => {
       });
     }
 
-    // TODO: Replace with Google Ads API / YouTube Ads API when credentials are configured.
-    // For now return stub data so the dashboard UI can display YouTube metrics and graphs.
+    // --- Try live Google Ads API first ---
+    const { ready, missing } = credentialsReady();
+    if (ready) {
+      try {
+        const liveData = await fetchYouTubeAdsMetrics(from, to);
+        console.log('[YouTube insights] Live data fetched from Google Ads API');
+        return res.json({ ...liveData, source: 'google_ads_api' });
+      } catch (apiErr) {
+        console.error('[YouTube insights] Google Ads API error, falling back to stub:', apiErr.response?.data || apiErr.message);
+      }
+    } else {
+      console.log('[YouTube insights] Missing credentials:', missing.join(', '), '— using stub data');
+    }
+
+    // --- Stub / fallback ---
     const start = new Date(from);
     const end = new Date(to);
     const days = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
@@ -38,21 +48,11 @@ router.get('/insights', optionalAuthMiddleware, async (req, res) => {
     }
 
     const summary = {
-      cost: 0,
-      conversions: 0,
-      leads: 0,
-      cpl: 0,
-      cpm: 0,
-      optInRate: 0,
-      linkClicks: 0,
-      ctr: 0,
-      roas: 0,
-      totalConversions: 0,
-      conversionRate: 0,
-      landingPageViews: 0,
+      cost: 0, conversions: 0, leads: 0, cpl: 0, cpm: 0,
+      optInRate: 0, linkClicks: 0, ctr: 0, roas: 0,
+      totalConversions: 0, conversionRate: 0, landingPageViews: 0,
     };
 
-    // Stub: try env-based override for testing, else zeros (or minimal mock)
     const useStub = process.env.YOUTUBE_INSIGHTS_STUB !== '0';
     if (useStub) {
       const seed = from.length + to.length;
@@ -75,32 +75,29 @@ router.get('/insights', optionalAuthMiddleware, async (req, res) => {
       optInRate: summary.optInRate ? summary.optInRate * (0.8 + (i % 5) * 0.05) : 0,
       cost: summary.cost ? (summary.cost / labels.length) * (0.9 + (i % 3) * 0.1) : 0,
     }));
-
     const chartLeadsVsCpl = labels.map((date, i) => ({
       date,
       leads: summary.leads ? Math.round((summary.leads / labels.length) * (0.85 + (i % 4) * 0.1)) : 0,
       cpl: summary.cpl ? summary.cpl * (0.9 + (i % 5) * 0.05) : 0,
     }));
-
     const chartLinkClicksVsLandingPageViews = labels.map((date, i) => ({
       date,
       linkClicks: summary.linkClicks ? Math.round((summary.linkClicks / labels.length) * (0.8 + (i % 6) * 0.08)) : 0,
       landingPageViews: summary.landingPageViews ? Math.round((summary.landingPageViews / labels.length) * (0.82 + (i % 5) * 0.07)) : 0,
     }));
 
+    const missingMsg = ready ? '' : ` Missing env vars: ${missing.join(', ')}.`;
     return res.json({
       summary,
       chartOptInRateVsCost,
       chartLeadsVsCpl,
       chartLinkClicksVsLandingPageViews,
-      message: useStub ? 'Stub data. Configure Google Ads API for live YouTube metrics.' : undefined,
+      source: 'stub',
+      message: `Stub data.${missingMsg} Configure Google Ads credentials in .env for live YouTube metrics.`,
     });
   } catch (err) {
     console.error('[YouTube insights] Error:', err.message);
-    return res.status(500).json({
-      error: 'Failed to fetch YouTube insights',
-      details: err.message,
-    });
+    return res.status(500).json({ error: 'Failed to fetch YouTube insights', details: err.message });
   }
 });
 

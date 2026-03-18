@@ -22,27 +22,22 @@ const toYMD = (d) => d.toISOString().slice(0, 10);
 /** Broad range covering last month + this month so we have data for all 4 periods */
 const getBroadRange = () => {
     const today = new Date();
-    const endDate = new Date(today);
-    endDate.setDate(endDate.getDate() - 1);
-    const startDate = new Date(endDate);
-    startDate.setDate(startDate.getDate() - 34);
-    return { from: toYMD(startDate), to: toYMD(endDate) };
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - 35);
+    return { from: toYMD(startDate), to: toYMD(today) };
 };
 
 /** Period ranges for Last Month, Last Week, This Week, Today (for tabs) */
 const getPeriodRanges = () => {
     const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const y = yesterday;
     const lastMonth = { from: '', to: '' };
-    const lastMonthStart = new Date(y.getFullYear(), y.getMonth() - 1, 1);
-    const lastMonthEnd = new Date(y.getFullYear(), y.getMonth(), 0);
+    const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
     lastMonth.from = toYMD(lastMonthStart);
     lastMonth.to = toYMD(lastMonthEnd);
 
     const lastWeek = { from: '', to: '' };
-    const lastWeekEnd = new Date(y);
+    const lastWeekEnd = new Date(today);
     lastWeekEnd.setDate(lastWeekEnd.getDate() - lastWeekEnd.getDay() - 1);
     const lastWeekStart = new Date(lastWeekEnd);
     lastWeekStart.setDate(lastWeekStart.getDate() - 6);
@@ -50,12 +45,12 @@ const getPeriodRanges = () => {
     lastWeek.to = toYMD(lastWeekEnd);
 
     const thisWeek = { from: '', to: '' };
-    const thisWeekStart = new Date(y);
+    const thisWeekStart = new Date(today);
     thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay());
     thisWeek.from = toYMD(thisWeekStart);
-    thisWeek.to = toYMD(y);
+    thisWeek.to = toYMD(today);
 
-    const todayRange = { from: toYMD(y), to: toYMD(y) };
+    const todayRange = { from: toYMD(today), to: toYMD(today) };
 
     return { lastMonth, lastWeek, thisWeek, today: todayRange };
 };
@@ -80,42 +75,40 @@ const DATE_PRESETS = [
 
 const getDateRangeForPreset = (presetId) => {
     const today = new Date();
-    const y = new Date(today);
-    y.setDate(y.getDate() - 1);
     if (presetId === 'last_7_days') {
-        const start = new Date(y);
+        const start = new Date(today);
         start.setDate(start.getDate() - 6);
-        return { from: toYMD(start), to: toYMD(y) };
+        return { from: toYMD(start), to: toYMD(today) };
     }
     if (presetId === 'last_14_days') {
-        const start = new Date(y);
+        const start = new Date(today);
         start.setDate(start.getDate() - 13);
-        return { from: toYMD(start), to: toYMD(y) };
+        return { from: toYMD(start), to: toYMD(today) };
     }
     if (presetId === 'last_30_days') {
-        const start = new Date(y);
+        const start = new Date(today);
         start.setDate(start.getDate() - 29);
-        return { from: toYMD(start), to: toYMD(y) };
+        return { from: toYMD(start), to: toYMD(today) };
     }
     if (presetId === 'this_week') {
-        const start = new Date(y);
+        const start = new Date(today);
         start.setDate(start.getDate() - start.getDay());
-        return { from: toYMD(start), to: toYMD(y) };
+        return { from: toYMD(start), to: toYMD(today) };
     }
     if (presetId === 'last_week') {
-        const end = new Date(y);
+        const end = new Date(today);
         end.setDate(end.getDate() - end.getDay() - 1);
         const start = new Date(end);
         start.setDate(start.getDate() - 6);
         return { from: toYMD(start), to: toYMD(end) };
     }
     if (presetId === 'this_month') {
-        const start = new Date(y.getFullYear(), y.getMonth(), 1);
-        return { from: toYMD(start), to: toYMD(y) };
+        const start = new Date(today.getFullYear(), today.getMonth(), 1);
+        return { from: toYMD(start), to: toYMD(today) };
     }
     if (presetId === 'last_month') {
-        const start = new Date(y.getFullYear(), y.getMonth() - 1, 1);
-        const end = new Date(y.getFullYear(), y.getMonth(), 0);
+        const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+        const end = new Date(today.getFullYear(), today.getMonth(), 0);
         return { from: toYMD(start), to: toYMD(end) };
     }
     return null;
@@ -155,6 +148,26 @@ const transformActions = (actions = []) => {
 };
 
 const num = (v) => Number(v) || 0;
+const fmtMoney = (v) => `₹${(Number(v) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtInt = (v) => (Number(v) || 0).toLocaleString('en-IN');
+const fmtReach = (v) => { const n = Number(v) || 0; return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n); };
+const fmtDate = (dateStr) => {
+    if (!dateStr) return '';
+    try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return dateStr;
+        return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+    } catch { return dateStr; }
+};
+const fmtDateTime = (dateStr) => {
+    if (!dateStr) return '';
+    try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return dateStr;
+        return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) +
+            ' ' + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+    } catch { return dateStr; }
+};
 
 const _fetchAdAccounts = async () => {
     try {
@@ -170,47 +183,72 @@ const _fetchAdAccounts = async () => {
     }
 };
 
+const parseInsightsRows = (rawData) => {
+    let data = rawData;
+    if (data && !Array.isArray(data) && Array.isArray(data.data)) data = data.data;
+    if (!Array.isArray(data)) return [];
+    return data.map((d) => {
+        const aggs = transformActions(d.actions || []);
+        const leadCount =
+            aggs['lead'] ||
+            aggs['on_facebook_lead'] ||
+            aggs['onsite_conversion.lead_grouped'] ||
+            (Object.keys(aggs || {}).filter((k) => String(k).toLowerCase().includes('lead')).reduce((s, k) => s + (Number(aggs[k]) || 0), 0)) ||
+            0;
+        const spend = num(d.spend);
+        const cpl = leadCount > 0 ? spend / leadCount : 0;
+        return {
+            ad_id: d.ad_id,
+            ad_name: d.ad_name || 'Unnamed Ad',
+            campaign_id: d.campaign_id,
+            campaign_name: d.campaign_name || 'Unknown Campaign',
+            ad_account_id: d.ad_account_id,
+            ad_account_name: d.ad_account_name || '',
+            spend,
+            leads: leadCount,
+            cpl,
+            impressions: num(d.impressions),
+            clicks: num(d.clicks),
+            date_start: d.date_start || d.date,
+            date_stop: d.date_stop || d.date_start || d.date
+        };
+    });
+};
+
 const fetchInsightsForAI = async (from, to, forceRefresh = false) => {
     try {
         const token = getAuthToken();
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
-        // No ad_account_id = fetch from ALL ad accounts (same as Best Performing Ad "All Projects")
-        // forceRefresh: add refresh=1 so server skips cache and fetches fresh from Meta
-        const refreshParam = forceRefresh ? '&refresh=1' : '';
-        const url = `${API_BASE}/api/meta/insights?time_increment=1&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&is_all_campaigns=1&is_all_ads=1&live=1${refreshParam}`;
-        const res = await fetch(url, { headers });
-        if (!res.ok) return [];
-        let data = await res.json();
-        if (data && !Array.isArray(data) && Array.isArray(data.data)) data = data.data;
-        if (!Array.isArray(data)) return [];
-        return data.map((d) => {
-            const aggs = transformActions(d.actions || []);
-            const leadCount =
-                aggs['lead'] ||
-                aggs['on_facebook_lead'] ||
-                aggs['onsite_conversion.lead_grouped'] ||
-                (Object.keys(aggs || {}).filter((k) => String(k).toLowerCase().includes('lead')).reduce((s, k) => s + (Number(aggs[k]) || 0), 0)) ||
-                0;
-            const spend = num(d.spend);
-            const cpl = leadCount > 0 ? spend / leadCount : 0;
-            return {
-                ad_id: d.ad_id,
-                ad_name: d.ad_name || 'Unnamed Ad',
-                campaign_id: d.campaign_id,
-                campaign_name: d.campaign_name || 'Unknown Campaign',
-                ad_account_id: d.ad_account_id,
-                ad_account_name: d.ad_account_name || '',
-                spend,
-                leads: leadCount,
-                cpl,
-                impressions: num(d.impressions),
-                clicks: num(d.clicks),
-                date_start: d.date_start || d.date,
-                date_stop: d.date_stop || d.date_start || d.date
-            };
-        });
+
+        // On initial load, read from DB (no live=1) to avoid heavy Meta API calls
+        // across many accounts that can timeout and return 500.
+        // On explicit refresh, use live=1 to fetch fresh data from Meta.
+        const liveParam = forceRefresh ? '&live=1&refresh=1' : '';
+        const baseUrl = `${API_BASE}/api/meta/insights?time_increment=1&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&is_all_campaigns=1&is_all_ads=1`;
+        const res = await fetch(`${baseUrl}${liveParam}`, { headers });
+        if (!res.ok) {
+            // DB fetch failed; try once with live as fallback
+            if (!forceRefresh) {
+                try {
+                    const liveRes = await fetch(`${baseUrl}&live=1`, { headers });
+                    if (liveRes.ok) return parseInsightsRows(await liveRes.json());
+                } catch (_) { /* fall through */ }
+            }
+            return [];
+        }
+        const rows = parseInsightsRows(await res.json());
+
+        // If DB returned no rows and this wasn't already a live request, retry with live
+        if (rows.length === 0 && !forceRefresh) {
+            try {
+                const liveRes = await fetch(`${baseUrl}&live=1`, { headers });
+                if (liveRes.ok) return parseInsightsRows(await liveRes.json());
+            } catch (_) { /* fall through */ }
+        }
+        return rows;
     } catch (e) {
+        console.error('fetchInsightsForAI error:', e);
         return [];
     }
 };
@@ -254,15 +292,20 @@ const pickBestAd = (rows) => {
                 platform: 'Meta',
                 spend: 0,
                 leads: 0,
-                ad_account_name: r.ad_account_name || ''
+                ad_account_name: r.ad_account_name || '',
+                dateStart: r.date_start || '',
+                dateStop: r.date_stop || ''
             };
         }
         adMap[key].spend += r.spend || 0;
         adMap[key].leads += r.leads || 0;
+        if (r.date_start && (!adMap[key].dateStart || r.date_start < adMap[key].dateStart)) adMap[key].dateStart = r.date_start;
+        if (r.date_stop && (!adMap[key].dateStop || r.date_stop > adMap[key].dateStop)) adMap[key].dateStop = r.date_stop;
     });
     const aggregated = Object.values(adMap).map((d) => ({
         ...d,
-        cpl: d.leads > 0 ? d.spend / d.leads : 0
+        spend: Math.round(d.spend * 100) / 100,
+        cpl: d.leads > 0 ? Math.round((d.spend / d.leads) * 100) / 100 : 0
     }));
     aggregated.sort((a, b) => {
         const leadDiff = (b.leads || 0) - (a.leads || 0);
@@ -272,10 +315,18 @@ const pickBestAd = (rows) => {
         return (b.spend || 0) - (a.spend || 0);
     });
     const best = aggregated[0];
-    return best ? { name: best.name, campaignName: best.campaignName, platform: best.platform, spend: best.spend, leads: best.leads, cpl: Math.round(best.cpl * 100) / 100, ad_account_name: best.ad_account_name || undefined } : null;
+    return best ? { name: best.name, campaignName: best.campaignName, platform: best.platform, spend: best.spend, leads: best.leads, cpl: best.cpl, ad_account_name: best.ad_account_name || undefined, dateStart: best.dateStart, dateStop: best.dateStop } : null;
 };
 
-const pickBestReel = (mediaPayload, period = null) => {
+const buildReelResult = (top) => {
+    const reach = Number(top.reach) || Number(top.views) || 0;
+    const engagements = Number(top.total_interactions) || (Number(top.likes) + Number(top.comments)) || 0;
+    const saves = Number(top.saved) || 0;
+    const name = (top.caption && top.caption.slice(0, 80)) || 'Reel';
+    return { name, platform: 'Instagram', reach, engagements, saves, caption: top.caption, permalink: top.permalink, timestamp: top.timestamp || '', thumbnail_url: top.thumbnail_url || top.media_url || '', likes: Number(top.likes) || 0, comments: Number(top.comments) || 0, shares: Number(top.shares) || 0, views: Number(top.views) || Number(top.video_views) || 0 };
+};
+
+const filterReels = (mediaPayload, period = null) => {
     const media = mediaPayload?.media || [];
     let reels = media.filter((m) => (m.product_type === 'REELS' || (m.media_type === 'VIDEO' && (m.permalink || '').includes('/reel/'))) && (m.availability === 'available' || (m.views || m.reach) > 0));
     if (period && period.from && period.to) {
@@ -287,14 +338,21 @@ const pickBestReel = (mediaPayload, period = null) => {
             return ymd >= period.from && ymd <= period.to;
         });
     }
+    return reels;
+};
+
+const pickBestReel = (mediaPayload, period = null) => {
+    const reels = filterReels(mediaPayload, period);
     if (reels.length === 0) return null;
     const sorted = [...reels].sort((a, b) => (b.reach || b.views || 0) - (a.reach || a.views || 0));
-    const top = sorted[0];
-    const reach = Number(top.reach) || Number(top.views) || 0;
-    const engagements = Number(top.total_interactions) || (Number(top.likes) + Number(top.comments)) || 0;
-    const saves = Number(top.saved) || 0;
-    const name = (top.caption && top.caption.slice(0, 80)) || 'Reel';
-    return { name, platform: 'Instagram', reach, engagements, saves, caption: top.caption, permalink: top.permalink };
+    return buildReelResult(sorted[0]);
+};
+
+const pickLatestReel = (mediaPayload) => {
+    const reels = filterReels(mediaPayload);
+    if (reels.length === 0) return null;
+    const sorted = [...reels].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+    return buildReelResult(sorted[0]);
 };
 
 const defaultAdsData = {
@@ -341,6 +399,7 @@ export default function AIInsights() {
     const [qualityError, setQualityError] = useState(null);
     const [qualityResult, setQualityResult] = useState(null);
     const [qualityScores, setQualityScores] = useState([]);
+    const [fallbackReel, setFallbackReel] = useState(null);
 
     const fetchAIInsights = useCallback(async (forceRefresh = false) => {
         setLoading(true);
@@ -362,6 +421,7 @@ export default function AIInsights() {
                 let mediaPayload = null;
                 if (pageId) mediaPayload = await fetchMediaInsightsForAI(pageId);
                 const bestReel = pickBestReel(mediaPayload);
+                setFallbackReel(pickLatestReel(mediaPayload));
                 bestAds = { lastMonth: bestAd, lastWeek: bestAd, thisWeek: bestAd, today: bestAd };
                 bestReels = { lastMonth: bestReel, lastWeek: bestReel, thisWeek: bestReel, today: bestReel };
             } else {
@@ -378,11 +438,12 @@ export default function AIInsights() {
                 const pageId = pages && pages[0] ? (pages[0].id || pages[0].page_id || '') : null;
                 let mediaPayload = null;
                 if (pageId) mediaPayload = await fetchMediaInsightsForAI(pageId);
+                setFallbackReel(pickLatestReel(mediaPayload));
                 bestReels = {
-                    lastMonth: pickBestReel(mediaPayload, periods.lastMonth) || pickBestReel(mediaPayload),
-                    lastWeek: pickBestReel(mediaPayload, periods.lastWeek) || pickBestReel(mediaPayload),
-                    thisWeek: pickBestReel(mediaPayload, periods.thisWeek) || pickBestReel(mediaPayload),
-                    today: pickBestReel(mediaPayload, periods.today) || pickBestReel(mediaPayload)
+                    lastMonth: pickBestReel(mediaPayload, periods.lastMonth),
+                    lastWeek: pickBestReel(mediaPayload, periods.lastWeek),
+                    thisWeek: pickBestReel(mediaPayload, periods.thisWeek),
+                    today: pickBestReel(mediaPayload, periods.today)
                 };
             }
 
@@ -552,7 +613,12 @@ export default function AIInsights() {
     }, []);
 
     const currentAd = adsData[activeTimeWindow] || defaultAdsData.lastWeek;
-    const currentReel = reelsData[activeTimeWindow] || defaultReelsData.lastWeek;
+    const rawReel = reelsData[activeTimeWindow];
+    const periodReel = rawReel && (rawReel.name !== '—' || rawReel.reach > 0 || rawReel.views > 0) ? rawReel : null;
+    const currentReel = periodReel || fallbackReel;
+    const isReelFallback = !periodReel && !!fallbackReel;
+    const periodLabels = { lastMonth: 'Last Month', lastWeek: 'Last Week', thisWeek: 'This Week', today: 'Today' };
+    const periodLabel = periodLabels[activeTimeWindow] || '';
 
     return (
         <div className={`ai-insights-container${loading ? ' ai-content-hidden' : ''}`}>
@@ -736,59 +802,50 @@ export default function AIInsights() {
                 </div>
             </div>
 
-            {/* SUMMARY CARDS */}
+            {/* SUMMARY CARDS — clickable, act as tab selectors */}
             <div className="summary-cards-grid">
                 {platformFilter !== 'reels' && (
                     <>
-                        <div className="summary-card">
-                            <div className="summary-card-header">Best Ad • Last Month</div>
-                            <div className="summary-card-title">{adsData.lastMonth.name}</div>
-                            <div className="summary-card-meta">{adsData.lastMonth.platform}</div>
-                            <div className="summary-card-metric">
-                                <span className="metric-label">CPL</span>
-                                <span className="metric-value">₹{adsData.lastMonth.cpl}</span>
+                        {[
+                            { key: 'lastMonth', label: 'Last Month', metric: 'cpl', metricLabel: 'CPL', fmt: fmtMoney },
+                            { key: 'lastWeek', label: 'Last Week', metric: 'leads', metricLabel: 'Leads', fmt: fmtInt },
+                            { key: 'thisWeek', label: 'This Week', metric: 'leads', metricLabel: 'Leads', fmt: fmtInt }
+                        ].map((tab) => (
+                            <div
+                                key={tab.key}
+                                className={`summary-card${activeTimeWindow === tab.key ? ' summary-card--active' : ''}`}
+                                onClick={() => setActiveTimeWindow(tab.key)}
+                                style={{ cursor: 'pointer' }}
+                            >
+                                <div className="summary-card-header">Best Ad • {tab.label}</div>
+                                <div className="summary-card-title">{adsData[tab.key]?.name ?? '—'}</div>
+                                <div className="summary-card-meta">{adsData[tab.key]?.platform ?? 'Meta'}</div>
+                                <div className="summary-card-metric">
+                                    <span className="metric-label">{tab.metricLabel}</span>
+                                    <span className="metric-value">{tab.fmt(adsData[tab.key]?.[tab.metric] ?? 0)}</span>
+                                </div>
+                                <div style={{ marginTop: '8px' }}>
+                                    <span className={`metric-badge badge-${(adsData[tab.key]?.action || 'monitor').toLowerCase()}`}>{adsData[tab.key]?.action ?? 'MONITOR'}</span>
+                                </div>
                             </div>
-                            <div style={{ marginTop: '8px' }}>
-                                <span className="metric-badge badge-scale">{adsData.lastMonth.action}</span>
-                            </div>
-                        </div>
-                        <div className="summary-card">
-                            <div className="summary-card-header">Best Ad • Last Week</div>
-                            <div className="summary-card-title">{adsData.lastWeek.name}</div>
-                            <div className="summary-card-meta">{adsData.lastWeek.platform}</div>
-                            <div className="summary-card-metric">
-                                <span className="metric-label">Leads</span>
-                                <span className="metric-value">{adsData.lastWeek.leads}</span>
-                            </div>
-                            <div style={{ marginTop: '8px' }}>
-                                <span className="metric-badge badge-scale">{adsData.lastWeek.action}</span>
-                            </div>
-                        </div>
-                        <div className="summary-card">
-                            <div className="summary-card-header">Best Ad • This Week</div>
-                            <div className="summary-card-title">{adsData.thisWeek.name}</div>
-                            <div className="summary-card-meta">{adsData.thisWeek.platform}</div>
-                            <div className="summary-card-metric">
-                                <span className="metric-label">Leads</span>
-                                <span className="metric-value">{adsData.thisWeek.leads}</span>
-                            </div>
-                            <div style={{ marginTop: '8px' }}>
-                                <span className="metric-badge badge-monitor">{adsData.thisWeek.action}</span>
-                            </div>
-                        </div>
+                        ))}
                     </>
                 )}
                 {platformFilter !== 'ads' && (
-                    <div className="summary-card">
+                    <div
+                        className={`summary-card${activeTimeWindow === 'today' ? ' summary-card--active' : ''}`}
+                        onClick={() => setActiveTimeWindow('today')}
+                        style={{ cursor: 'pointer' }}
+                    >
                         <div className="summary-card-header">Best Reel • Most Reach</div>
-                        <div className="summary-card-title">{reelsData.lastMonth.name}</div>
-                        <div className="summary-card-meta">{reelsData.lastMonth.platform}</div>
+                        <div className="summary-card-title">{currentReel?.name ?? '—'}</div>
+                        <div className="summary-card-meta">{currentReel?.platform ?? 'Instagram'}</div>
                         <div className="summary-card-metric">
                             <span className="metric-label">Reach</span>
-                            <span className="metric-value">{(reelsData.lastMonth.reach / 1000).toFixed(0)}K</span>
+                            <span className="metric-value">{fmtReach(currentReel?.reach ?? 0)}</span>
                         </div>
                         <div style={{ marginTop: '8px' }}>
-                            <span className="metric-badge badge-boost">{reelsData.lastMonth.action}</span>
+                            <span className="metric-badge badge-boost">{currentReel?.action ?? 'MONITOR'}</span>
                         </div>
                     </div>
                 )}
@@ -822,54 +879,111 @@ export default function AIInsights() {
                 </button>
             </div>
 
-            {/* MAIN CONTENT GRID */}
-            <div className="ai-content-grid">
+            {/* MAIN CONTENT GRID — visual cards like BestPerformingReel */}
+            <div className="ai-perf-cards-grid">
                 {platformFilter !== 'reels' && (
-                    <div className="performance-panel fade-in" key={activeTimeWindow + '-ad'}>
-                        <div className="panel-header">
-                            <h3 className="panel-title">Best Performing Ad</h3>
-                            <div className="panel-icon icon-ad">
-                                <i className="fas fa-ad"></i>
-                            </div>
+                    <div className="ai-perf-card fade-in" key={activeTimeWindow + '-ad'}>
+                        <div className="ai-perf-card-header">
+                            <h3 className="ai-perf-card-heading">Best Performing Ad <span style={{ fontSize: '0.7em', fontWeight: 400, color: '#6366f1' }}>• {periodLabel}</span></h3>
+                            <div className="ai-perf-card-icon ai-perf-card-icon--ad"><i className="fas fa-ad"></i></div>
                         </div>
-                        <div className="performance-item">
-                            <div className="perf-name">{currentAd.name}</div>
-                            <div className="perf-meta">
-                                <i className="fas fa-layer-group"></i> {currentAd.platform}
-                                <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
-                                ₹{currentAd.spend} Spend
-                                <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
-                                {currentAd.leads} Leads
+                        <div className="ai-perf-card-body ai-perf-card-body--ad">
+                            {/* Visual: gradient hero with ad icon */}
+                            <div className="ai-perf-thumb ai-perf-thumb--ad">
+                                <div className="ai-perf-thumb-overlay">
+                                    <i className="fas fa-bullhorn"></i>
+                                </div>
+                                <div className="ai-perf-thumb-badge"><i className="fab fa-facebook"></i> {currentAd.platform}</div>
                             </div>
-                            <div className="perf-reason">{currentAd.reason}</div>
-                            <span className={`perf-action action-${currentAd.action.toLowerCase()}`}>
-                                <i className="fas fa-arrow-up"></i> AI Action: {currentAd.action}
-                            </span>
+                            <div className="ai-perf-card-info">
+                                <h4 className="ai-perf-card-title" title={currentAd.name}>{currentAd.name}</h4>
+                                {(currentAd.dateStart || currentAd.dateStop) && (
+                                    <p className="ai-perf-card-date">
+                                        <i className="far fa-calendar-alt"></i>
+                                        {currentAd.dateStart === currentAd.dateStop
+                                            ? fmtDate(currentAd.dateStart)
+                                            : `${fmtDate(currentAd.dateStart)} — ${fmtDate(currentAd.dateStop)}`}
+                                    </p>
+                                )}
+                                <div className="ai-perf-metrics">
+                                    <div className="ai-perf-metric">
+                                        <i className="fas fa-money-bill-wave"></i>
+                                        <span className="ai-perf-metric-val">{fmtMoney(currentAd.spend)}</span>
+                                        <span className="ai-perf-metric-lbl">Spend</span>
+                                    </div>
+                                    <div className="ai-perf-metric">
+                                        <i className="fas fa-users"></i>
+                                        <span className="ai-perf-metric-val">{fmtInt(currentAd.leads)}</span>
+                                        <span className="ai-perf-metric-lbl">Leads</span>
+                                    </div>
+                                    <div className="ai-perf-metric">
+                                        <i className="fas fa-tag"></i>
+                                        <span className="ai-perf-metric-val">{fmtMoney(currentAd.cpl)}</span>
+                                        <span className="ai-perf-metric-lbl">CPL</span>
+                                    </div>
+                                </div>
+                                <p className="ai-perf-card-reason">{currentAd.reason}</p>
+                                <span className={`ai-perf-action-badge ai-perf-action--${currentAd.action.toLowerCase()}`}>
+                                    <i className="fas fa-arrow-up"></i> {currentAd.action}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 )}
                 {platformFilter !== 'ads' && (
-                    <div className="performance-panel fade-in" key={activeTimeWindow + '-reel'}>
-                        <div className="panel-header">
-                            <h3 className="panel-title">Best Performing Reel</h3>
-                            <div className="panel-icon icon-reel">
-                                <i className="fas fa-video"></i>
-                            </div>
+                    <div className="ai-perf-card fade-in" key={activeTimeWindow + '-reel'}>
+                        <div className="ai-perf-card-header">
+                            <h3 className="ai-perf-card-heading">Best Performing Reel <span style={{ fontSize: '0.7em', fontWeight: 400, color: '#6366f1' }}>• {periodLabel}</span>{isReelFallback && <span style={{ fontSize: '0.65em', fontWeight: 400, color: '#94a3b8', marginLeft: 6 }}>(Latest reel)</span>}</h3>
+                            <div className="ai-perf-card-icon ai-perf-card-icon--reel"><i className="fas fa-video"></i></div>
                         </div>
-                        <div className="performance-item">
-                            <div className="perf-name">{currentReel.name}</div>
-                            <div className="perf-meta">
-                                <i className="fab fa-instagram"></i> {currentReel.platform}
-                                <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
-                                {(currentReel.reach / 1000).toFixed(0)}K Reach
-                                <span style={{ margin: '0 8px', color: '#cbd5e1' }}>•</span>
-                                {currentReel.engagements} Engagements
+                        {currentReel ? (
+                            <div className="ai-perf-card-body ai-perf-card-body--reel">
+                                <div className="ai-perf-thumb ai-perf-thumb--reel">
+                                    {currentReel.thumbnail_url ? (
+                                        <img src={currentReel.thumbnail_url} alt="" className="ai-perf-thumb-img" />
+                                    ) : (
+                                        <div className="ai-perf-thumb-overlay ai-perf-thumb-overlay--reel">
+                                            <i className="fas fa-film"></i>
+                                        </div>
+                                    )}
+                                    <span className="ai-perf-thumb-play"><i className="fas fa-play"></i></span>
+                                    <div className="ai-perf-thumb-badge"><i className="fab fa-instagram"></i> {currentReel.platform}</div>
+                                </div>
+                                <div className="ai-perf-card-info">
+                                    <h4 className="ai-perf-card-title" title={currentReel.name}>{currentReel.name}</h4>
+                                    {currentReel.timestamp && (
+                                        <p className="ai-perf-card-date">
+                                            <i className="far fa-calendar-alt"></i> Posted: {fmtDateTime(currentReel.timestamp)}
+                                        </p>
+                                    )}
+                                    <div className="ai-perf-metrics">
+                                        <div className="ai-perf-metric"><i className="fas fa-eye"></i><span className="ai-perf-metric-val">{fmtReach(currentReel.views || currentReel.reach)}</span><span className="ai-perf-metric-lbl">Views</span></div>
+                                        <div className="ai-perf-metric"><i className="fas fa-heart"></i><span className="ai-perf-metric-val">{fmtInt(currentReel.likes)}</span><span className="ai-perf-metric-lbl">Likes</span></div>
+                                        <div className="ai-perf-metric"><i className="fas fa-comment"></i><span className="ai-perf-metric-val">{fmtInt(currentReel.comments)}</span><span className="ai-perf-metric-lbl">Comments</span></div>
+                                        <div className="ai-perf-metric"><i className="fas fa-share"></i><span className="ai-perf-metric-val">{fmtInt(currentReel.shares)}</span><span className="ai-perf-metric-lbl">Shares</span></div>
+                                        <div className="ai-perf-metric"><i className="fas fa-bookmark"></i><span className="ai-perf-metric-val">{fmtInt(currentReel.saves)}</span><span className="ai-perf-metric-lbl">Saved</span></div>
+                                        <div className="ai-perf-metric"><i className="fas fa-signal"></i><span className="ai-perf-metric-val">{fmtReach(currentReel.reach)}</span><span className="ai-perf-metric-lbl">Reach</span></div>
+                                    </div>
+                                    <p className="ai-perf-card-reason">{currentReel.reason}</p>
+                                    <span className={`ai-perf-action-badge ai-perf-action--${(currentReel.action || 'monitor').toLowerCase()}`}>
+                                        <i className="fas fa-bolt"></i> {currentReel.action || 'MONITOR'}
+                                    </span>
+                                    {currentReel.permalink && (
+                                        <a href={currentReel.permalink} target="_blank" rel="noopener noreferrer" className="ai-perf-card-link">
+                                            <i className="fas fa-external-link-alt"></i> View on Instagram
+                                        </a>
+                                    )}
+                                </div>
                             </div>
-                            <div className="perf-reason">{currentReel.reason}</div>
-                            <span className={`perf-action action-${currentReel.action.toLowerCase()}`}>
-                                <i className="fas fa-bolt"></i> AI Action: {currentReel.action}
-                            </span>
-                        </div>
+                        ) : (
+                            <div className="ai-perf-card-body ai-perf-card-body--reel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+                                <div style={{ textAlign: 'center', color: '#94a3b8' }}>
+                                    <i className="fas fa-video-slash" style={{ fontSize: '2rem', marginBottom: 12, display: 'block' }}></i>
+                                    <p style={{ margin: 0, fontWeight: 600 }}>No reels posted in this period</p>
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.85rem' }}>Try selecting a wider date range</p>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

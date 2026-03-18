@@ -1,219 +1,322 @@
 // server/repositories/uniqueLeadsRepository.js
 const { supabase } = require('../supabase');
 
-const TABLES = {
-  paid: 'unique_leads_paid',
-  youtube: 'unique_leads_youtube',
-  free: 'unique_leads_free'
+const SOURCE_LABELS = {
+  paid: 'Paid',
+  youtube: 'YouTube',
+  free: 'Free',
+  direct_walk_in: 'Direct Walk-In'
 };
 
-const SOURCE_LABELS = { paid: 'Paid', youtube: 'YouTube', free: 'Free' };
+const SOURCE_PRIORITY = ['Paid', 'YouTube', 'Free', 'Direct Walk-In'];
 
-/**
- * Get set of phone numbers from a category table (normalized for matching)
- */
+function expandScientific(val) {
+  let str = String(val).trim();
+  if (/[eE]/.test(str)) {
+    const num = Number(str);
+    if (!isNaN(num) && isFinite(num)) return num.toFixed(0);
+  }
+  return str;
+}
+
 function normalizePhone(phone) {
   if (phone == null || phone === '') return '';
-  return String(phone).trim().replace(/\s/g, '');
+  return expandScientific(phone).replace(/\s/g, '');
 }
 
-async function getPhonesFromTable(tableName) {
-  if (!supabase) throw new Error('Supabase not configured');
-  const { data, error } = await supabase.from(tableName).select('phone');
-  if (error) throw error;
-  const set = new Set();
-  (data || []).forEach((row) => {
-    const p = normalizePhone(row.phone);
-    if (p) set.add(p);
-  });
-  return set;
-}
-async function getPaidPhones() {
-  return getPhonesFromTable(TABLES.paid);
-}
-async function getYouTubePhones() {
-  return getPhonesFromTable(TABLES.youtube);
+function extractLast10Digits(phone) {
+  const digitsOnly = expandScientific(phone).replace(/[^0-9]/g, '');
+  if (digitsOnly.length < 10) return null;
+  return digitsOnly.slice(-10);
 }
 
-/**
- * Build row for DB from normalized lead object
- */
-function toRow(lead, sourceType) {
+const PRIORITY_RANK = { 'Paid': 1, 'YouTube': 2, 'Free': 3, 'Direct Walk-In': 4 };
+
+function getEffectivePriority(sourceType) {
+  if (!sourceType) return 99;
+  const sources = sourceType.split(',').map(s => s.trim());
+  let best = 99;
+  for (const s of sources) {
+    const p = PRIORITY_RANK[s];
+    if (p !== undefined && p < best) best = p;
+  }
+  return best;
+}
+
+function getEffectiveSource(sourceType) {
+  if (!sourceType) return null;
+  const sources = sourceType.split(',').map(s => s.trim());
+  let best = null;
+  let bestRank = 99;
+  for (const s of sources) {
+    const p = PRIORITY_RANK[s];
+    if (p !== undefined && p < bestRank) { bestRank = p; best = s; }
+  }
+  return best;
+}
+
+function toRow(lead, sourceLabel) {
+  const phone = normalizePhone(lead.phoneNumber ?? lead.phone ?? '');
+  const userId = extractLast10Digits(phone);
   return {
     date_time: lead.dateTime ?? lead.date_time ?? '',
     batch_code: lead.batchCode ?? lead.batch_code ?? '',
-    name: lead.name ?? '',
-    phone: normalizePhone(lead.phoneNumber ?? lead.phone ?? lead.phoneNumber ?? '') || '',
+    phone,
+    user_id: userId,
     sugar_poll: lead.sugarPoll ?? lead.sugar_poll ?? '',
     email: lead.email ?? '',
-    lead_source_type: sourceType
+    lead_source_type: sourceLabel
   };
 }
 
-/**
- * Paid import: insert all. Remove any matching phones from YouTube and Free (Paid overrides).
- * Deduplicate by phone so one upsert batch never has the same phone twice (avoids PostgreSQL "cannot affect row a second time").
- */
-async function importPaid(rows) {
+async function getExistingByUserIds(userIds) {
   if (!supabase) throw new Error('Supabase not configured');
-  const normalized = rows.map((r) => toRow(r, SOURCE_LABELS.paid)).filter((r) => r.phone);
-  const seen = new Set();
-  const toInsert = [];
-  for (const row of normalized) {
-    if (seen.has(row.phone)) continue;
-    seen.add(row.phone);
-    toInsert.push(row);
-  }
-  if (toInsert.length === 0) return { imported: 0, conflicts: [] };
-
-  const phones = toInsert.map((r) => r.phone);
-  await supabase.from(TABLES.youtube).delete().in('phone', phones);
-  await supabase.from(TABLES.free).delete().in('phone', phones);
-
+  const map = new Map();
   const batchSize = 500;
-  let imported = 0;
-  for (let i = 0; i < toInsert.length; i += batchSize) {
-    const batch = toInsert.slice(i, i + batchSize);
-    const { error } = await supabase.from(TABLES.paid).upsert(batch, { onConflict: 'phone' });
+  for (let i = 0; i < userIds.length; i += batchSize) {
+    const batch = userIds.slice(i, i + batchSize);
+    const { data, error } = await supabase
+      .from('unique_leads')
+      .select('user_id, lead_source_type')
+      .in('user_id', batch);
     if (error) throw error;
-    imported += batch.length;
+    (data || []).forEach(r => map.set(r.user_id, r.lead_source_type));
   }
-  return { imported, conflicts: [] };
+  return map;
 }
 
-/**
- * YouTube import: exclude phones already in Paid. Those go to conflicts.
- */
-async function importYouTube(rows) {
-  if (!supabase) throw new Error('Supabase not configured');
-  const paidPhones = await getPaidPhones();
-  const normalized = rows.map((r) => ({ ...toRow(r, SOURCE_LABELS.youtube), _raw: r }));
-  const toInsert = [];
-  const conflicts = [];
-  const seen = new Set();
-  for (const row of normalized) {
-    if (!row.phone) continue;
-    if (paidPhones.has(row.phone)) {
-      conflicts.push({
-        phone: row.phone,
-        name: row.name,
-        sourceConflict: 'YouTube',
-        existingTableName: 'Paid Leads'
-      });
-      continue;
-    }
-    if (seen.has(row.phone)) continue;
-    seen.add(row.phone);
-    toInsert.push(row);
-  }
-
-  if (toInsert.length > 0) {
-    const batchSize = 500;
-    for (let i = 0; i < toInsert.length; i += batchSize) {
-      const batch = toInsert.slice(i, i + batchSize).map(({ _raw, ...r }) => r);
-      const { error } = await supabase.from(TABLES.youtube).upsert(batch, { onConflict: 'phone' });
-      if (error) throw error;
-    }
-  }
-  return { imported: toInsert.length, conflicts };
-}
-
-/**
- * Free import: exclude phones in Paid or YouTube. Those go to conflicts.
- */
-async function importFree(rows) {
-  if (!supabase) throw new Error('Supabase not configured');
-  const [paidPhones, youtubePhones] = await Promise.all([getPaidPhones(), getYouTubePhones()]);
-  const normalized = rows.map((r) => ({ ...toRow(r, SOURCE_LABELS.free), _raw: r }));
-  const toInsert = [];
-  const conflicts = [];
-  const seen = new Set();
-  for (const row of normalized) {
-    if (!row.phone) continue;
-    if (paidPhones.has(row.phone)) {
-      conflicts.push({
-        phone: row.phone,
-        name: row.name,
-        sourceConflict: 'Free',
-        existingTableName: 'Paid Leads'
-      });
-      continue;
-    }
-    if (youtubePhones.has(row.phone)) {
-      conflicts.push({
-        phone: row.phone,
-        name: row.name,
-        sourceConflict: 'Free',
-        existingTableName: 'YouTube Leads'
-      });
-      continue;
-    }
-    if (seen.has(row.phone)) continue;
-    seen.add(row.phone);
-    toInsert.push(row);
-  }
-
-  if (toInsert.length > 0) {
-    const batchSize = 500;
-    for (let i = 0; i < toInsert.length; i += batchSize) {
-      const batch = toInsert.slice(i, i + batchSize).map(({ _raw, ...r }) => r);
-      const { error } = await supabase.from(TABLES.free).upsert(batch, { onConflict: 'phone' });
-      if (error) throw error;
-    }
-  }
-  return { imported: toInsert.length, conflicts };
-}
-
-/**
- * Import by source type. Returns { imported, conflicts, previewRows }.
- */
 async function importLeads(sourceType, rows) {
-  const allowed = ['paid', 'youtube', 'free'];
+  if (!supabase) throw new Error('Supabase not configured');
+
+  const allowed = ['paid', 'youtube', 'free', 'direct_walk_in'];
   const src = sourceType && allowed.includes(String(sourceType).toLowerCase())
     ? String(sourceType).toLowerCase()
     : null;
-  if (!src) throw new Error('Invalid source type. Use: paid, youtube, or free');
+  if (!src) throw new Error('Invalid source type. Use: paid, youtube, free, or direct_walk_in');
 
-  let result;
-  if (src === 'paid') result = await importPaid(rows);
-  else if (src === 'youtube') result = await importYouTube(rows);
-  else result = await importFree(rows);
+  const sourceLabel = SOURCE_LABELS[src];
+  const newPriority = PRIORITY_RANK[sourceLabel];
+  const processed = rows.map(r => toRow(r, sourceLabel));
 
-  const previewRows = rows.slice(0, 500).map((r) => ({
-    dateTime: r.dateTime ?? r.date_time,
-    batchCode: r.batchCode ?? r.batch_code,
-    name: r.name,
-    phoneNumber: r.phoneNumber ?? r.phone,
-    sugarPoll: r.sugarPoll ?? r.sugar_poll,
-    email: r.email,
-    leadSourceType: SOURCE_LABELS[src]
-  }));
-  return { ...result, previewRows };
+  const validRows = [];
+  const errorRows = [];
+  for (const row of processed) {
+    if (!row.user_id) {
+      errorRows.push({
+        phone: row.phone,
+        batchCode: row.batch_code,
+        error: 'Phone number has fewer than 10 digits'
+      });
+    } else {
+      validRows.push(row);
+    }
+  }
+
+  if (validRows.length === 0) {
+    return {
+      imported: 0,
+      upgraded: 0,
+      duplicatesFound: 0,
+      errors: errorRows.length,
+      previewRows: [],
+      errorRows: errorRows.slice(0, 100)
+    };
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const row of validRows) {
+    if (!seen.has(row.user_id)) {
+      seen.add(row.user_id);
+      deduped.push(row);
+    }
+  }
+
+  const uniqueUserIds = deduped.map(r => r.user_id);
+  const existingMap = await getExistingByUserIds(uniqueUserIds);
+
+  const toInsert = [];
+  const toUpgradeIds = [];
+  const duplicateRows = [];
+  let upgradedCount = 0;
+
+  if (src === 'paid') {
+    // Rule 1: Paid always overrides. No conflicts. Insert all + upgrade lower sources.
+    for (const row of deduped) {
+      const existingSource = existingMap.get(row.user_id);
+      toInsert.push(row);
+      if (existingSource && getEffectiveSource(existingSource) !== 'Paid') {
+        upgradedCount++;
+      }
+    }
+  } else {
+    // Rules 2-4: Check against higher-priority sources
+    for (const row of deduped) {
+      const existingSource = existingMap.get(row.user_id);
+
+      if (!existingSource) {
+        toInsert.push(row);
+        continue;
+      }
+
+      const existingPri = getEffectivePriority(existingSource);
+
+      if (newPriority < existingPri) {
+        // Uploading higher priority than existing → upgrade
+        toUpgradeIds.push(row.user_id);
+        upgradedCount++;
+      } else if (newPriority > existingPri) {
+        // Existing has higher priority → conflict (do NOT insert)
+        duplicateRows.push({
+          date_time: row.date_time,
+          batch_code: row.batch_code,
+          phone: row.phone,
+          user_id: row.user_id,
+          sugar_poll: row.sugar_poll,
+          email: row.email,
+          uploaded_as: sourceLabel,
+          existing_sources: getEffectiveSource(existingSource) || existingSource
+        });
+      }
+      // Same priority (same source) → skip silently
+    }
+  }
+
+  // Insert new leads (for Paid this upserts all, upgrading lower sources automatically)
+  if (toInsert.length > 0) {
+    const batchSize = 500;
+    for (let i = 0; i < toInsert.length; i += batchSize) {
+      const batch = toInsert.slice(i, i + batchSize);
+      const { error } = await supabase
+        .from('unique_leads')
+        .upsert(batch, { onConflict: 'user_id' });
+      if (error) throw error;
+    }
+  }
+
+  // Batch-upgrade existing leads to the new higher-priority source
+  if (toUpgradeIds.length > 0) {
+    const batchSize = 500;
+    for (let i = 0; i < toUpgradeIds.length; i += batchSize) {
+      const batch = toUpgradeIds.slice(i, i + batchSize);
+      const { error } = await supabase
+        .from('unique_leads')
+        .update({ lead_source_type: sourceLabel })
+        .in('user_id', batch);
+      if (error) throw error;
+    }
+  }
+
+  // Store conflicts in duplicate_leads table
+  if (duplicateRows.length > 0) {
+    const batchSize = 500;
+    for (let i = 0; i < duplicateRows.length; i += batchSize) {
+      const batch = duplicateRows.slice(i, i + batchSize);
+      const { error } = await supabase.from('duplicate_leads').insert(batch);
+      if (error) throw error;
+    }
+  }
+
+  const newInserts = src === 'paid'
+    ? deduped.filter(r => !existingMap.has(r.user_id)).length
+    : toInsert.length;
+
+  const previewRows = rows.slice(0, 500).map(r => {
+    const phone = normalizePhone(r.phoneNumber ?? r.phone ?? '');
+    const userId = extractLast10Digits(phone);
+    return {
+      dateTime: r.dateTime ?? r.date_time,
+      batchCode: r.batchCode ?? r.batch_code,
+      phoneNumber: r.phoneNumber ?? r.phone,
+      userId: userId || '',
+      sugarPoll: r.sugarPoll ?? r.sugar_poll,
+      email: r.email,
+      leadSourceType: sourceLabel
+    };
+  });
+
+  return {
+    imported: newInserts,
+    upgraded: upgradedCount,
+    duplicatesFound: duplicateRows.length,
+    errors: errorRows.length,
+    previewRows,
+    errorRows: errorRows.slice(0, 100)
+  };
 }
 
-/**
- * Get all leads for a category (for export)
- */
-async function getByCategory(category) {
+async function getLeads(filter) {
   if (!supabase) throw new Error('Supabase not configured');
-  const table = TABLES[category];
-  if (!table) throw new Error('Invalid category. Use: paid, youtube, or free');
-  const { data, error } = await supabase.from(table).select('*').order('id', { ascending: true });
+
+  let query = supabase.from('unique_leads').select('*').order('id', { ascending: true });
+
+  if (filter === 'duplicates') {
+    query = query.like('lead_source_type', '%,%');
+  } else if (filter && filter !== 'all') {
+    const sourceLabel = SOURCE_LABELS[filter];
+    if (sourceLabel) {
+      query = query.eq('lead_source_type', sourceLabel);
+    }
+  } else {
+    query = query.not('lead_source_type', 'like', '%,%');
+  }
+
+  const { data, error } = await query;
   if (error) throw error;
-  return (data || []).map((row) => ({
+
+  return (data || []).map(row => ({
     dateTime: row.date_time,
     batchCode: row.batch_code,
-    name: row.name,
     phoneNumber: row.phone,
+    userId: row.user_id,
     sugarPoll: row.sugar_poll,
     email: row.email,
     leadSourceType: row.lead_source_type
   }));
 }
 
+async function getDuplicates() {
+  if (!supabase) throw new Error('Supabase not configured');
+
+  const { data, error } = await supabase
+    .from('duplicate_leads')
+    .select('*')
+    .order('detected_at', { ascending: false });
+  if (error) throw error;
+
+  return (data || []).map(row => ({
+    id: row.id,
+    dateTime: row.date_time,
+    batchCode: row.batch_code,
+    phoneNumber: row.phone,
+    userId: row.user_id,
+    sugarPoll: row.sugar_poll,
+    email: row.email,
+    uploadedAs: row.uploaded_as,
+    existingSources: row.existing_sources,
+    detectedAt: row.detected_at
+  }));
+}
+
+async function deleteDuplicate(id) {
+  if (!supabase) throw new Error('Supabase not configured');
+  const { error } = await supabase.from('duplicate_leads').delete().eq('id', id);
+  if (error) throw error;
+  return { deleted: 1 };
+}
+
+async function bulkDeleteDuplicates(ids) {
+  if (!supabase) throw new Error('Supabase not configured');
+  const { error } = await supabase.from('duplicate_leads').delete().in('id', ids);
+  if (error) throw error;
+  return { deleted: ids.length };
+}
+
 module.exports = {
   importLeads,
-  getByCategory,
-  TABLES,
+  getLeads,
+  getDuplicates,
+  deleteDuplicate,
+  bulkDeleteDuplicates,
   SOURCE_LABELS
 };

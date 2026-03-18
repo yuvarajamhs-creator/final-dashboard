@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ExcelJS from 'exceljs';
 import { auth } from '../utils/auth';
@@ -20,11 +20,9 @@ const getAuthToken = () => {
   return null;
 };
 
-// Expected columns (flexible matching)
 const COLUMN_ALIASES = {
   dateTime: ['date with time', 'date & time', 'date and time', 'date_time', 'datetime', 'date'],
   batchCode: ['batch code', 'batchcode', 'batch'],
-  name: ['name'],
   phoneNumber: ['phone number', 'phone', 'phonenumber', 'mobile', 'contact'],
   sugarPoll: ['sugar poll', 'sugar_poll', 'sugarpoll'],
   email: ['email']
@@ -63,12 +61,12 @@ function parseCSV(text) {
   const rows = lines.map((line) => {
     const cells = [];
     let cell = '';
-    inQuotes = false;
+    let q = false;
     for (let j = 0; j < line.length; j++) {
       const c = line[j];
       if (c === '"') {
-        inQuotes = !inQuotes;
-      } else if ((c === ',' || c === '\t') && !inQuotes) {
+        q = !q;
+      } else if ((c === ',' || c === '\t') && !q) {
         cells.push(cell.trim());
         cell = '';
       } else {
@@ -92,6 +90,20 @@ function parseExcelRows(rows, headers) {
   });
 }
 
+function expandPhone(phone) {
+  let str = String(phone || '').trim();
+  if (/[eE]/.test(str)) {
+    const num = Number(str);
+    if (!isNaN(num) && isFinite(num)) str = num.toFixed(0);
+  }
+  return str;
+}
+
+function extractLast10(phone) {
+  const digits = expandPhone(phone).replace(/[^0-9]/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
 export default function UniqueLeads() {
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
@@ -100,14 +112,28 @@ export default function UniqueLeads() {
   const [importResult, setImportResult] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [conflictModal, setConflictModal] = useState(false);
-  const [conflictData, setConflictData] = useState([]);
-  const [tableViewFilter, setTableViewFilter] = useState('all'); // 'all' | 'paid' | 'youtube' | 'free' | 'last_import'
+  const [tableViewFilter, setTableViewFilter] = useState('all');
   const [dbLeads, setDbLeads] = useState([]);
   const [loadingDb, setLoadingDb] = useState(false);
+  const [showDupModal, setShowDupModal] = useState(false);
+  const [selectedDupIds, setSelectedDupIds] = useState(new Set());
+  const [deletingDupIds, setDeletingDupIds] = useState(new Set());
   const fileInputRef = useRef(null);
 
-  // Load leads from DB when table view filter is a category or 'all'
+  const isDuplicatesView = tableViewFilter === 'duplicates';
+
+  const redirectToLogin = useCallback(() => {
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* noop */ }
+    if (auth && typeof auth.logout === 'function') auth.logout();
+    navigate('/login', { state: { from: '/unique-leads' }, replace: true });
+  }, [navigate]);
+
+  const authHeaders = useCallback(() => {
+    const token = getAuthToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, []);
+
+  // Load leads or duplicates based on filter
   useEffect(() => {
     if (tableViewFilter === 'last_import') {
       setDbLeads([]);
@@ -117,33 +143,24 @@ export default function UniqueLeads() {
     const load = async () => {
       setLoadingDb(true);
       try {
-        const token = getAuthToken();
-        const headers = token ? { Authorization: `Bearer ${token}` } : {};
-        if (tableViewFilter === 'all') {
-          const [paidRes, youtubeRes, freeRes] = await Promise.all([
-            fetch(`${API_BASE}/api/unique-leads/export?category=paid`, { headers }),
-            fetch(`${API_BASE}/api/unique-leads/export?category=youtube`, { headers }),
-            fetch(`${API_BASE}/api/unique-leads/export?category=free`, { headers })
-          ]);
-          if (paidRes.status === 401 || youtubeRes.status === 401 || freeRes.status === 401) {
-            redirectToLogin();
-            return;
-          }
-          const [paid, youtube, free] = await Promise.all([
-            paidRes.ok ? paidRes.json() : [],
-            youtubeRes.ok ? youtubeRes.json() : [],
-            freeRes.ok ? freeRes.json() : []
-          ]);
-          if (!cancelled) setDbLeads([...(paid || []), ...(youtube || []), ...(free || [])]);
-        } else {
-          const res = await fetch(`${API_BASE}/api/unique-leads/export?category=${tableViewFilter}`, { headers });
-          if (res.status === 401) {
-            redirectToLogin();
-            return;
-          }
-          if (!res.ok) throw new Error('Failed to load');
-          const data = await res.json();
-          if (!cancelled) setDbLeads(data || []);
+        const headers = authHeaders();
+        const url = tableViewFilter === 'duplicates'
+          ? `${API_BASE}/api/unique-leads/duplicates`
+          : `${API_BASE}/api/unique-leads/export?category=${tableViewFilter}`;
+        const res = await fetch(url, { headers });
+        if (res.status === 401) { redirectToLogin(); return; }
+        if (!res.ok) throw new Error('Failed to load');
+        let data = await res.json();
+        data = data || [];
+        if (tableViewFilter === 'duplicates') {
+          data = data.map((row) => ({
+            ...row,
+            leadSourceType: `Uploaded: ${row.uploadedAs ?? ''} → Existing: ${row.existingSources ?? ''}`
+          }));
+        }
+        if (!cancelled) {
+          setDbLeads(data);
+          if (tableViewFilter === 'duplicates') setSelectedDupIds(new Set());
         }
       } catch (e) {
         if (!cancelled) setDbLeads([]);
@@ -153,14 +170,69 @@ export default function UniqueLeads() {
     };
     load();
     return () => { cancelled = true; };
-  }, [tableViewFilter]);
+  }, [tableViewFilter, authHeaders, redirectToLogin]);
 
-  const redirectToLogin = () => {
+  const reloadDuplicates = useCallback(async () => {
+    if (tableViewFilter !== 'duplicates') return;
+    setLoadingDb(true);
     try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {}
-    if (auth && typeof auth.logout === 'function') auth.logout();
-    navigate('/login', { state: { from: '/unique-leads' }, replace: true });
+      const res = await fetch(`${API_BASE}/api/unique-leads/duplicates`, { headers: authHeaders() });
+      if (res.status === 401) { redirectToLogin(); return; }
+      if (!res.ok) throw new Error('Failed to load');
+      let data = await res.json();
+      data = (data || []).map((row) => ({
+        ...row,
+        leadSourceType: `Uploaded: ${row.uploadedAs ?? ''} → Existing: ${row.existingSources ?? ''}`
+      }));
+      setDbLeads(data);
+      setSelectedDupIds(new Set());
+    } catch (e) {
+      setDbLeads([]);
+    } finally {
+      setLoadingDb(false);
+    }
+  }, [tableViewFilter, authHeaders, redirectToLogin]);
+
+  const toggleDupSelection = (id) => {
+    setSelectedDupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllDuplicates = () => {
+    if (!isDuplicatesView || !dbLeads.length) return;
+    if (selectedDupIds.size === dbLeads.length) {
+      setSelectedDupIds(new Set());
+    } else {
+      setSelectedDupIds(new Set(dbLeads.map((r) => r.id).filter(Boolean)));
+    }
+  };
+
+  const handleBulkDeleteDuplicates = async () => {
+    if (selectedDupIds.size === 0) return;
+    const ids = [...selectedDupIds];
+    setDeletingDupIds((prev) => new Set([...prev, ...ids]));
+    try {
+      const res = await fetch(`${API_BASE}/api/unique-leads/duplicates/bulk`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ ids })
+      });
+      if (res.status === 401) { redirectToLogin(); return; }
+      if (!res.ok) throw new Error('Bulk delete failed');
+      await reloadDuplicates();
+    } catch (e) {
+      setError(e.message || 'Bulk delete failed');
+    } finally {
+      setDeletingDupIds((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
   };
 
   const handleFileSelect = async (e) => {
@@ -222,11 +294,11 @@ export default function UniqueLeads() {
         parsedRows = parseExcelRows(dataRows, headerRow);
       }
 
-      const required = ['dateTime', 'batchCode', 'name', 'phoneNumber', 'sugarPoll', 'email'];
+      const required = ['dateTime', 'batchCode', 'phoneNumber', 'sugarPoll', 'email'];
       const first = parsedRows[0] || {};
       const missing = required.filter((k) => first[k] === undefined || first[k] === '');
       if (missing.length === required.length) {
-        setError('Could not find expected columns. Please use: Date with Time, Batch Code, Name, Phone Number, Sugar Poll, Email.');
+        setError('Could not find expected columns. Please use: Date with Time, Batch Code, Phone Number, Sugar Poll, Email.');
         return;
       }
       if (parsedRows.length > 50000) {
@@ -258,18 +330,15 @@ export default function UniqueLeads() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (res.status === 401) {
-          redirectToLogin();
-          return;
-        }
+        if (res.status === 401) { redirectToLogin(); return; }
         setError(data.error || 'Import failed');
         setLoading(false);
         return;
       }
       setImportResult(data);
-      if (data.conflicts && data.conflicts.length > 0) {
-        setConflictData(data.conflicts);
-        setConflictModal(true);
+      setTableViewFilter('last_import');
+      if (data.duplicatesFound > 0) {
+        setShowDupModal(true);
       }
     } catch (err) {
       setError(err.message || 'Import failed');
@@ -280,30 +349,26 @@ export default function UniqueLeads() {
 
   const downloadCategory = async (category, label) => {
     try {
-      const token = getAuthToken();
       const res = await fetch(`${API_BASE}/api/unique-leads/export?category=${category}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+        headers: authHeaders()
       });
       if (!res.ok) {
-        if (res.status === 401) {
-          redirectToLogin();
-          return;
-        }
+        if (res.status === 401) { redirectToLogin(); return; }
         throw new Error('Export failed');
       }
       const data = await res.json();
-      const headers = ['Date & Time', 'Batch Code', 'Name', 'Phone Number', 'Sugar Poll', 'Email', 'Lead Source Type'];
+      const csvHeaders = ['Date & Time', 'Batch Code', 'Phone Number', 'User ID', 'Sugar Poll', 'Email', 'Lead Source Type'];
       const csvRows = [
-        headers.join(','),
+        csvHeaders.join(','),
         ...data.map((r) =>
           [
             r.dateTime ?? '',
             r.batchCode ?? '',
-            (r.name ?? '').replace(/"/g, '""'),
             r.phoneNumber ?? '',
+            r.userId ?? '',
             (r.sugarPoll ?? '').replace(/"/g, '""'),
             (r.email ?? '').replace(/"/g, '""'),
-            r.leadSourceType ?? ''
+            (r.leadSourceType ?? '').replace(/"/g, '""')
           ].map((c) => (String(c).includes(',') ? `"${c}"` : c)).join(',')
         )
       ];
@@ -319,43 +384,86 @@ export default function UniqueLeads() {
     }
   };
 
-  const downloadConflictReport = () => {
-    const headers = ['Phone Number', 'Name', 'Source Conflict', 'Existing Table Name'];
-    const csvRows = [
-      headers.join(','),
-      ...conflictData.map((r) =>
-        [
-          r.phone ?? '',
-          (r.name ?? '').replace(/"/g, '""'),
-          r.sourceConflict ?? '',
-          r.existingTableName ?? ''
-        ].map((c) => (String(c).includes(',') ? `"${c}"` : c)).join(',')
-      )
-    ];
-    const blob = new Blob([csvRows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'Duplicate_Leads_Report.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-    setConflictModal(false);
+  const downloadDuplicates = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/unique-leads/duplicates`, { headers: authHeaders() });
+      if (!res.ok) {
+        if (res.status === 401) { redirectToLogin(); return; }
+        throw new Error('Export failed');
+      }
+      const data = await res.json();
+      const csvHeaders = ['Date & Time', 'Batch Code', 'Phone Number', 'User ID', 'Sugar Poll', 'Email', 'Uploaded As', 'Existing Sources', 'Detected At'];
+      const csvRows = [
+        csvHeaders.join(','),
+        ...data.map((r) =>
+          [
+            r.dateTime ?? '',
+            r.batchCode ?? '',
+            r.phoneNumber ?? '',
+            r.userId ?? '',
+            (r.sugarPoll ?? '').replace(/"/g, '""'),
+            (r.email ?? '').replace(/"/g, '""'),
+            r.uploadedAs ?? '',
+            (r.existingSources ?? '').replace(/"/g, '""'),
+            r.detectedAt ?? ''
+          ].map((c) => (String(c).includes(',') ? `"${c}"` : c)).join(',')
+        )
+      ];
+      const blob = new Blob([csvRows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Duplicate_Leads_Report.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'Download failed');
+    }
   };
 
   const previewRows = importResult?.previewRows ?? rows.slice(0, 500);
-  const hasConflicts = importResult?.conflicts?.length > 0;
-  // Apply filter: show last import preview or DB leads for selected category only
   const displayRows = tableViewFilter === 'last_import' ? previewRows : dbLeads;
   const displayCount = tableViewFilter === 'last_import'
     ? (importResult?.imported ?? previewRows.length)
     : dbLeads.length;
+
+  const FILTER_LABELS = {
+    all: 'all imported',
+    paid: 'Paid',
+    youtube: 'YouTube',
+    free: 'Free',
+    direct_walk_in: 'Direct Walk-In',
+    duplicates: 'Duplicate',
+    last_import: 'last import'
+  };
+
+  const buildMeta = () => {
+    if (tableViewFilter === 'last_import') {
+      if (!importResult) return 'No data yet. Import a file to see leads.';
+      let msg = `Imported ${importResult.imported} new lead(s).`;
+      if (importResult.upgraded > 0)
+        msg += ` ${importResult.upgraded} lead(s) upgraded.`;
+      if (importResult.duplicatesFound > 0)
+        msg += ` ${importResult.duplicatesFound} conflict(s) found.`;
+      if (importResult.errors > 0)
+        msg += ` ${importResult.errors} row(s) skipped (phone < 10 digits).`;
+      return msg;
+    }
+    if (tableViewFilter === 'all')
+      return `Showing all imported leads (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
+    if (tableViewFilter === 'duplicates')
+      return `Showing leads with multiple sources (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
+    return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} lead(s) (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
+  };
+
+  const colSpan = isDuplicatesView ? 9 : 8;
 
   return (
     <div className="unique-leads-container">
       <div className="unique-leads-header">
         <h1 className="unique-leads-title">Unique Leads Extraction</h1>
         <p className="unique-leads-subtitle">
-          Upload Excel or CSV, classify by source (Paid / YouTube / Free), and download deduplicated lead files.
+          Upload Excel or CSV, classify by source (Paid / YouTube / Free / Direct Walk-In), and download deduplicated lead files.
         </p>
       </div>
 
@@ -389,41 +497,47 @@ export default function UniqueLeads() {
         <>
           <div className="unique-leads-source-section">
             <label className="unique-leads-source-label">Select Source Type:</label>
-            <div className="unique-leads-source-options">
-              <label className="unique-leads-radio">
-                <input
-                  type="radio"
-                  name="sourceType"
-                  value="paid"
-                  checked={sourceType === 'paid'}
-                  onChange={() => setSourceType('paid')}
-                />
-                <span>Paid</span>
-              </label>
-              <label className="unique-leads-radio">
-                <input type="radio" name="sourceType" value="youtube" checked={sourceType === 'youtube'} onChange={() => setSourceType('youtube')} />
-                <span>YouTube</span>
-              </label>
-              <label className="unique-leads-radio">
-                <input type="radio" name="sourceType" value="free" checked={sourceType === 'free'} onChange={() => setSourceType('free')} />
-                <span>Free</span>
-              </label>
+            <div className="unique-leads-source-cards">
+              {[
+                { value: 'paid', label: 'Paid' },
+                { value: 'youtube', label: 'YouTube' },
+                { value: 'free', label: 'Free' },
+                { value: 'direct_walk_in', label: 'Direct Walk-In' }
+              ].map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className={`unique-leads-source-card unique-leads-source-card--${opt.value}${sourceType === opt.value ? ' active' : ''}`}
+                  onClick={() => setSourceType(opt.value)}
+                >
+                  <span className="source-card-checkbox">
+                    {sourceType === opt.value && (
+                      <svg viewBox="0 0 12 12" fill="none">
+                        <path d="M2.5 6L5 8.5L9.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    )}
+                  </span>
+                  <span className="source-card-label">{opt.label}</span>
+                </button>
+              ))}
             </div>
-            <button
-              type="button"
-              className="unique-leads-btn-import"
-              onClick={handleImport}
-              disabled={loading}
-            >
-              {loading ? 'Importing…' : 'Import'}
-            </button>
-            <button
-              type="button"
-              className="unique-leads-btn-secondary"
-              onClick={() => { setFile(null); setRows([]); setError(''); }}
-            >
-              Choose Another File
-            </button>
+            <div className="unique-leads-source-actions">
+              <button
+                type="button"
+                className="unique-leads-btn-import"
+                onClick={handleImport}
+                disabled={loading}
+              >
+                {loading ? 'Importing…' : 'Import'}
+              </button>
+              <button
+                type="button"
+                className="unique-leads-btn-secondary"
+                onClick={() => { setFile(null); setRows([]); setError(''); setImportResult(null); }}
+              >
+                Choose Another File
+              </button>
+            </div>
           </div>
 
           {file && !importResult && (
@@ -434,115 +548,199 @@ export default function UniqueLeads() {
         </>
       )}
 
-      <>
-        <section className="unique-leads-table-section unique-leads-chart-card">
-          <div className="unique-leads-card-body">
-            <div className="unique-leads-table-header">
-              <strong className="unique-leads-chart-title">
-                <span className="unique-leads-chart-emoji" aria-hidden>📋</span>
-                Imported Data Table Preview
-              </strong>
-              <div className="unique-leads-table-header-right">
-                <small className="unique-leads-subtitle-text">Deduplicated leads by source (Paid / YouTube / Free)</small>
-                <label className="unique-leads-filter-label">
-                  <span className="small fw-semibold text-secondary">Show:</span>
-                  <select
-                    className="form-select form-select-sm unique-leads-view-filter"
-                    value={tableViewFilter}
-                    onChange={(e) => setTableViewFilter(e.target.value)}
-                    aria-label="Filter table by source"
+      <section className="unique-leads-table-section unique-leads-chart-card">
+        <div className="unique-leads-card-body">
+          <div className="unique-leads-table-header">
+            <strong className="unique-leads-chart-title">
+              <span className="unique-leads-chart-emoji" aria-hidden>📋</span>
+              Imported Data Table Preview
+            </strong>
+            <div className="unique-leads-table-header-right">
+              <small className="unique-leads-subtitle-text">
+                Deduplicated leads by source (Paid / YouTube / Free / Direct Walk-In)
+              </small>
+              <div className="unique-leads-filter-chips">
+                {[
+                  { value: 'all', label: 'All Leads' },
+                  { value: 'paid', label: 'Paid' },
+                  { value: 'youtube', label: 'YouTube' },
+                  { value: 'free', label: 'Free' },
+                  { value: 'direct_walk_in', label: 'Walk-In' },
+                  { value: 'duplicates', label: 'Duplicates' },
+                  { value: 'last_import', label: 'Last Import' }
+                ].map(opt => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    className={`unique-leads-chip unique-leads-chip--${opt.value}${tableViewFilter === opt.value ? ' active' : ''}`}
+                    onClick={() => setTableViewFilter(opt.value)}
                   >
-                    <option value="all">All Imported Leads</option>
-                    <option value="paid">Paid leads only</option>
-                    <option value="youtube">YouTube leads only</option>
-                    <option value="free">Free leads only</option>
-                    <option value="last_import">Last Import</option>
-                  </select>
-                </label>
+                    {opt.label}
+                  </button>
+                ))}
               </div>
             </div>
-            <p className="unique-leads-meta">
-              {tableViewFilter === 'last_import'
-                ? (importResult
-                  ? `Imported ${importResult.imported} lead(s).${previewRows.length < (importResult.previewRows?.length ?? rows.length) ? ` Showing first ${previewRows.length} rows.` : ''}`
-                  : 'No data yet. Import a file to see leads.')
-                : tableViewFilter === 'all'
-                  ? `Showing all imported leads (${displayCount} total).${loadingDb ? ' Loading…' : ''}`
-                  : `Showing ${tableViewFilter === 'youtube' ? 'YouTube' : tableViewFilter} lead(s) from database.${loadingDb ? ' Loading…' : ''} (${displayCount} total)`}
-            </p>
-            <div className="unique-leads-table-responsive">
-              <table className="table table-hover align-middle unique-leads-table mb-0">
-                <thead className="unique-leads-thead">
+          </div>
+
+          <div className="unique-leads-meta-row">
+            <p className="unique-leads-meta">{buildMeta()}</p>
+            {isDuplicatesView && dbLeads.length > 0 && (
+              <button
+                type="button"
+                className="unique-leads-btn-delete-bulk"
+                onClick={handleBulkDeleteDuplicates}
+                disabled={selectedDupIds.size === 0 || deletingDupIds.size > 0}
+              >
+                {deletingDupIds.size > 0 ? 'Deleting…' : `Delete Selected${selectedDupIds.size > 0 ? ` (${selectedDupIds.size})` : ''}`}
+              </button>
+            )}
+          </div>
+
+          <div className="unique-leads-table-responsive">
+            <table className="table table-hover align-middle unique-leads-table mb-0">
+              <thead className="unique-leads-thead">
+                <tr>
+                  {isDuplicatesView && (
+                    <th style={{ width: 44 }}>
+                      <input
+                        type="checkbox"
+                        checked={dbLeads.length > 0 && selectedDupIds.size === dbLeads.length}
+                        onChange={toggleSelectAllDuplicates}
+                        title="Select all"
+                        aria-label="Select all duplicate leads"
+                      />
+                    </th>
+                  )}
+                  <th>S.No</th>
+                  <th>Date & Time</th>
+                  <th>Batch Code</th>
+                  <th>Phone Number</th>
+                  <th>User ID</th>
+                  <th>Sugar Poll</th>
+                  <th>Email</th>
+                  <th>Lead Source Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingDb ? (
                   <tr>
-                    <th>Date & Time</th>
-                    <th>Batch Code</th>
-                    <th>Name</th>
-                    <th>Phone Number</th>
-                    <th>Sugar Poll</th>
-                    <th>Email</th>
-                    <th>Lead Source Type</th>
+                    <td colSpan={colSpan} className="text-center py-4 text-secondary">
+                      Loading…
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {loadingDb ? (
-                    <tr><td colSpan={7} className="text-center py-4 text-secondary">Loading…</td></tr>
-                  ) : displayRows.length === 0 ? (
-                    <tr><td colSpan={7} className="text-center py-4 text-secondary">No data to display. Import a file or select a category above.</td></tr>
-                  ) : (
-                    displayRows.map((row, idx) => (
-                      <tr key={idx}>
+                ) : displayRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={colSpan} className="text-center py-4 text-secondary">
+                      No data to display. Import a file or select a category above.
+                    </td>
+                  </tr>
+                ) : isDuplicatesView ? (
+                  displayRows.map((row, idx) => {
+                    const userId = row.userId || extractLast10(row.phoneNumber ?? row.phone ?? '');
+                    const id = row.id;
+                    const isDeleting = id != null && deletingDupIds.has(id);
+                    return (
+                      <tr key={id ?? idx} className={id != null && selectedDupIds.has(id) ? 'unique-leads-row-selected' : ''}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={id != null && selectedDupIds.has(id)}
+                            onChange={() => id != null && toggleDupSelection(id)}
+                            disabled={isDeleting}
+                            aria-label={`Select row ${idx + 1}`}
+                          />
+                        </td>
+                        <td>{idx + 1}</td>
                         <td>{row.dateTime ?? row.date_time ?? ''}</td>
                         <td>{row.batchCode ?? row.batch_code ?? ''}</td>
-                        <td>{row.name ?? ''}</td>
-                        <td>{row.phoneNumber ?? row.phone ?? ''}</td>
+                        <td>{expandPhone(row.phoneNumber ?? row.phone ?? '')}</td>
+                        <td>{userId}</td>
                         <td>{row.sugarPoll ?? row.sugar_poll ?? ''}</td>
                         <td>{row.email ?? ''}</td>
                         <td>{row.leadSourceType ?? sourceType}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    );
+                  })
+                ) : (
+                  displayRows.map((row, idx) => {
+                    const userId = row.userId || extractLast10(row.phoneNumber ?? row.phone ?? '');
+                    return (
+                      <tr key={idx}>
+                        <td>{idx + 1}</td>
+                        <td>{row.dateTime ?? row.date_time ?? ''}</td>
+                        <td>{row.batchCode ?? row.batch_code ?? ''}</td>
+                        <td>{expandPhone(row.phoneNumber ?? row.phone ?? '')}</td>
+                        <td>{userId}</td>
+                        <td>{row.sugarPoll ?? row.sugar_poll ?? ''}</td>
+                        <td>{row.email ?? ''}</td>
+                        <td>{row.leadSourceType ?? sourceType}</td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section className="unique-leads-downloads unique-leads-chart-card">
-          <div className="unique-leads-card-body">
-            <strong className="unique-leads-chart-title">
-              <span className="unique-leads-chart-emoji" aria-hidden>⬇️</span>
-              Download Leads by Category
-            </strong>
-            <div className="unique-leads-download-btns">
-              <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('paid', 'Paid Leads')}>
-                Download Paid Leads
-              </button>
-              <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('youtube', 'YouTube Leads')}>
-                Download YouTube Leads
-              </button>
-              <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('free', 'Free Leads')}>
-                Download Free Leads
-              </button>
-              {hasConflicts && (
-                <button type="button" className="unique-leads-btn-download unique-leads-btn-conflict" onClick={() => setConflictModal(true)}>
-                  Download Duplicate Leads Report
-                </button>
-              )}
-            </div>
+      <section className="unique-leads-downloads unique-leads-chart-card">
+        <div className="unique-leads-card-body">
+          <strong className="unique-leads-chart-title">
+            <span className="unique-leads-chart-emoji" aria-hidden>⬇️</span>
+            Download Leads by Category
+          </strong>
+          <div className="unique-leads-download-btns">
+            <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('paid', 'Paid Leads')}>
+              Download Paid Leads
+            </button>
+            <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('youtube', 'YouTube Leads')}>
+              Download YouTube Leads
+            </button>
+            <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('free', 'Free Leads')}>
+              Download Free Leads
+            </button>
+            <button type="button" className="unique-leads-btn-download" onClick={() => downloadCategory('direct_walk_in', 'Direct Walk-In Leads')}>
+              Download Direct Walk-In Leads
+            </button>
+            <button type="button" className="unique-leads-btn-download unique-leads-btn-conflict" onClick={downloadDuplicates}>
+              Download Duplicate Leads Report
+            </button>
           </div>
-          </section>
-      </>
+        </div>
+      </section>
 
-      {conflictModal && (
-        <div className="unique-leads-modal-backdrop" onClick={() => setConflictModal(false)}>
+      {importResult && importResult.errors > 0 && (
+        <div className="unique-leads-alert unique-leads-alert-error" role="alert">
+          <strong>{importResult.errors} row(s)</strong> were skipped because phone numbers had fewer than 10 digits.
+        </div>
+      )}
+
+      {showDupModal && importResult && importResult.duplicatesFound > 0 && (
+        <div className="unique-leads-modal-overlay" onClick={() => setShowDupModal(false)}>
           <div className="unique-leads-modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Duplicate conflict</h3>
-            <p>Some leads already exist in a higher-priority table. Do you want to download the duplicate report?</p>
+            <div className="unique-leads-modal-header">
+              <strong>Duplicate Leads Detected</strong>
+            </div>
+            <div className="unique-leads-modal-body">
+              <p>
+                <strong>{importResult.duplicatesFound}</strong> lead(s) already exist in a higher-priority source and were not imported.
+              </p>
+              <p>Do you want to download the duplicate conflict report?</p>
+            </div>
             <div className="unique-leads-modal-actions">
-              <button type="button" className="unique-leads-btn-download" onClick={downloadConflictReport}>
+              <button
+                type="button"
+                className="unique-leads-btn-download"
+                onClick={() => { downloadDuplicates(); setShowDupModal(false); }}
+              >
                 Download Duplicate File
               </button>
-              <button type="button" className="unique-leads-btn-secondary" onClick={() => setConflictModal(false)}>
+              <button
+                type="button"
+                className="unique-leads-btn-secondary"
+                onClick={() => setShowDupModal(false)}
+              >
                 Skip & Continue
               </button>
             </div>

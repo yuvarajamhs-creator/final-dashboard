@@ -603,7 +603,7 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
 
     if (useLive || data.length === 0) {
       try {
-        const liveResults = await Promise.all(
+        const liveResults = await Promise.allSettled(
           adAccountIds.map(async (adAccountId) => {
             const liveData = await fetchInsightsFromMetaLive({
               accessToken: credentials.accessToken,
@@ -627,10 +627,24 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
             return [];
           })
         );
-        const liveAggregate = liveResults.flat();
+        const liveAggregate = liveResults
+          .filter((r) => r.status === 'fulfilled')
+          .flatMap((r) => r.value);
+        const failedCount = liveResults.filter((r) => r.status === 'rejected').length;
+        if (failedCount > 0) {
+          console.warn(`Insights live fetch: ${failedCount}/${adAccountIds.length} account(s) failed`);
+        }
         if (liveAggregate.length > 0) data = liveAggregate;
+        else if (useLive && data.length === 0 && failedCount === adAccountIds.length) {
+          const firstErr = liveResults.find((r) => r.status === 'rejected');
+          console.error("Insights live fetch error (all failed):", firstErr?.reason?.message || firstErr?.reason);
+          return res.status(500).json({
+            error: "Failed to fetch insights from Meta",
+            details: firstErr?.reason?.message || String(firstErr?.reason || 'All accounts failed'),
+          });
+        }
       } catch (liveErr) {
-        if (useLive) {
+        if (useLive && data.length === 0) {
           console.error("Insights live fetch error:", liveErr?.message || liveErr);
           return res.status(500).json({
             error: "Failed to fetch insights from Meta",

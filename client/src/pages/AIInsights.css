@@ -179,6 +179,16 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 
+.summary-card--active {
+    border-color: #6366f1;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.15);
+}
+
+.summary-card--active::before {
+    height: 4px;
+    background: linear-gradient(90deg, #6366f1, #a78bfa);
+}
+
 .summary-card-header {
     font-size: 0.75rem;
     font-weight: 700;
@@ -326,51 +336,233 @@
     color: #ec4899;
 }
 
-.performance-item {
-    background: #f8fafc;
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 12px;
+/* ============ Best Performing Ad / Reel — visual cards ============ */
+.ai-perf-cards-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+@media (max-width: 900px) {
+    .ai-perf-cards-grid { grid-template-columns: 1fr; }
 }
 
-.perf-name {
-    font-size: 0.95rem;
+.ai-perf-card {
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+    overflow: hidden;
+    transition: box-shadow 0.2s;
+}
+.ai-perf-card:hover {
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+}
+
+.ai-perf-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px 12px;
+}
+.ai-perf-card-heading {
+    font-size: 1.05rem;
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0;
+}
+.ai-perf-card-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem;
+}
+.ai-perf-card-icon--ad  { background: #ede9fe; color: #6366f1; }
+.ai-perf-card-icon--reel { background: #fce7f3; color: #ec4899; }
+
+.ai-perf-card-body {
+    display: flex;
+    gap: 0;
+}
+.ai-perf-card-body--reel {
+    flex-direction: row;
+}
+.ai-perf-card-body--ad {
+    flex-direction: row;
+}
+
+/* Thumbnail area */
+.ai-perf-thumb {
+    position: relative;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+.ai-perf-thumb--reel {
+    width: 180px;
+    min-height: 260px;
+    background: #1e293b;
+}
+.ai-perf-thumb--ad {
+    width: 180px;
+    min-height: 260px;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a78bfa 100%);
+}
+.ai-perf-thumb-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.ai-perf-thumb-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 3rem;
+    color: rgba(255,255,255,0.25);
+}
+.ai-perf-thumb-overlay--reel {
+    background: linear-gradient(135deg, #ec4899 0%, #f43f5e 100%);
+}
+.ai-perf-thumb-play {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    backdrop-filter: blur(4px);
+}
+.ai-perf-thumb-badge {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    backdrop-filter: blur(4px);
+}
+
+/* Info section */
+.ai-perf-card-info {
+    flex: 1;
+    padding: 12px 20px 16px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.ai-perf-card-title {
+    font-size: 0.92rem;
     font-weight: 700;
     color: #0f172a;
-    margin-bottom: 6px;
+    margin: 0 0 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.35;
 }
-
-.perf-meta {
-    font-size: 0.8rem;
-    color: #64748b;
-    margin-bottom: 8px;
-}
-
-.perf-reason {
-    font-size: 0.85rem;
-    color: #475569;
-    line-height: 1.5;
-    margin-bottom: 10px;
-}
-
-.perf-action {
-    display: inline-flex;
+.ai-perf-card-date {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin: 0 0 10px;
+    display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 12px;
-    border-radius: 6px;
-    font-size: 0.75rem;
+}
+.ai-perf-card-date i { font-size: 0.7rem; }
+
+/* Metrics grid */
+.ai-perf-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.ai-perf-card-body--reel .ai-perf-metrics {
+    grid-template-columns: repeat(3, 1fr);
+}
+.ai-perf-metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #f8fafc;
+    border-radius: 8px;
+    padding: 6px 4px;
+    gap: 1px;
+}
+.ai-perf-metric i {
+    font-size: 0.7rem;
+    color: #94a3b8;
+    margin-bottom: 2px;
+}
+.ai-perf-metric-val {
+    font-size: 0.82rem;
     font-weight: 700;
+    color: #0f172a;
+    line-height: 1.2;
+}
+.ai-perf-metric-lbl {
+    font-size: 0.62rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-weight: 600;
 }
 
-.action-scale {
-    background: #dcfce7;
-    color: #14532d;
+.ai-perf-card-reason {
+    font-size: 0.78rem;
+    color: #64748b;
+    line-height: 1.45;
+    margin: 0 0 8px;
+    flex: 1;
 }
 
-.action-boost {
-    background: #dbeafe;
-    color: #1e3a8a;
+/* Action badge */
+.ai-perf-action-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    width: fit-content;
+}
+.ai-perf-action--monitor { background: #fef3c7; color: #92400e; }
+.ai-perf-action--scale   { background: #dcfce7; color: #14532d; }
+.ai-perf-action--pause   { background: #fee2e2; color: #991b1b; }
+.ai-perf-action--boost   { background: #dbeafe; color: #1e3a8a; }
+.ai-perf-action--repurpose { background: #ede9fe; color: #5b21b6; }
+
+.ai-perf-card-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #6366f1;
+    text-decoration: none;
+}
+.ai-perf-card-link:hover {
+    text-decoration: underline;
+}
+
+@media (max-width: 600px) {
+    .ai-perf-card-body { flex-direction: column; }
+    .ai-perf-thumb--reel, .ai-perf-thumb--ad { width: 100%; min-height: 200px; max-height: 220px; }
+    .ai-perf-metrics { grid-template-columns: repeat(3, 1fr); }
 }
 
 /* AI Insights Feed */
