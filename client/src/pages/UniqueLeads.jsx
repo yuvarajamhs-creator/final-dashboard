@@ -392,7 +392,7 @@ export default function UniqueLeads() {
         throw new Error('Export failed');
       }
       const data = await res.json();
-      const csvHeaders = ['Date & Time', 'Batch Code', 'Phone Number', 'User ID', 'Sugar Poll', 'Email', 'Uploaded As', 'Existing Sources', 'Detected At'];
+      const csvHeaders = ['Date & Time', 'Batch Code', 'Phone Number', 'User ID', 'Sugar Poll', 'Repeat Leads', 'Email', 'Uploaded As', 'Existing Sources', 'Detected At'];
       const csvRows = [
         csvHeaders.join(','),
         ...data.map((r) =>
@@ -402,6 +402,7 @@ export default function UniqueLeads() {
             r.phoneNumber ?? '',
             r.userId ?? '',
             (r.sugarPoll ?? '').replace(/"/g, '""'),
+            (r.repeatLeads ?? '').replace(/"/g, '""'),
             (r.email ?? '').replace(/"/g, '""'),
             r.uploadedAs ?? '',
             (r.existingSources ?? '').replace(/"/g, '""'),
@@ -456,7 +457,7 @@ export default function UniqueLeads() {
     return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} lead(s) (${displayCount} total).${loadingDb ? ' Loading…' : ''}`;
   };
 
-  const colSpan = isDuplicatesView ? 9 : 8;
+  const colSpan = isDuplicatesView ? 10 : 8;
 
   return (
     <div className="unique-leads-container">
@@ -617,6 +618,7 @@ export default function UniqueLeads() {
                   <th>Phone Number</th>
                   <th>User ID</th>
                   <th>Sugar Poll</th>
+                  {isDuplicatesView && <th>Repeat Leads</th>}
                   <th>Email</th>
                   <th>Lead Source Type</th>
                 </tr>
@@ -656,6 +658,7 @@ export default function UniqueLeads() {
                         <td>{expandPhone(row.phoneNumber ?? row.phone ?? '')}</td>
                         <td>{userId}</td>
                         <td>{row.sugarPoll ?? row.sugar_poll ?? ''}</td>
+                        <td>{row.repeatLeads ?? ''}</td>
                         <td>{row.email ?? ''}</td>
                         <td>{row.leadSourceType ?? sourceType}</td>
                       </tr>
@@ -705,6 +708,20 @@ export default function UniqueLeads() {
             </button>
             <button type="button" className="unique-leads-btn-download unique-leads-btn-conflict" onClick={downloadDuplicates}>
               Download Duplicate Leads Report
+            </button>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <button type="button" className="unique-leads-btn-download" onClick={() => {
+              const headers = ['S.No', 'Date & Time', 'Batch Code', 'Phone Number', 'User ID', 'Sugar Poll', 'Email'];
+              const blob = new Blob([headers.join(',') + '\r\n'], { type: 'text/csv;charset=utf-8' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'Unique_Leads_Template.csv';
+              a.click();
+              URL.revokeObjectURL(url);
+            }}>
+              <i className="fas fa-file-download" style={{ marginRight: 6 }}></i>Download Template
             </button>
           </div>
         </div>

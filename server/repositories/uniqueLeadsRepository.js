@@ -275,6 +275,15 @@ async function getLeads(filter) {
   }));
 }
 
+const SOURCE_SHORT = { 'Paid': 'P', 'YouTube': 'Y', 'Free': 'F', 'Direct Walk-In': 'D' };
+
+function buildRepeatString(counts) {
+  return SOURCE_PRIORITY
+    .filter(s => counts[s])
+    .map(s => `${SOURCE_SHORT[s] || s}-${counts[s]}`)
+    .join(', ');
+}
+
 async function getDuplicates() {
   if (!supabase) throw new Error('Supabase not configured');
 
@@ -284,7 +293,23 @@ async function getDuplicates() {
     .order('detected_at', { ascending: false });
   if (error) throw error;
 
-  return (data || []).map(row => ({
+  const rows = data || [];
+
+  const repeatMap = {};
+  for (const row of rows) {
+    const uid = row.user_id;
+    if (!repeatMap[uid]) repeatMap[uid] = {};
+    const src = row.uploaded_as || '';
+    if (src) repeatMap[uid][src] = (repeatMap[uid][src] || 0) + 1;
+    const existing = row.existing_sources || '';
+    if (existing) {
+      existing.split(',').map(s => s.trim()).filter(Boolean).forEach(s => {
+        if (!repeatMap[uid][s]) repeatMap[uid][s] = 1;
+      });
+    }
+  }
+
+  return rows.map(row => ({
     id: row.id,
     dateTime: row.date_time,
     batchCode: row.batch_code,
@@ -294,6 +319,7 @@ async function getDuplicates() {
     email: row.email,
     uploadedAs: row.uploaded_as,
     existingSources: row.existing_sources,
+    repeatLeads: buildRepeatString(repeatMap[row.user_id] || {}),
     detectedAt: row.detected_at
   }));
 }
