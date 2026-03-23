@@ -4,29 +4,36 @@ This document briefly describes three AI Insights features: **Lead Saturation De
 
 ---
 
-## 1. Lead Saturation Detection
+## 1. Lead Saturation Detection (MHS methodology)
 
-**Purpose:** Detect when lead volume or quality is plateauing so you can adjust targeting or creative.
+**Purpose:** Detect when the addressable audience is exhausting (frequency + reach vs pool, CPM/CTR trends) so you can expand targeting or refresh creatives—aligned with the **MHS Lead Saturation Guide** (v1.0, March 2026).
 
 **Workflow:**
-- User clicks **Run analysis** on the AI Insights page.
-- Backend runs analysis for a date range (default: last 7 days vs previous 7 days).
-- Meta campaign-level insights and Leads duplicate rates are fetched; each campaign gets a **Score** and **Status**.
-- Results are shown as a summary (saturation level, counts) and a table per campaign.
+- Analysis runs on load and via **Re-run** (default: last 7 days vs previous 7 days).
+- Meta **campaign** insights: `frequency`, `reach`, `impressions`, `spend`, `clicks`, `cpm`, `ctr` (aggregated over the window).
+- **Audience size** (best-effort): max `estimated_audience_size` from the ad set list, then **batch `GET ?ids=`** on ad sets (sometimes populated when the edge list omits it), then **`GET act_{id}/reachestimate`** per ad set (full `targeting`, then **geo/demographic-only** targeting if the first call fails). If Meta still returns nothing, the UI shows **Reach %** and **Days** from **frequency-band heuristics** (suffix **~** in the table). Those heuristics are **display-only**; **status** and **saturation index** use Meta reach when present, otherwise frequency + CPM/CTR only (heuristic reach is **not** fed into alerts).
+- **Duplicate %** (supplementary): from your Leads DB, same as before.
+- Each campaign gets a **Saturation Index** (0–100), supporting metrics, and **Status**.
 
-**Metrics:**
+**Saturation Index (0–100):**
 
-| Metric       | How it's calculated |
-|-------------|----------------------|
-| **Frequency** | From Meta: `impressions ÷ reach` for the current period (avg times each user saw the campaign). |
-| **CPL**       | From Meta: `spend ÷ leads` for the current period (cost per lead). |
-| **Duplicate %** | From your Leads DB: same phone appearing more than once per campaign in the period; rate = (total − unique phones) ÷ total, shown as %. |
-| **Score**      | Rule-based: Frequency > 3 (+30), CPL increase > 30% (+25), lead drop > 25% (+25), Duplicate % > 20% (+20). Max 100. |
-| **Status**     | **Healthy** (score < 40), **Warning** (40–60), **Saturated** (score > 60). |
+`min(100, (Frequency ÷ 3.5) × 50 + (Reach % ÷ 70) × 50)`
 
-**Saturation level (summary):** **high** if any campaign is Saturated; **medium** if any is Warning; **low** otherwise.
+If audience size is unavailable, the index uses **frequency only**: `min(100, (Frequency ÷ 3.5) × 100)`.
 
-**Backend:** `server/services/saturationService.js`, `server/routes/aiInsights.js` (POST `/api/ai/lead-saturation`). Optional logging to `campaign_saturation_log`.
+**Other signals:**
+
+| Metric | How it's calculated |
+|--------|---------------------|
+| **CPM vs prior** | Week-on-week change: `(CPM_cur − CPM_prev) ÷ CPM_prev × 100` (same window length). |
+| **CTR drop vs prior** | `(CTR_prev − CTR_cur) ÷ CTR_prev × 100` when CTR fell. |
+| **Days until saturation*** | Realistic pool = `audience_size × 0.15`; daily reach = `reach ÷ days_in_window`; `adjusted days = (pool ÷ daily_reach) ÷ 3.5`. |
+
+**Status (MHS alert bands):** **Saturated** if index > 80 or any critical signal (e.g. frequency ≥ 4.0, reach % ≥ 70%, CPM WoW > 35%, CTR drop > 35%, adjusted days < 14). **Warning** if index > 60 or moderate signals (e.g. frequency > 3, reach % > 50%, CPM WoW > 20%, CTR drop > 20%, adjusted days < 30). Otherwise **Healthy**.
+
+**Summary:** `saturation_index_avg`, counts of Saturated / Warning / Healthy. **Saturation level** for the UI: **high** if any Saturated; **medium** if any Warning; **low** otherwise.
+
+**Backend:** `server/services/saturationService.js`, `server/routes/aiInsights.js` (POST `/api/ai/lead-saturation`). Optional logging to `campaign_saturation_log` (`score` stores the rounded index for compatibility).
 
 ---
 

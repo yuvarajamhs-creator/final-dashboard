@@ -1422,7 +1422,7 @@ export default function BestPerformingReel() {
                                     {!reelPage
                                         ? 'Select a page to see top content by views.'
                                         : activeTab === 'stories'
-                                            ? 'No stories found for this page in the selected time range. Instagram stories expire after 24 hours — try selecting a recent period when stories were posted.'
+                                            ? 'No story items for this page in the current data. Instagram only exposes active stories (~24h) via the API; older metrics come from saved snapshots (Supabase + scheduled sync). Charts above can still show account-level views (Reels/Feed). Try a recent 7-day range, use Refresh, or ensure META_PAGE_ID and story snapshots are configured.'
                                             : isFacebookSelected
                                                 ? (mediaInsights?.message || 'No video content for this Page. The Page may have no native videos or video posts, or insights may be unavailable.')
                                                 : 'No content for this period. Try a different time range or tab.'}

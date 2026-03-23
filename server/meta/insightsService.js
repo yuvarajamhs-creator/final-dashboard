@@ -139,9 +139,15 @@ function enrichInsightsRow(row) {
   const aggs = transformActions(row.actions || []);
   const values = transformActions(row.action_values || []);
   const videoViews = aggs.video_view || aggs.video_views || 0;
+  // Meta often returns 3s watches as top-level video_3_sec_watched_actions; not always in actions[].
   const video3sViews =
-    aggs.video_view_3s || aggs.video_views_3s || aggs.video_view_3s_autoplayed || aggs.video_views_3s_autoplayed
-    || aggs.video_3_sec_watched_actions || 0;
+    getActionCountForKey(row, aggs, values, 'video_3_sec_watched_actions') ||
+    aggs.video_view_3s ||
+    aggs.video_views_3s ||
+    aggs.video_view_3s_autoplayed ||
+    aggs.video_views_3s_autoplayed ||
+    aggs.video_3_sec_watched_actions ||
+    0;
   const videoThruPlays = aggs.video_thruplay_watched_actions || aggs.video_thruplay || aggs.video_views_thruplay || 0;
 
   const plays =
@@ -178,6 +184,7 @@ function enrichInsightsRow(row) {
     ...row,
     videoPlays: plays,
     videoP100Watched: fullViews,
+    video3sViews,
     hold_rate,
   };
 }
@@ -242,7 +249,7 @@ async function fetchInsightsFromMetaLive(opts) {
       level: 'ad',
       time_increment: 1,
       time_range: timeRange,
-      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
+      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_3_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
       limit: 1000,
       filtering: JSON.stringify(filtering),
     };

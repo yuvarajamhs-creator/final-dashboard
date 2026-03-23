@@ -640,10 +640,25 @@ async function fetchInstagramMediaInsights(opts = {}) {
 
   if (opts.contentType === "stories" && accountIds.length > 0) {
     try {
-      const stored = await storySnapshots.getStoriesByAccountIds(accountIds, MEDIA_INSIGHTS_LIMIT);
+      const stored = await storySnapshots.getStoriesByAccountIds(accountIds, 100);
       const byId = new Map();
-      for (const m of allMedia) byId.set(m.media_id, m);
-      for (const m of stored) if (!byId.has(m.media_id)) byId.set(m.media_id, m);
+      const storyKey = (m) => {
+        if (!m) return "";
+        const k = String(m.media_id || m.id || "").trim();
+        return k;
+      };
+      const addStory = (m) => {
+        const k = storyKey(m);
+        if (!k) return;
+        const normalized = {
+          ...m,
+          media_id: m.media_id || m.id,
+          id: m.id || m.media_id,
+        };
+        if (!byId.has(k)) byId.set(k, normalized);
+      };
+      for (const m of allMedia) addStory(m);
+      for (const m of stored) addStory(m);
       allMedia = [...byId.values()]
         .sort((a, b) => (b.views || b.video_views || 0) - (a.views || a.video_views || 0))
         .slice(0, MEDIA_INSIGHTS_LIMIT);
@@ -652,9 +667,10 @@ async function fetchInstagramMediaInsights(opts = {}) {
     }
   }
 
-  // For stories only: filter by date range when from/to provided. If that would leave 0 items, show stories from last 7 days so "Top Stories by Views" shows something.
+  // For stories only: filter by date range when from/to provided. If that would leave 0 items, try last 7d / 30d, then show all merged stories (snapshots + live).
   let storiesFallbackUsed = false;
   if (opts.contentType === "stories" && opts.from && opts.to && allMedia.length > 0) {
+    const mergedBeforeDateFilter = [...allMedia];
     const fromTs = new Date(opts.from + "T00:00:00Z").getTime();
     const toTs = new Date(opts.to + "T23:59:59Z").getTime();
     const filteredByDate = allMedia.filter((m) => {
@@ -665,19 +681,34 @@ async function fetchInstagramMediaInsights(opts = {}) {
     if (filteredByDate.length > 0) {
       allMedia = filteredByDate;
     } else {
-      // No stories in selected period: show stories from the last 7 days (from opts.to)
       const fallbackEnd = new Date(opts.to + "T23:59:59Z").getTime();
-      const fallbackStart = new Date(opts.to + "T00:00:00Z");
-      fallbackStart.setUTCDate(fallbackStart.getUTCDate() - 7);
-      const fallbackStartTs = fallbackStart.getTime();
-      const fallbackFiltered = allMedia.filter((m) => {
+      const fallbackStart7 = new Date(opts.to + "T00:00:00Z");
+      fallbackStart7.setUTCDate(fallbackStart7.getUTCDate() - 7);
+      const fallbackStart7Ts = fallbackStart7.getTime();
+      const fallbackFiltered = mergedBeforeDateFilter.filter((m) => {
         if (!m.timestamp) return true;
         const t = new Date(m.timestamp).getTime();
-        return t >= fallbackStartTs && t <= fallbackEnd;
+        return t >= fallbackStart7Ts && t <= fallbackEnd;
       });
       if (fallbackFiltered.length > 0) {
         allMedia = fallbackFiltered;
         storiesFallbackUsed = true;
+      } else {
+        const fallbackStart30 = new Date(opts.to + "T00:00:00Z");
+        fallbackStart30.setUTCDate(fallbackStart30.getUTCDate() - 30);
+        const fallbackStart30Ts = fallbackStart30.getTime();
+        const fallback30 = mergedBeforeDateFilter.filter((m) => {
+          if (!m.timestamp) return true;
+          const t = new Date(m.timestamp).getTime();
+          return t >= fallbackStart30Ts && t <= fallbackEnd;
+        });
+        if (fallback30.length > 0) {
+          allMedia = fallback30;
+          storiesFallbackUsed = true;
+        } else if (mergedBeforeDateFilter.length > 0) {
+          allMedia = mergedBeforeDateFilter;
+          storiesFallbackUsed = true;
+        }
       }
     }
   }

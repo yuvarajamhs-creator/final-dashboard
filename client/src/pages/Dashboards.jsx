@@ -116,6 +116,60 @@ const getVideoCompletionCount = (row, aggs, values) => {
 // Helper: safe number
 const num = (v) => Number(v) || 0;
 
+/**
+ * KPI Hook Rate: prefer 3s views ÷ impressions; if Meta returns no 3s data (common), use video plays ÷ impressions
+ * so the card matches video activity (same idea as the old video-performance KPI).
+ */
+const aggregateHookRatePct = (video3sViews, impressions, videoPlays) => {
+  if (impressions <= 0) return 0;
+  if (video3sViews > 0) return (video3sViews / impressions) * 100;
+  if (videoPlays > 0) return (videoPlays / impressions) * 100;
+  return 0;
+};
+
+/**
+ * KPI Hold Rate from summed video fields — aligned with server enrichInsightsRow / per-ad fallback.
+ */
+const aggregateHoldRatePct = (t) => {
+  const video3sViews = t.video3sViews || 0;
+  const videoThruPlays = t.videoThruPlays || 0;
+  const videoViews = t.videoViews || 0;
+  const plays = t.videoPlays || 0;
+  const videoP50Watched = t.videoP50Watched || 0;
+  const videoP75Watched = t.videoP75Watched || 0;
+  const videoP100Watched = t.videoP100Watched || 0;
+  const holdNumerator =
+    videoP50Watched > 0
+      ? videoP50Watched
+      : videoP75Watched > 0
+        ? videoP75Watched
+        : videoThruPlays > 0
+          ? videoThruPlays
+          : videoP100Watched;
+  if (video3sViews > 0 && holdNumerator > 0) {
+    return parseFloat(((holdNumerator / video3sViews) * 100).toFixed(2));
+  }
+  if (plays > 0 && videoP100Watched > 0) {
+    return parseFloat(((videoP100Watched / plays) * 100).toFixed(2));
+  }
+  if (plays > 0 && videoThruPlays > 0) {
+    return parseFloat(((videoThruPlays / plays) * 100).toFixed(2));
+  }
+  if (videoViews > 0 && videoThruPlays > 0) {
+    return parseFloat(((videoThruPlays / videoViews) * 100).toFixed(2));
+  }
+  if (video3sViews > 0 && videoThruPlays >= 0) {
+    return parseFloat(((videoThruPlays / video3sViews) * 100).toFixed(2));
+  }
+  if (video3sViews > 0 && videoViews > 0) {
+    return parseFloat(Math.min(100, (videoViews / video3sViews) * 100).toFixed(2));
+  }
+  if (video3sViews > 0 && plays > 0) {
+    return parseFloat(Math.min(100, (plays / video3sViews) * 100).toFixed(2));
+  }
+  return 0;
+};
+
 // Helper to get auth token
 const getAuthToken = () => {
   try {
@@ -431,7 +485,20 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       
       // Video metrics for Hook Rate and Hold Rate (p50/p75 work for ALL campaign types; ThruPlay only for Video Views)
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
-      const video3sViews = aggs['video_view_3s'] || aggs['video_views_3s'] || aggs['video_view_3s_autoplayed'] || aggs['video_views_3s_autoplayed'] || aggs['video_3_sec_watched_actions'] || aggs['video_continuous_2_sec_watched_actions'] || aggs['video_15_sec_watched_actions'] || 0;
+      // Prefer server-enriched / top-level Meta field — 3s views are often video_3_sec_watched_actions, not in actions[].
+      const video3sViews =
+        (d.video3sViews != null && d.video3sViews !== '')
+          ? num(d.video3sViews)
+          : getTopLevelActionValue(d, 'video_3_sec_watched_actions') ||
+            getActionCountForKey(d, aggs, values, 'video_3_sec_watched_actions') ||
+            aggs['video_view_3s'] ||
+            aggs['video_views_3s'] ||
+            aggs['video_view_3s_autoplayed'] ||
+            aggs['video_views_3s_autoplayed'] ||
+            aggs['video_3_sec_watched_actions'] ||
+            aggs['video_continuous_2_sec_watched_actions'] ||
+            aggs['video_15_sec_watched_actions'] ||
+            0;
       const videoThruPlays = aggs['video_thruplay_watched_actions'] || aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
       const videoP50Watched = getActionCountForKey(d, aggs, values, 'video_p50_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p50_watched');
       const videoP75Watched = getActionCountForKey(d, aggs, values, 'video_p75_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p75_watched');
@@ -467,12 +534,12 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
         }
       }
 
-      // Hook Rate: 3s views / impressions * 100 (or direct hook_rate from Meta if present)
+      // Hook Rate: 3s views / impressions; if Meta omits 3s, use plays / impressions (same as KPI aggregate)
       let hookRate = 0;
       if (d.hook_rate !== undefined && d.hook_rate !== null && d.hook_rate !== '') {
         hookRate = num(d.hook_rate);
       } else {
-        hookRate = impressions > 0 ? (video3sViews / impressions) * 100 : 0;
+        hookRate = aggregateHookRatePct(video3sViews, impressions, plays);
       }
 
       return {
@@ -542,83 +609,6 @@ const fetchAllAccountsDashboardData = async ({ days, from, to, campaignIds, adId
     console.error("Failed to fetch multi-account dashboard data", e);
     return [];
   }
-};
-
-// Fetch Hook Rate and Hold Rate from video-performance API and return weighted totals.
-// Returns { hookRate, holdRate } or null on failure/no data.
-const fetchVideoPerformanceTotals = async (accountIds, since, until) => {
-  if (!accountIds || accountIds.length === 0 || !since || !until) return null;
-
-  const token = getAuthToken();
-  const headers = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  let allRows = [];
-
-  // 1. Fetch data from all accounts
-  const settled = await Promise.allSettled(
-    accountIds.map((id) => {
-      const aid = String(id).replace(/^act_/, "");
-      if (!aid) return Promise.resolve([]);
-      
-      const url = `${API_BASE}/api/meta/video-performance?adAccountId=${encodeURIComponent(aid)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
-      
-      return fetch(url, { headers })
-        .then((r) => r.json())
-        .then((body) => (body.success && Array.isArray(body.data) ? body.data : []))
-        .catch(() => []); // Error handling for individual calls
-    })
-  );
-
-  settled.forEach((s) => {
-    if (s.status === "fulfilled" && Array.isArray(s.value)) {
-      allRows = allRows.concat(s.value);
-    }
-  });
-
-  // Return null (not zero) when API fails so ?? fallback to totals.hookRate/holdRate kicks in
-  if (allRows.length === 0) return null;
-
-  // 2. Initialize counters
-  let totalImpressions = 0;
-  let totalPlays = 0;
-  let weightedHookSum = 0;
-  let weightedHoldSum = 0;
-
-  // 3. Calculate Weighted Sums
-  allRows.forEach((row) => {
-    const imp = Number(row.impressions) || 0;
-    const plays = Number(row.plays) || 0;
-
-    // Hook Rate — use pre-computed hookRate from server; fallback to 3s/impressions
-    const threeSecViews = Number(row.video_3_sec_watched_actions ?? row.video3SecViews ?? row.video3sViews ?? 0);
-    const hook = Number(row.hookRate ?? row.hook_rate) || (imp > 0 && threeSecViews > 0 ? threeSecViews / imp : 0);
-
-    // Hold Rate — use pre-computed holdRate from server (server now calculates from p50/p75/thruplay/p100)
-    // Fallback: recalculate from raw milestone fields if server didn't pre-compute
-    const serverHold = Number(row.holdRate ?? row.hold_rate);
-    const p25  = Number(row.video_p25_watched_actions  ?? row.videoP25  ?? 0);
-    const p50  = Number(row.video_p50_watched_actions  ?? row.videoP50  ?? 0);
-    const p75  = Number(row.video_p75_watched_actions  ?? row.videoP75  ?? 0);
-    const p100 = Number(row.video_p100_watched_actions ?? row.videoP100 ?? row.completedViews ?? 0);
-    const thruplay = Number(row.video_thruplay_watched_actions ?? row.videoThruplay ?? row.thruplay ?? 0);
-    const holdNumerator  = p50 > 0 ? p50 : (p75 > 0 ? p75 : (thruplay > 0 ? thruplay : (p100 > 0 ? p100 : p25)));
-    const holdDenominator = plays > 0 ? plays : (threeSecViews > 0 ? threeSecViews : imp);
-    const computedHold = holdDenominator > 0 && holdNumerator > 0 ? holdNumerator / holdDenominator : 0;
-    const hold = serverHold > 0 ? serverHold / 100 : computedHold;
-
-    totalImpressions += imp;
-    totalPlays += plays > 0 ? plays : imp;
-
-    weightedHookSum += hook * imp;
-    weightedHoldSum += hold * (plays > 0 ? plays : imp);
-  });
-
-  // 4. Final Average Calculation
-  const hookRate = totalImpressions > 0 ? weightedHookSum / totalImpressions : 0;
-  const holdRate = totalPlays > 0 ? weightedHoldSum / totalPlays : 0;
-
-  return { hookRate, holdRate };
 };
 
 // Fetch Wix analytics from backend (normalized to same row shape as Meta insights).
@@ -847,6 +837,28 @@ const fetchAds = async (campaignId, adAccountId = null) => {
     return [];
   } catch (e) {
     console.error("Error fetching ads:", e);
+    return [];
+  }
+};
+
+/** One request: ads for one or more campaigns (comma-separated campaign_id), server-filtered in DB. */
+const fetchAdsByCampaignIds = async (campaignIds, adAccountId = null) => {
+  try {
+    if (!campaignIds || campaignIds.length === 0) return [];
+    const token = getAuthToken();
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const params = new URLSearchParams({
+      campaign_id: campaignIds.map((id) => String(id).trim()).filter(Boolean).join(","),
+    });
+    if (adAccountId) params.set("ad_account_id", String(adAccountId).replace(/^act_/, ""));
+    const res = await fetch(`${API_BASE}/api/meta/ads?${params}`, { headers });
+    const data = await res.json();
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    return [];
+  } catch (e) {
+    console.error("Error fetching ads by campaign ids:", e);
     return [];
   }
 };
@@ -1179,7 +1191,6 @@ export default function AdsDashboardBootstrap() {
   const [ads, setAds] = useState([]);
   const [data, setData] = useState([]);
   const [allAdsData, setAllAdsData] = useState([]); // Store all unfiltered data for ad breakdown
-  const [videoPerformanceTotals, setVideoPerformanceTotals] = useState(null); // Hook/Hold from GET /api/meta/video-performance when available
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null); // Toast notification state
@@ -1490,8 +1501,6 @@ export default function AdsDashboardBootstrap() {
     setLoading(true);
     setCampaignsLoading(true);
     setError(null);
-    setVideoPerformanceTotals(null);
-
     try {
       // First, fetch campaigns (selected accounts, project accounts, or all)
       let campData;
@@ -1549,8 +1558,8 @@ export default function AdsDashboardBootstrap() {
       // Reset selected campaigns if they don't exist in the new list
       // This handles the case when ad account changes and old campaign selections are invalid
       if (selectedCampaigns.length > 0 && activeCampaignsList.length > 0) {
-        const validCampaigns = selectedCampaigns.filter(cid => 
-          activeCampaignsList.some(c => c.id === cid)
+        const validCampaigns = selectedCampaigns.filter((cid) =>
+          activeCampaignsList.some((c) => String(c.id) === String(cid))
         );
         if (validCampaigns.length !== selectedCampaigns.length) {
           setSelectedCampaigns(validCampaigns.length > 0 ? validCampaigns : []);
@@ -1713,16 +1722,6 @@ export default function AdsDashboardBootstrap() {
       // Store all ads data (without ad filter) for ad breakdown table
       // This ensures the table always shows all ads regardless of "Ad Name" filter
       setAllAdsData(filteredAllAdsData);
-
-      // Fetch Hook/Hold Rate from video-performance API for KPI cards (non-blocking)
-      const accountIdsForVideo = accountsForFetch.length > 0
-        ? accountsForFetch.map((a) => a.account_id || a.id).filter(Boolean)
-        : [];
-      if (fromDate && toDate && accountIdsForVideo.length > 0) {
-        fetchVideoPerformanceTotals(accountIdsForVideo, fromDate, toDate)
-          .then((totals) => totals != null && setVideoPerformanceTotals(totals))
-          .catch(() => {});
-      }
 
       if (filteredData.length === 0) {
         // If we have rows but they were all filtered out
@@ -2160,30 +2159,66 @@ export default function AdsDashboardBootstrap() {
     setAds([]);
   }, [selectedAdAccounts]);
 
-  // Fetch ads only on explicit campaign selection (not on page load or time range change).
-  // One request: GET /api/meta/ads?all=true (from DB only); pass ad_account_id for multi-account.
-  const loadAdsForCampaigns = async (selectedIds) => {
-    if (!selectedIds || selectedIds.length === 0) {
+  // Load Ad Name options from DB via server-filtered campaign_id (comma-separated). Re-runs when campaigns or accounts change.
+  const loadAdsForCampaigns = useCallback(
+    async (selectedIds) => {
+      if (!selectedIds || selectedIds.length === 0) {
+        setAds([]);
+        setSelectedAds([]);
+        return;
+      }
+      setAdsLoading(true);
+      try {
+        const idList = selectedIds.map((id) => String(id).trim()).filter(Boolean);
+        let merged = [];
+
+        if (selectedAdAccounts.length === 1) {
+          merged = await fetchAdsByCampaignIds(idList, selectedAdAccounts[0]);
+        } else if (selectedAdAccounts.length > 1) {
+          const parts = await Promise.all(
+            selectedAdAccounts.map((accId) => fetchAdsByCampaignIds(idList, accId))
+          );
+          merged = parts.flat();
+        } else {
+          const isAllAdAccounts =
+            selectedAdAccounts.length === 0 &&
+            (selectedProject ? accountsForProject.length > 0 : (specifiedAdAccounts || []).length > 0);
+          const accountPool = selectedProject ? accountsForProject : specifiedAdAccounts || [];
+          if (isAllAdAccounts && accountPool.length > 0) {
+            const parts = await Promise.all(
+              accountPool.map((acc) => fetchAdsByCampaignIds(idList, acc.account_id || acc.id))
+            );
+            merged = parts.flat();
+          } else {
+            const raw = await fetchAdsAll(null);
+            const idSet = new Set(idList);
+            merged = raw.filter((ad) => idSet.has(String(ad.campaign_id || "")));
+          }
+        }
+
+        const unique = Array.from(
+          new Map(merged.map((ad) => [String(ad.id || ad.ad_id), ad])).values()
+        );
+        unique.sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase()));
+        setAds(unique);
+      } catch (e) {
+        console.error("Error loading ads for campaigns:", e);
+        setAds([]);
+      } finally {
+        setAdsLoading(false);
+      }
+    },
+    [selectedAdAccounts, selectedProject, accountsForProject, specifiedAdAccounts]
+  );
+
+  useEffect(() => {
+    if (selectedCampaigns.length === 0) {
       setAds([]);
       setSelectedAds([]);
       return;
     }
-    setAdsLoading(true);
-    try {
-      const raw = await fetchAdsAll(selectedAdAccounts.length === 1 ? selectedAdAccounts[0] : null);
-      const idSet = new Set(selectedIds.map(String));
-      const filtered = raw.filter(ad => idSet.has(String(ad.campaign_id || '')));
-      const unique = Array.from(new Map(filtered.map(ad => [ad.id, ad])).values());
-      // Include all effective statuses (ACTIVE, PAUSED, ARCHIVED, ENDED, etc.)
-      unique.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
-      setAds(unique);
-    } catch (e) {
-      console.error("Error loading ads for campaigns:", e);
-      setAds([]);
-    } finally {
-      setAdsLoading(false);
-    }
-  };
+    loadAdsForCampaigns(selectedCampaigns);
+  }, [selectedCampaigns, loadAdsForCampaigns]);
 
 
   useEffect(() => {
@@ -2824,7 +2859,8 @@ export default function AdsDashboardBootstrap() {
     const t = {
       leads: 0, spend: 0, impressions: 0, clicks: 0, actions: {},
       onlineConv: 0, offlineConv: 0, l1Revenue: 0, l2Revenue: 0, totalRevenue: 0,
-      conversions: 0, videoViews: 0, video3sViews: 0, videoThruPlays: 0, videoP50Watched: 0, videoP75Watched: 0
+      conversions: 0, videoViews: 0, video3sViews: 0, videoThruPlays: 0, videoP50Watched: 0, videoP75Watched: 0,
+      videoPlays: 0, videoP100Watched: 0
     };
     
     // Use filteredRows instead of data to respect all filters
@@ -2839,6 +2875,8 @@ export default function AdsDashboardBootstrap() {
       t.videoThruPlays += r.videoThruPlays || 0;
       t.videoP50Watched += r.videoP50Watched || 0;
       t.videoP75Watched += r.videoP75Watched || 0;
+      t.videoPlays += r.videoPlays || 0;
+      t.videoP100Watched += r.videoP100Watched || 0;
 
       // Online/Offline metrics (assumed mappings) - only calculate if sheets data not available
       const acts = r.actions || {};
@@ -2872,34 +2910,9 @@ export default function AdsDashboardBootstrap() {
     t.ctr = t.impressions ? (t.clicks / t.impressions) * 100 : 0;
     t.uniqueLeads = t.leads; // Using total leads as proxy for unique
     
-    // Hook Rate and Hold Rate: Calculate weighted average from individual rows
-    // Since Meta API returns these as percentages, we need to aggregate properly
-    let totalHookRateWeight = 0;
-    let totalHoldRateWeight = 0;
-    let weightedHookRate = 0;
-    let weightedHoldRate = 0;
-    
-    filteredRows.forEach((r) => {
-      // For Hook Rate: weight by impressions
-      if (r.hookRate !== undefined && r.hookRate !== null && r.impressions > 0) {
-        weightedHookRate += r.hookRate * r.impressions;
-        totalHookRateWeight += r.impressions;
-      }
-      
-      // For Hold Rate: weight by videoPlays, fallback to impressions if plays unavailable
-      const plays = r.videoPlays || r.impressions || 0;
-      if (r.holdRate != null && r.holdRate > 0 && plays > 0) {
-        weightedHoldRate += r.holdRate * plays;
-        totalHoldRateWeight += plays;
-      }
-    });
-    
-    // Calculate weighted averages
-    t.hookRate = totalHookRateWeight > 0 ? weightedHookRate / totalHookRateWeight :
-                 (t.impressions ? (t.video3sViews / t.impressions) * 100 : 0);
-    const holdNum = t.videoP50Watched > 0 ? t.videoP50Watched : (t.videoP75Watched > 0 ? t.videoP75Watched : t.videoThruPlays);
-    t.holdRate = totalHoldRateWeight > 0 ? weightedHoldRate / totalHoldRateWeight :
-                 (t.video3sViews > 0 && holdNum > 0 ? parseFloat(((holdNum / t.video3sViews) * 100).toFixed(2)) : 0);
+    // Hook / Hold: ratio of summed fields over filteredRows (matches Ads Manager–style totals for the current scope)
+    t.hookRate = aggregateHookRatePct(t.video3sViews, t.impressions, t.videoPlays);
+    t.holdRate = aggregateHoldRatePct(t);
     
     t.roas = t.spend ? t.totalRevenue / t.spend : 0;
 
@@ -2984,7 +2997,7 @@ export default function AdsDashboardBootstrap() {
     let combinedAds = Array.from(adAgg.values()).map(ad => {
       // Use same leads as cards: aggregated from insights (row.leads per ad). Table and cards show same data.
       const leadsCount = ad.leads || 0;
-      const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : (ad.impressions > 0 ? (ad.video3sViews / ad.impressions) * 100 : 0);
+      const hookRate = ad.hookRateWeight > 0 ? ad.hookRateSum / ad.hookRateWeight : aggregateHookRatePct(ad.video3sViews, ad.impressions, ad.videoPlays);
       // Hold Rate = (p50 or p75) / 3s views — works for ALL campaign types; fallback ThruPlays/p100
       const holdNum = (ad.videoP50Watched || 0) > 0 ? ad.videoP50Watched : (ad.videoP75Watched || 0) > 0 ? ad.videoP75Watched : (ad.videoThruPlays || 0) > 0 ? ad.videoThruPlays : ad.videoP100Watched;
       const holdRate = ad.holdRateWeight > 0 ? ad.holdRateSum / ad.holdRateWeight : (ad.video3sViews > 0 && holdNum > 0 ? parseFloat(((holdNum / ad.video3sViews) * 100).toFixed(2)) : (ad.videoPlays > 0 ? parseFloat(((ad.videoP100Watched / ad.videoPlays) * 100).toFixed(2)) : (ad.videoViews > 0 ? parseFloat(((ad.videoThruPlays / ad.videoViews) * 100).toFixed(2)) : 0)));
@@ -4460,8 +4473,6 @@ export default function AdsDashboardBootstrap() {
                   setSelectedCampaigns(values);
                   setSelectedAds([]); // Reset ad selection when campaign changes
                   setPage(1);
-                  // Fetch ads only on explicit campaign selection (not on load or time change)
-                  loadAdsForCampaigns(values);
                 }}
                 placeholder="All Campaigns"
                 getOptionLabel={(opt) => opt.name}
@@ -4485,7 +4496,7 @@ export default function AdsDashboardBootstrap() {
                 getOptionLabel={(opt) => opt.name}
                 getOptionValue={(opt) => opt.id}
                 getOptionStatus={(opt) => opt.effective_status || opt.status || ''}
-                disabled={adsLoading || ads.length === 0}
+                disabled={adsLoading}
                 loading={adsLoading}
               />
             </div>
@@ -4786,8 +4797,8 @@ export default function AdsDashboardBootstrap() {
             <div className="kpi-card-body">
               <div className="kpi-icon">🎣</div>
               <small className="kpi-label">Hook Rate</small>
-              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.hookRate ?? totals.hookRate)}</div>
-              <small className="kpi-subtitle">3s Views / Impressions</small>
+              <div className="kpi-value">{formatPerc(totals.hookRate)}</div>
+              <small className="kpi-subtitle">3s views ÷ impressions · else plays ÷ impressions</small>
             </div>
           </div>
         </div>
@@ -4798,7 +4809,7 @@ export default function AdsDashboardBootstrap() {
             <div className="kpi-card-body">
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
-              <div className="kpi-value">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate )}</div>
+              <div className="kpi-value">{formatPerc(totals.holdRate)}</div>
               <small className="kpi-subtitle">100% Watched / Video Play</small>
             </div>
           </div>
@@ -5897,8 +5908,8 @@ export default function AdsDashboardBootstrap() {
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.leads, 0))}</td>
                         <td className="text-end">{formatMoney(totals.cpl)}</td>
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.conversions, 0))}</td>
-                        <td className="text-end">{formatPerc(videoPerformanceTotals?.hookRate ?? totals.hookRate)}</td>
-                        <td className="text-end">{formatPerc(videoPerformanceTotals?.holdRate ?? totals.holdRate ?? 0)}</td>
+                        <td className="text-end">{formatPerc(totals.hookRate)}</td>
+                        <td className="text-end">{formatPerc(totals.holdRate ?? 0)}</td>
                       </tr>
                     </tfoot>
                   </table>

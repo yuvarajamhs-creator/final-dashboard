@@ -307,14 +307,17 @@ router.post('/lead-saturation', async (req, res) => {
         summary: result.summary || {}
       });
     }
+    const avgIdx = result.summary.saturation_index_avg;
     return res.json({
       success: true,
       saturationLevel: result.summary.saturated > 0 ? 'high' : result.summary.warning > 0 ? 'medium' : 'low',
       message: result.summary.saturated > 0
-        ? `${result.summary.saturated} campaign(s) saturated. Refresh creatives or audiences.`
+        ? `${result.summary.saturated} campaign(s) critical (MHS Saturation Index & signals). Prioritise geo expansion, lookalikes, or creative refresh.`
         : result.summary.warning > 0
-          ? `${result.summary.warning} campaign(s) need attention.`
-          : 'No saturation detected for the period.',
+          ? `${result.summary.warning} campaign(s) in warning zone (index or frequency / reach / CPM / CTR).`
+          : avgIdx != null
+            ? `Average Saturation Index ${avgIdx}/100 — within healthy range for this period.`
+            : 'No saturation detected for the period.',
       campaigns: result.campaigns,
       summary: result.summary,
       details: { dateRange: body.dateRange || null, adAccountId: body.adAccountId || null }

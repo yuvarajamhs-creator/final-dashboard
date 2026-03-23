@@ -11,7 +11,7 @@ const { saveLeads, getLeadsByCampaignAndAd } = require("../repositories/leadsRep
 const { getInsights, upsertInsights } = require("../repositories/insightsRepository");
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
-const { fetchInsightsFromMetaLive } = require("./insightsService");
+const { fetchInsightsFromMetaLive, enrichInsightsRow } = require("./insightsService");
 const { fetchVideoPerformance } = require("./videoPerformanceService");
 const { fetchDemographicInsightsSplit } = require("./demographicInsightsService");
 const adsCache = require("./adsCache");
@@ -657,6 +657,9 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
       // #endregion
     }
 
+    // Ensure video3sViews / hold_rate etc. (Hook Rate) even for DB-only rows; Meta often exposes 3s as top-level field.
+    data = data.map((row) => enrichInsightsRow(row));
+
     const payload = { data };
     insightsCache.set(insightsCacheKey, payload, 5 * 60); // 5 min TTL
     res.json(payload);
@@ -1210,7 +1213,17 @@ router.get("/ads", optionalAuthMiddleware, async (req, res) => {
     }
 
     if (campaign_id && String(campaign_id).trim() !== "") {
-      const data = await adsServiceMeta.listFromDb(accId, { campaign_ids: [String(campaign_id).trim()] });
+      const campaign_ids = String(campaign_id)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      let data = await adsServiceMeta.listFromDb(accId, { campaign_ids });
+      if (!data || data.length === 0) {
+        try {
+          await adsServiceMeta.fetchAndCache(accId);
+          data = await adsServiceMeta.listFromDb(accId, { campaign_ids });
+        } catch (_) {}
+      }
       return send(data || [], true);
     }
 
@@ -3930,6 +3943,7 @@ router.post("/instagram/insights", optionalAuthMiddleware, async (req, res) => {
 router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res) => {
   try {
     const { accountIds: accountIdsParam, pageIds: pageIdsParam, from, to, period, contentType } = req.query;
+    const forceRefresh = req.query.refresh === "1" || req.query.refresh === "true";
 
     let accountIds = [];
     if (accountIdsParam) {
@@ -3953,7 +3967,7 @@ router.get("/instagram/media-insights", optionalAuthMiddleware, async (req, res)
       contentType: contentType && ["all", "posts", "stories", "reels"].includes(String(contentType).toLowerCase()) ? String(contentType).toLowerCase() : undefined,
     };
     const cacheKey = insightsCache.buildMediaInsightsKey(cacheOpts);
-    const cached = insightsCache.get(cacheKey);
+    const cached = forceRefresh ? null : insightsCache.get(cacheKey);
     if (cached != null) {
       return res.json(cached);
     }
