@@ -7,6 +7,10 @@
  *
  * Alert bands align with guide: index yellow >60 / red >80; frequency >3 / >4; reach% >50 / >70;
  * CPM WoW >+20% / >+35%; CTR drop >20% / >35%; adjusted days <30 / <14.
+ *
+ * Signal 4 — first-time impression share: Meta field first_time_impression_ratio (weighted by impressions);
+ *   if <30% → saturation confirmed (feeds status). Falls back if API rejects the field.
+ * Signal 5 — CTR × frequency diagnostic (MHS table): derived from CTR drop, frequency WoW, CPM WoW.
  */
 
 const axios = require('axios');
@@ -18,7 +22,20 @@ const adAccountsService = require('./meta/adAccountsService');
 const { supabase } = require('../supabase');
 
 const META_API_VERSION = process.env.META_API_VERSION || 'v21.0';
-const METHODOLOGY_VERSION = 'MHS_Lead_Saturation_v1.0';
+const METHODOLOGY_VERSION = 'MHS_Lead_Saturation_v1.1';
+
+const INSIGHT_FIELDS_BASE =
+  'campaign_id,campaign_name,impressions,reach,frequency,spend,clicks,cpm,ctr,actions,date_start,date_stop';
+const INSIGHT_FIELDS_WITH_FTI = `${INSIGHT_FIELDS_BASE},first_time_impression_ratio`;
+
+/** MHS Signal 5 — frequency “stable” if |WoW| ≤ this % */
+const FREQ_STABLE_MAX_ABS_PCT = 10;
+/** Frequency “up” vs prior period */
+const FREQ_UP_MIN_PCT = 5;
+/** CTR decline must exceed this to classify Signal 5 */
+const CTR_DROP_MIN_FOR_SIGNAL5_PCT = 5;
+/** CPM “up” for full-saturation row */
+const CPM_UP_MIN_FOR_FULL_SAT_PCT = 5;
 
 function getCredentials() {
   const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
@@ -42,10 +59,15 @@ function getLeadsFromActions(actions) {
   return total;
 }
 
-/**
- * Campaign-level insights (daily rows aggregated in aggregateByCampaign).
- */
-async function fetchCampaignInsights(adAccountId, accessToken, from, to) {
+function normalizeFirstTimeRatioRaw(raw) {
+  if (raw == null || raw === '') return null;
+  const r = Number(raw);
+  if (!Number.isFinite(r) || r < 0) return null;
+  if (r > 1) return r / 100;
+  return r;
+}
+
+async function fetchCampaignInsightsWithFields(adAccountId, accessToken, from, to, fields) {
   const accId = (adAccountId || '').toString().replace(/^act_/, '');
   if (!accId || !accessToken) return [];
 
@@ -55,8 +77,7 @@ async function fetchCampaignInsights(adAccountId, accessToken, from, to) {
     level: 'campaign',
     time_increment: 1,
     time_range: JSON.stringify({ since: from, until: to }),
-    fields:
-      'campaign_id,campaign_name,impressions,reach,frequency,spend,clicks,cpm,ctr,actions,date_start,date_stop',
+    fields,
     limit: 500,
     filtering: JSON.stringify([
       { field: 'campaign.effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED', 'ARCHIVED', 'IN_REVIEW', 'REJECTED', 'PENDING_REVIEW', 'LEARNING', 'ENDED'] },
@@ -80,6 +101,27 @@ async function fetchCampaignInsights(adAccountId, accessToken, from, to) {
   return all;
 }
 
+/**
+ * Campaign-level insights (daily rows aggregated in aggregateByCampaign).
+ * Tries first_time_impression_ratio for Signal 4; retries without it if Meta rejects the field.
+ */
+async function fetchCampaignInsights(adAccountId, accessToken, from, to) {
+  try {
+    return await fetchCampaignInsightsWithFields(adAccountId, accessToken, from, to, INSIGHT_FIELDS_WITH_FTI);
+  } catch (e) {
+    const err = e.response?.data?.error;
+    const msg = err ? String(err.message || '') : '';
+    const badField =
+      /first_time_impression/i.test(msg) ||
+      (err && err.code === 100 && /field/i.test(msg));
+    if (badField) {
+      console.warn('[saturationService] Insights without first_time_impression_ratio:', msg || e.message);
+      return fetchCampaignInsightsWithFields(adAccountId, accessToken, from, to, INSIGHT_FIELDS_BASE);
+    }
+    throw e;
+  }
+}
+
 function aggregateByCampaign(rows) {
   const byCampaign = new Map();
   for (const row of rows) {
@@ -90,9 +132,20 @@ function aggregateByCampaign(rows) {
     const spend = Number(row.spend) || 0;
     const clicks = Number(row.clicks) || 0;
     const leads = getLeadsFromActions(row.actions);
+    const ftiRatio = normalizeFirstTimeRatioRaw(row.first_time_impression_ratio);
 
     if (!byCampaign.has(cid)) {
-      byCampaign.set(cid, { campaign_id: cid, campaign_name: name, impressions: 0, reach: 0, spend: 0, clicks: 0, leads: 0 });
+      byCampaign.set(cid, {
+        campaign_id: cid,
+        campaign_name: name,
+        impressions: 0,
+        reach: 0,
+        spend: 0,
+        clicks: 0,
+        leads: 0,
+        fti_weighted: 0,
+        fti_has_rows: false,
+      });
     }
     const agg = byCampaign.get(cid);
     agg.impressions += impressions;
@@ -100,6 +153,10 @@ function aggregateByCampaign(rows) {
     agg.spend += spend;
     agg.clicks += clicks;
     agg.leads += leads;
+    if (ftiRatio != null && impressions > 0) {
+      agg.fti_has_rows = true;
+      agg.fti_weighted += impressions * ftiRatio;
+    }
   }
 
   for (const agg of byCampaign.values()) {
@@ -108,6 +165,13 @@ function aggregateByCampaign(rows) {
     agg.frequency = r > 0 ? imp / r : 0;
     agg.cpm = imp > 0 ? (agg.spend / imp) * 1000 : 0;
     agg.ctr = imp > 0 ? (agg.clicks / imp) * 100 : 0;
+    if (agg.fti_has_rows && imp > 0) {
+      agg.first_time_impression_pct = (agg.fti_weighted / imp) * 100;
+    } else {
+      agg.first_time_impression_pct = null;
+    }
+    delete agg.fti_weighted;
+    delete agg.fti_has_rows;
   }
   return Array.from(byCampaign.values());
 }
@@ -360,6 +424,35 @@ function computeCtrDropPct(ctrCur, ctrPrev) {
   return ((ctrPrev - ctrCur) / ctrPrev) * 100;
 }
 
+/** Positive % = frequency increased vs prior period (MHS Signal 5) */
+function computeFreqWowPct(freqCur, freqPrev) {
+  if (freqPrev == null || freqPrev <= 0 || freqCur == null) return null;
+  return ((freqCur - freqPrev) / freqPrev) * 100;
+}
+
+const SIGNAL5_COPY = {
+  full_saturation: { label: 'Full saturation', fix: 'Urgent action' },
+  audience_saturation: { label: 'Audience saturation', fix: 'Expand audience' },
+  creative_fatigue: { label: 'Creative fatigue', fix: 'Change creative' },
+};
+
+/**
+ * MHS Signal 5 — CTR × frequency diagnostic (order: full saturation, then audience, then creative fatigue).
+ * @returns {'full_saturation'|'audience_saturation'|'creative_fatigue'|null}
+ */
+function computeSignal5Diagnostic(ctrDropPct, freqWowPct, cpmWowPct) {
+  if (ctrDropPct == null || ctrDropPct < CTR_DROP_MIN_FOR_SIGNAL5_PCT) return null;
+
+  const freqUp = freqWowPct != null && freqWowPct > FREQ_UP_MIN_PCT;
+  const freqStable = freqWowPct != null && Math.abs(freqWowPct) <= FREQ_STABLE_MAX_ABS_PCT;
+  const cpmUp = cpmWowPct != null && cpmWowPct > CPM_UP_MIN_FOR_FULL_SAT_PCT;
+
+  if (freqUp && cpmUp) return 'full_saturation';
+  if (freqUp) return 'audience_saturation';
+  if (freqStable) return 'creative_fatigue';
+  return null;
+}
+
 function computeDaysUntilSaturationAdjusted(audienceSize, reach, daysInPeriod) {
   if (!audienceSize || audienceSize <= 0 || !reach || reach <= 0 || !daysInPeriod) return null;
   const realisticPool = audienceSize * 0.15;
@@ -376,6 +469,8 @@ function deriveStatus(saturationIndex, s) {
   const cpmWow = s.cpm_wow_pct;
   const ctrDrop = s.ctr_drop_pct;
   const days = s.days_until_saturation_adjusted;
+  const ftp = s.first_time_impression_pct;
+  const sig5 = s.signal5_key;
 
   const red =
     si > 80 ||
@@ -383,7 +478,8 @@ function deriveStatus(saturationIndex, s) {
     (rp != null && rp >= 70) ||
     (cpmWow != null && cpmWow > 35) ||
     (ctrDrop != null && ctrDrop > 35) ||
-    (days != null && days >= 0 && days < 14);
+    (days != null && days >= 0 && days < 14) ||
+    sig5 === 'full_saturation';
 
   const yellow =
     si > 60 ||
@@ -391,7 +487,10 @@ function deriveStatus(saturationIndex, s) {
     (rp != null && rp > 50) ||
     (cpmWow != null && cpmWow > 20) ||
     (ctrDrop != null && ctrDrop > 20) ||
-    (days != null && days >= 0 && days < 30);
+    (days != null && days >= 0 && days < 30) ||
+    (ftp != null && ftp < 30) ||
+    sig5 === 'audience_saturation' ||
+    sig5 === 'creative_fatigue';
 
   if (red) return 'Saturated';
   if (yellow) return 'Warning';
@@ -423,7 +522,7 @@ async function runSaturationAnalysis(opts = {}) {
   let accounts = [];
   if (singleAccountId) {
     const id = (singleAccountId || '').toString().replace(/^act_/, '');
-    if (id) accounts = [{ account_id: id, name: `Account ${id}` }];
+    if (id) accounts = [{ account_id: id, account_name: `Account ${id}` }];
   }
   if (accounts.length === 0) {
     try {
@@ -432,7 +531,8 @@ async function runSaturationAnalysis(opts = {}) {
     } catch (e) {
       console.warn('[saturationService] No ad accounts from DB, using env account:', e.message);
       if (credentials.adAccountId) {
-        accounts = [{ account_id: credentials.adAccountId, name: 'Default' }];
+        const aid = String(credentials.adAccountId).replace(/^act_/, '');
+        accounts = [{ account_id: aid, account_name: 'Default' }];
       }
     }
   }
@@ -462,8 +562,14 @@ async function runSaturationAnalysis(opts = {}) {
     const currentAgg = aggregateByCampaign(currentRows);
     const previousAgg = new Map(aggregateByCampaign(previousRows).map((c) => [c.campaign_id, c]));
 
+    const accDisplayName = (acc.account_name || acc.name || '').toString().trim() || null;
     for (const cur of currentAgg) {
-      pending.push({ cur, prev: previousAgg.get(cur.campaign_id) || {}, accId });
+      pending.push({
+        cur,
+        prev: previousAgg.get(cur.campaign_id) || {},
+        accId,
+        accName: accDisplayName,
+      });
     }
   }
 
@@ -474,7 +580,7 @@ async function runSaturationAnalysis(opts = {}) {
   const allCampaigns = [];
 
   pending.forEach((p, idx) => {
-    const { cur, prev, accId } = p;
+    const { cur, prev, accId, accName } = p;
     const { audience_size: audienceSize, audience_source: audienceSource } = audienceResults[idx] || {};
 
     const frequency = cur.frequency || 0;
@@ -501,6 +607,17 @@ async function runSaturationAnalysis(opts = {}) {
     const ctrPrev = prev.ctr != null ? prev.ctr : 0;
     const ctrDropPct = computeCtrDropPct(ctrCur, ctrPrev);
 
+    const freqPrev = prev.frequency != null ? prev.frequency : null;
+    const freqWowPct = computeFreqWowPct(frequency, freqPrev);
+
+    const firstTimePct =
+      cur.first_time_impression_pct != null && Number.isFinite(cur.first_time_impression_pct)
+        ? cur.first_time_impression_pct
+        : null;
+
+    const signal5Key = computeSignal5Diagnostic(ctrDropPct, freqWowPct, cpmWowPct);
+    const signal5Meta = signal5Key ? SIGNAL5_COPY[signal5Key] : null;
+
     const reachPctDisplay =
       reachPctMeta != null ? reachPctMeta : approximateReachPctFromFrequency(frequency);
     const daysDisplay = daysMeta != null ? daysMeta : approximateDaysFromFrequency(frequency);
@@ -517,13 +634,17 @@ async function runSaturationAnalysis(opts = {}) {
       cpm_wow_pct: cpmWowPct,
       ctr_drop_pct: ctrDropPct,
       days_until_saturation_adjusted: daysMeta,
+      first_time_impression_pct: firstTimePct,
+      signal5_key: signal5Key,
     });
 
     const row = {
       campaign_id: cur.campaign_id,
       campaign_name: cur.campaign_name,
       ad_account_id: accId,
+      ad_account_name: accName || null,
       frequency: Math.round(frequency * 100) / 100,
+      freq_wow_pct: freqWowPct != null ? Math.round(freqWowPct * 10) / 10 : null,
       reach,
       audience_size: audienceSize != null ? Math.round(audienceSize * 100) / 100 : null,
       audience_source: audienceSource || null,
@@ -533,6 +654,12 @@ async function runSaturationAnalysis(opts = {}) {
       cpm_wow_pct: cpmWowPct != null ? Math.round(cpmWowPct * 10) / 10 : null,
       ctr: Math.round(ctrCur * 1000) / 1000,
       ctr_drop_pct: ctrDropPct != null ? Math.round(ctrDropPct * 10) / 10 : null,
+      first_time_impression_pct:
+        firstTimePct != null ? Math.round(firstTimePct * 10) / 10 : null,
+      first_time_impression_available: firstTimePct != null,
+      signal5_key: signal5Key || null,
+      signal5_label: signal5Meta ? signal5Meta.label : null,
+      signal5_fix: signal5Meta ? signal5Meta.fix : null,
       days_until_saturation_adjusted:
         daysDisplay != null ? Math.round(daysDisplay * 10) / 10 : null,
       days_is_estimated: daysMeta == null,
@@ -601,4 +728,6 @@ module.exports = {
   fetchReachEstimateFromTargeting,
   approximateReachPctFromFrequency,
   approximateDaysFromFrequency,
+  computeFreqWowPct,
+  computeSignal5Diagnostic,
 };

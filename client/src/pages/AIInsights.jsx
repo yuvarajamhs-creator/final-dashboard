@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './AIInsights.css';
 
 const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:4000';
+/** Ask AI uses Gemini; allow extra time for cold hosts and slow API responses */
+const ASK_AI_FETCH_TIMEOUT_MS = 120000;
 
 const getAuthToken = () => {
     try {
@@ -19,74 +21,108 @@ const getAuthToken = () => {
 
 const toYMD = (d) => d.toISOString().slice(0, 10);
 
-/** Period ranges for Last Month, Last Week, This Week, Today (for tabs) */
+/** Calendar Y-M-D in local timezone (avoids UTC day shift vs Leads.DateChar). */
+const toYMDLocal = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+};
+
+/** Period ranges for Last Month, Last Week, This Week, Today (for tabs) — local calendar dates (matches hero presets / Leads). */
 const getPeriodRanges = () => {
     const today = new Date();
     const lastMonth = { from: '', to: '' };
     const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
     const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
-    lastMonth.from = toYMD(lastMonthStart);
-    lastMonth.to = toYMD(lastMonthEnd);
+    lastMonth.from = toYMDLocal(lastMonthStart);
+    lastMonth.to = toYMDLocal(lastMonthEnd);
 
     const lastWeek = { from: '', to: '' };
     const lastWeekEnd = new Date(today);
     lastWeekEnd.setDate(lastWeekEnd.getDate() - lastWeekEnd.getDay() - 1);
     const lastWeekStart = new Date(lastWeekEnd);
     lastWeekStart.setDate(lastWeekStart.getDate() - 6);
-    lastWeek.from = toYMD(lastWeekStart);
-    lastWeek.to = toYMD(lastWeekEnd);
+    lastWeek.from = toYMDLocal(lastWeekStart);
+    lastWeek.to = toYMDLocal(lastWeekEnd);
 
     const thisWeek = { from: '', to: '' };
     const thisWeekStart = new Date(today);
     thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay());
-    thisWeek.from = toYMD(thisWeekStart);
-    thisWeek.to = toYMD(today);
+    thisWeek.from = toYMDLocal(thisWeekStart);
+    thisWeek.to = toYMDLocal(today);
 
-    const todayRange = { from: toYMD(today), to: toYMD(today) };
+    const todayRange = { from: toYMDLocal(today), to: toYMDLocal(today) };
 
     return { lastMonth, lastWeek, thisWeek, today: todayRange };
 };
 
-/** Fixed range for AI Insights (filters removed; matches prior default “all periods”) */
-const AI_INSIGHTS_DATE_PRESET = 'all_periods';
+const rowYMD = (r) => {
+    const s = r?.date_start || r?.date_stop || r?.date;
+    if (!s) return null;
+    return String(s).slice(0, 10);
+};
+
+/** Keep Meta insight rows whose row day falls inside the tab period (time_increment=1 rows). */
+const filterInsightsRowsByPeriod = (rows, period) => {
+    if (!rows?.length || !period?.from || !period?.to) return [];
+    return rows.filter((r) => {
+        const ymd = rowYMD(r);
+        if (!ymd) return false;
+        return ymd >= period.from && ymd <= period.to;
+    });
+};
+
+/** Preset ids for the hero date control (aligned with getDateRangeForPreset). */
+const INSIGHTS_DATE_PRESET_OPTIONS = [
+    { id: 'today', label: 'Today' },
+    { id: 'this_week', label: 'This Week' },
+    { id: 'last_week', label: 'Last Week' },
+    { id: 'this_month', label: 'This Month' },
+    { id: 'last_month', label: 'Last Month' },
+    { id: 'custom', label: 'Custom' },
+];
 
 const getDateRangeForPreset = (presetId) => {
     const today = new Date();
+    if (presetId === 'today') {
+        return { from: toYMDLocal(today), to: toYMDLocal(today) };
+    }
     if (presetId === 'last_7_days') {
         const start = new Date(today);
         start.setDate(start.getDate() - 6);
-        return { from: toYMD(start), to: toYMD(today) };
+        return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
     if (presetId === 'last_14_days') {
         const start = new Date(today);
         start.setDate(start.getDate() - 13);
-        return { from: toYMD(start), to: toYMD(today) };
+        return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
     if (presetId === 'last_30_days') {
         const start = new Date(today);
         start.setDate(start.getDate() - 29);
-        return { from: toYMD(start), to: toYMD(today) };
+        return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
     if (presetId === 'this_week') {
         const start = new Date(today);
         start.setDate(start.getDate() - start.getDay());
-        return { from: toYMD(start), to: toYMD(today) };
+        return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
     if (presetId === 'last_week') {
         const end = new Date(today);
         end.setDate(end.getDate() - end.getDay() - 1);
         const start = new Date(end);
         start.setDate(start.getDate() - 6);
-        return { from: toYMD(start), to: toYMD(end) };
+        return { from: toYMDLocal(start), to: toYMDLocal(end) };
     }
     if (presetId === 'this_month') {
         const start = new Date(today.getFullYear(), today.getMonth(), 1);
-        return { from: toYMD(start), to: toYMD(today) };
+        return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
     if (presetId === 'last_month') {
         const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
         const end = new Date(today.getFullYear(), today.getMonth(), 0);
-        return { from: toYMD(start), to: toYMD(end) };
+        return { from: toYMDLocal(start), to: toYMDLocal(end) };
     }
     return null;
 };
@@ -104,8 +140,101 @@ const transformActions = (actions = []) => {
 
 const num = (v) => Number(v) || 0;
 const fmtMoney = (v) => `₹${(Number(v) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Meta ad account id for tables (always act_ prefix). */
+const fmtAdAccountId = (id) => {
+    if (id == null || id === '') return '—';
+    const raw = String(id).trim();
+    if (!raw) return '—';
+    const num = raw.replace(/^act_/i, '');
+    return `act_${num}`;
+};
+
+/** MHS lead-intaligetionn-state.md timing by tier */
+const mhsLeadTierActionTiming = (tier) => {
+    const t = String(tier || '');
+    if (t === 'Hot') return 'Within 2 hrs — personal call';
+    if (t === 'Warm') return '24 hrs — WhatsApp sequence';
+    if (t === 'Nurture') return '48 hrs — follow-up sequence';
+    return 'Weekly — broadcast only';
+};
+
+const inferLeadTierFromRow = (r) => {
+    if (r.tier) return r.tier;
+    const c = String(r.category || '');
+    if (c.includes('Hot')) return 'Hot';
+    if (c.includes('Warm')) return 'Warm';
+    if (c.includes('Nurture')) return 'Nurture';
+    return 'Cold';
+};
 const fmtInt = (v) => (Number(v) || 0).toLocaleString('en-IN');
 const fmtReach = (v) => { const n = Number(v) || 0; return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n); };
+
+const mapAdPickToSlot = (best) => {
+    if (!best) {
+        return {
+            name: '—',
+            platform: 'Meta',
+            spend: 0,
+            leads: 0,
+            cpl: 0,
+            reason: 'No ad data for this calendar period in the loaded analysis range.',
+            action: 'MONITOR',
+            dateStart: '',
+            dateStop: ''
+        };
+    }
+    return {
+        name: best.name,
+        platform: best.platform || 'Meta',
+        spend: best.spend,
+        leads: best.leads,
+        cpl: best.cpl,
+        reason: `Best in this period: ${best.leads} leads, ${fmtMoney(best.spend)} spend, ${fmtMoney(best.cpl)} CPL.`,
+        action: 'MONITOR',
+        dateStart: best.dateStart || '',
+        dateStop: best.dateStop || ''
+    };
+};
+
+const mapReelPickToSlot = (best) => {
+    if (!best) {
+        return {
+            name: '—',
+            platform: 'Instagram',
+            reach: 0,
+            engagements: 0,
+            saves: 0,
+            views: 0,
+            likes: 0,
+            comments: 0,
+            shares: 0,
+            reason: 'No reel in this calendar period within the loaded analysis range.',
+            action: 'MONITOR',
+            timestamp: '',
+            thumbnail_url: '',
+            permalink: ''
+        };
+    }
+    const rch = best.reach || best.views || 0;
+    return {
+        name: best.name,
+        platform: best.platform || 'Instagram',
+        reach: best.reach,
+        engagements: best.engagements,
+        saves: best.saves,
+        views: best.views,
+        likes: best.likes,
+        comments: best.comments,
+        shares: best.shares,
+        reason: `Top in this period: ${fmtReach(rch)} reach, ${fmtInt(best.engagements)} engagements, ${best.saves} saves.`,
+        action: 'MONITOR',
+        timestamp: best.timestamp || '',
+        thumbnail_url: best.thumbnail_url || '',
+        permalink: best.permalink || ''
+    };
+};
+
 const fmtDate = (dateStr) => {
     if (!dateStr) return '';
     try {
@@ -273,15 +402,6 @@ const fetchMediaInsightsForPages = async (pages = [], opts = {}) => {
     return { media: [...mediaMap.values()] };
 };
 
-const fetchLatestFallbackReelForPages = async (pages = [], opts = {}) => {
-    const latestPayload = await fetchMediaInsightsForPages(pages, {
-        contentType: 'reels',
-        forceRefresh: opts.forceRefresh,
-        timeoutMs: opts.timeoutMs || 15000
-    });
-    return pickLatestReel(latestPayload);
-};
-
 const pickBestAd = (rows) => {
     if (!rows || rows.length === 0) return null;
     const adMap = {};
@@ -335,8 +455,7 @@ const filterReels = (mediaPayload, period = null) => {
         reels = reels.filter((m) => {
             const ts = m.timestamp;
             if (!ts) return false;
-            const d = new Date(ts);
-            const ymd = toYMD(d);
+            const ymd = toYMDLocal(new Date(ts));
             return ymd >= period.from && ymd <= period.to;
         });
     }
@@ -369,13 +488,6 @@ const pickBestReel = (mediaPayload, period = null) => {
     const result = buildReelResult(best);
     result.score = Math.round(computeReelScore(best));
     return result;
-};
-
-const pickLatestReel = (mediaPayload) => {
-    const reels = filterReels(mediaPayload);
-    if (reels.length === 0) return null;
-    const sorted = [...reels].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
-    return buildReelResult(sorted[0]);
 };
 
 /** Full reel intelligence analysis: normalized scoring, flags, time-based categorization */
@@ -479,9 +591,18 @@ const analyzeReelPerformance = (mediaPayload, periods) => {
 
     const inPeriod = (reels, period) => {
         if (!period?.from || !period?.to) return [];
-        return reels.filter((r) => { if (!r.timestamp) return false; const ymd = toYMD(new Date(r.timestamp)); return ymd >= period.from && ymd <= period.to; });
+        return reels.filter((r) => {
+            if (!r.timestamp) return false;
+            const ymd = toYMDLocal(new Date(r.timestamp));
+            return ymd >= period.from && ymd <= period.to;
+        });
     };
-    const bestIn = (period) => { const f = inPeriod(scored, period); return f.length > 0 ? f[0] : null; };
+    /** Best-scoring reel in period (not first row in global sort). */
+    const bestIn = (period) => {
+        const f = inPeriod(scored, period);
+        if (f.length === 0) return null;
+        return [...f].sort((a, b) => (b.score || 0) - (a.score || 0))[0];
+    };
 
     return {
         daily_best_reel: bestIn(periods.today),
@@ -528,6 +649,9 @@ export default function AIInsights() {
     const [lastAnalysedAt, setLastAnalysedAt] = useState(null);
     const [askInput, setAskInput] = useState('');
     const [askHint, setAskHint] = useState('');
+    const [askLoading, setAskLoading] = useState(false);
+    const [askAnswer, setAskAnswer] = useState('');
+    const [askError, setAskError] = useState('');
 
     /* Lead Saturation Detection – isolated state, does not affect Intelligence block */
     const [saturationLoading, setSaturationLoading] = useState(false);
@@ -540,8 +664,47 @@ export default function AIInsights() {
     const [qualityError, setQualityError] = useState(null);
     const [qualityResult, setQualityResult] = useState(null);
     const [qualityScores, setQualityScores] = useState([]);
-    const [fallbackReel, setFallbackReel] = useState(null);
     const [reelAnalysis, setReelAnalysis] = useState(null);
+
+    const [insightsDatePreset, setInsightsDatePreset] = useState('this_month');
+    const [customDraftFrom, setCustomDraftFrom] = useState('');
+    const [customDraftTo, setCustomDraftTo] = useState('');
+    /** Applied custom range only updates after “Apply range” (avoids refetch on every date input change). */
+    const [customCommitted, setCustomCommitted] = useState({ from: '', to: '' });
+    const [datePresetMenuOpen, setDatePresetMenuOpen] = useState(false);
+    const datePresetWrapRef = useRef(null);
+
+    const resolvedInsightsRange = useMemo(() => {
+        if (insightsDatePreset === 'custom') {
+            if (customCommitted.from && customCommitted.to && customCommitted.from <= customCommitted.to) {
+                return { from: customCommitted.from, to: customCommitted.to };
+            }
+            return getDateRangeForPreset('this_month');
+        }
+        return getDateRangeForPreset(insightsDatePreset) || getDateRangeForPreset('this_month');
+    }, [insightsDatePreset, customCommitted.from, customCommitted.to]);
+
+    const insightsPresetLabel = useMemo(() => {
+        const o = INSIGHTS_DATE_PRESET_OPTIONS.find((x) => x.id === insightsDatePreset);
+        return o?.label || 'This Month';
+    }, [insightsDatePreset]);
+
+    const headerDateRangeLabel = useMemo(() => {
+        const r = resolvedInsightsRange;
+        if (!r?.from || !r?.to) return '—';
+        return `${formatDateHeaderShort(r.from)} – ${formatDateHeaderShort(r.to)}`;
+    }, [resolvedInsightsRange]);
+
+    useEffect(() => {
+        if (!datePresetMenuOpen) return;
+        const onDoc = (e) => {
+            if (datePresetWrapRef.current && !datePresetWrapRef.current.contains(e.target)) {
+                setDatePresetMenuOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [datePresetMenuOpen]);
 
     const fetchAIInsights = useCallback(async (forceRefresh = false) => {
         setLoading(true);
@@ -549,56 +712,39 @@ export default function AIInsights() {
         setError(null);
         setQuotaRetrySeconds(null);
         try {
-            const useSingleRange = AI_INSIGHTS_DATE_PRESET !== 'all_periods' && getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET);
-            let bestAds;
-            let bestReels;
-            let dateRange;
+            const { from, to } = resolvedInsightsRange;
+            const dateRange = { from, to };
+            const [insightsRows, pages] = await Promise.all([fetchInsightsForAI(from, to, forceRefresh), fetchPages()]);
+            const mediaPayload = await fetchMediaInsightsForPages(pages, { from, to, forceRefresh, timeoutMs: 20000 });
+            const allPeriods = getPeriodRanges();
+            setReelAnalysis(analyzeReelPerformance(mediaPayload, allPeriods));
 
-            if (useSingleRange) {
-                const { from, to } = useSingleRange;
-                dateRange = { from, to };
-                const [insightsRows, pages] = await Promise.all([fetchInsightsForAI(from, to, forceRefresh), fetchPages()]);
-                const bestAd = pickBestAd(insightsRows);
-                let mediaPayload = null;
-                mediaPayload = await fetchMediaInsightsForPages(pages, { from, to, forceRefresh, timeoutMs: 20000 });
-                const bestReel = pickBestReel(mediaPayload);
-                setFallbackReel(await fetchLatestFallbackReelForPages(pages, { forceRefresh }));
-                const allPeriods = getPeriodRanges();
-                setReelAnalysis(analyzeReelPerformance(mediaPayload, allPeriods));
-                bestAds = { lastMonth: bestAd, lastWeek: bestAd, thisWeek: bestAd, today: bestAd };
-                bestReels = { lastMonth: bestReel, lastWeek: bestReel, thisWeek: bestReel, today: bestReel };
-            } else {
-                const periods = getPeriodRanges();
-                dateRange = { from: periods.lastMonth.from, to: periods.today.to };
-                const [pages, lastMonthRows, lastWeekRows, thisWeekRows, todayRows] = await Promise.all([
-                    fetchPages(),
-                    fetchInsightsForAI(periods.lastMonth.from, periods.lastMonth.to, forceRefresh),
-                    fetchInsightsForAI(periods.lastWeek.from, periods.lastWeek.to, forceRefresh),
-                    fetchInsightsForAI(periods.thisWeek.from, periods.thisWeek.to, forceRefresh),
-                    fetchInsightsForAI(periods.today.from, periods.today.to, forceRefresh),
-                ]);
-                bestAds = {
-                    lastMonth: pickBestAd(lastMonthRows),
-                    lastWeek: pickBestAd(lastWeekRows),
-                    thisWeek: pickBestAd(thisWeekRows),
-                    today: pickBestAd(todayRows)
-                };
-                let mediaPayload = null;
-                mediaPayload = await fetchMediaInsightsForPages(pages, { from: periods.lastMonth.from, to: periods.today.to, forceRefresh, timeoutMs: 20000 });
-                setFallbackReel(await fetchLatestFallbackReelForPages(pages, { forceRefresh }));
-                const analysis = analyzeReelPerformance(mediaPayload, periods);
-                setReelAnalysis(analysis);
-                bestReels = {
-                    lastMonth: analysis.monthly_best_reel || pickBestReel(mediaPayload, periods.lastMonth),
-                    lastWeek: analysis.last_week_best_reel || pickBestReel(mediaPayload, periods.lastWeek),
-                    thisWeek: analysis.this_week_best_reel || pickBestReel(mediaPayload, periods.thisWeek),
-                    today: analysis.daily_best_reel || pickBestReel(mediaPayload, periods.today)
-                };
-            }
+            const bestAds = {
+                lastMonth: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.lastMonth)),
+                lastWeek: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.lastWeek)),
+                thisWeek: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.thisWeek)),
+                today: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.today))
+            };
+            const bestReels = {
+                lastMonth: pickBestReel(mediaPayload, allPeriods.lastMonth),
+                lastWeek: pickBestReel(mediaPayload, allPeriods.lastWeek),
+                thisWeek: pickBestReel(mediaPayload, allPeriods.thisWeek),
+                today: pickBestReel(mediaPayload, allPeriods.today)
+            };
 
             // Show live ad/reel results immediately even if the AI summary step is slow.
-            if (bestAds) setAdsData(bestAds);
-            if (bestReels) setReelsData(bestReels);
+            setAdsData({
+                lastMonth: mapAdPickToSlot(bestAds.lastMonth),
+                lastWeek: mapAdPickToSlot(bestAds.lastWeek),
+                thisWeek: mapAdPickToSlot(bestAds.thisWeek),
+                today: mapAdPickToSlot(bestAds.today)
+            });
+            setReelsData({
+                lastMonth: mapReelPickToSlot(bestReels.lastMonth),
+                lastWeek: mapReelPickToSlot(bestReels.lastWeek),
+                thisWeek: mapReelPickToSlot(bestReels.thisWeek),
+                today: mapReelPickToSlot(bestReels.today)
+            });
 
             setLoadingPhase('ai');
             const token = getAuthToken();
@@ -640,7 +786,7 @@ export default function AIInsights() {
             setLastAnalysedAt(new Date());
             setLoading(false);
         }
-    }, []);
+    }, [resolvedInsightsRange]);
 
     /* Countdown for quota retry: decrement every second, clear when 0 */
     useEffect(() => {
@@ -659,9 +805,7 @@ export default function AIInsights() {
             const token = getAuthToken();
             const headers = { 'Content-Type': 'application/json' };
             if (token) headers['Authorization'] = `Bearer ${token}`;
-            const dateRange = AI_INSIGHTS_DATE_PRESET && AI_INSIGHTS_DATE_PRESET !== 'all_periods'
-                ? getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET)
-                : (() => { const y = new Date(); y.setDate(y.getDate() - 1); const s = new Date(y); s.setDate(s.getDate() - 6); return { from: toYMD(s), to: toYMD(y) }; })();
+            const dateRange = { from: resolvedInsightsRange.from, to: resolvedInsightsRange.to };
             const res = await fetch(`${API_BASE}/api/ai/lead-saturation`, {
                 method: 'POST',
                 headers,
@@ -678,7 +822,7 @@ export default function AIInsights() {
         } finally {
             setSaturationLoading(false);
         }
-    }, []);
+    }, [resolvedInsightsRange]);
 
     const fetchCreativeFatigue = useCallback(async () => {
         setFatigueLoading(true);
@@ -688,9 +832,7 @@ export default function AIInsights() {
             const token = getAuthToken();
             const headers = { 'Content-Type': 'application/json' };
             if (token) headers['Authorization'] = `Bearer ${token}`;
-            const dateRange = AI_INSIGHTS_DATE_PRESET && AI_INSIGHTS_DATE_PRESET !== 'all_periods'
-                ? getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET)
-                : (() => { const y = new Date(); y.setDate(y.getDate() - 1); const s = new Date(y); s.setDate(s.getDate() - 6); return { from: toYMD(s), to: toYMD(y) }; })();
+            const dateRange = { from: resolvedInsightsRange.from, to: resolvedInsightsRange.to };
             const res = await fetch(`${API_BASE}/api/ai/creative-fatigue`, {
                 method: 'POST',
                 headers,
@@ -707,7 +849,19 @@ export default function AIInsights() {
         } finally {
             setFatigueLoading(false);
         }
-    }, []);
+    }, [resolvedInsightsRange]);
+
+    const loadLeadScores = useCallback(async () => {
+        try {
+            const token = getAuthToken();
+            const headers = {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const { from, to } = resolvedInsightsRange;
+            const res = await fetch(`${API_BASE}/api/ai/lead-quality/scores?dateFrom=${encodeURIComponent(from)}&dateTo=${encodeURIComponent(to)}&limit=100`, { headers });
+            const json = await res.json().catch(() => ({}));
+            if (json.success && Array.isArray(json.data)) setQualityScores(json.data);
+        } catch (e) { /* ignore */ }
+    }, [resolvedInsightsRange]);
 
     const fetchLeadQuality = useCallback(async () => {
         setQualityLoading(true);
@@ -717,13 +871,11 @@ export default function AIInsights() {
             const token = getAuthToken();
             const headers = { 'Content-Type': 'application/json' };
             if (token) headers['Authorization'] = `Bearer ${token}`;
-            const dateRange = AI_INSIGHTS_DATE_PRESET && AI_INSIGHTS_DATE_PRESET !== 'all_periods'
-                ? getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET)
-                : (() => { const y = new Date(); y.setDate(y.getDate() - 1); const s = new Date(y); s.setDate(s.getDate() - 30); return { from: toYMD(s), to: toYMD(y) }; })();
+            const { from, to } = resolvedInsightsRange;
             const res = await fetch(`${API_BASE}/api/ai/lead-quality`, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ dateFrom: dateRange.from, dateTo: dateRange.to })
+                body: JSON.stringify({ dateFrom: from, dateTo: to })
             });
             const json = await res.json().catch(() => ({}));
             if (!res.ok) {
@@ -732,26 +884,13 @@ export default function AIInsights() {
             }
             setQualityResult(json);
             if (json.success && json.samples?.length) setQualityScores(json.samples);
+            if (json.success) await loadLeadScores();
         } catch (err) {
             setQualityError(err.message || 'Network error');
         } finally {
             setQualityLoading(false);
         }
-    }, []);
-
-    const loadLeadScores = useCallback(async () => {
-        try {
-            const token = getAuthToken();
-            const headers = {};
-            if (token) headers['Authorization'] = `Bearer ${token}`;
-            const dateRange = AI_INSIGHTS_DATE_PRESET && AI_INSIGHTS_DATE_PRESET !== 'all_periods'
-                ? getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET)
-                : (() => { const y = new Date(); y.setDate(y.getDate() - 1); const s = new Date(y); s.setDate(s.getDate() - 30); return { from: toYMD(s), to: toYMD(y) }; })();
-            const res = await fetch(`${API_BASE}/api/ai/lead-quality/scores?dateFrom=${encodeURIComponent(dateRange.from)}&dateTo=${encodeURIComponent(dateRange.to)}&limit=100`, { headers });
-            const json = await res.json().catch(() => ({}));
-            if (json.success && Array.isArray(json.data)) setQualityScores(json.data);
-        } catch (e) { /* ignore */ }
-    }, []);
+    }, [resolvedInsightsRange, loadLeadScores]);
 
     useEffect(() => {
         fetchAIInsights();
@@ -788,8 +927,8 @@ export default function AIInsights() {
         periodReel.permalink ||
         periodReel.timestamp
     ));
-    const resolvedCurrentReel = hasUsablePeriodReel ? periodReel : fallbackReel;
-    const resolvedIsReelFallback = !hasUsablePeriodReel && !!fallbackReel;
+    /* Do not substitute "latest reel" from another day — it made e.g. Today show a January post. */
+    const resolvedCurrentReel = hasUsablePeriodReel ? periodReel : null;
     const hasUsableAnalysisReel = !!(analysisReelForPeriod && (
         Number(analysisReelForPeriod.reach || 0) > 0 ||
         Number(analysisReelForPeriod.views || 0) > 0 ||
@@ -803,15 +942,6 @@ export default function AIInsights() {
     const flagColors = { TRENDING: '#ef4444', REPOST_RECOMMENDED: '#8b5cf6', RISING: '#f59e0b', STABLE_TOP_PERFORMER: '#22c55e' };
     const flagIcons = { TRENDING: 'fa-fire', REPOST_RECOMMENDED: 'fa-retweet', RISING: 'fa-arrow-trend-up', STABLE_TOP_PERFORMER: 'fa-shield-check' };
     const periodLabel = periodLabels[activeTimeWindow] || '';
-    const headerDateRange = useMemo(() => {
-        if (AI_INSIGHTS_DATE_PRESET === 'all_periods') {
-            const p = getPeriodRanges();
-            return `${formatDateHeaderShort(p.lastMonth.from)} – ${formatDateHeaderShort(p.today.to)}`;
-        }
-        const r = getDateRangeForPreset(AI_INSIGHTS_DATE_PRESET);
-        if (!r) return '—';
-        return `${formatDateHeaderShort(r.from)} – ${formatDateHeaderShort(r.to)}`;
-    }, []);
 
     const saturationIndexPct = useMemo(() => {
         const avgFromSummary = saturationResult?.summary?.saturation_index_avg;
@@ -842,6 +972,7 @@ export default function AIInsights() {
         const rp = worst.reach_pct;
         const cpmWow = worst.cpm_wow_pct;
         const ctrDrop = worst.ctr_drop_pct;
+        const fti = worst.first_time_impression_pct;
         const barTone = (danger, warn) => {
             if (danger) return 'danger';
             if (warn) return 'warn';
@@ -859,6 +990,12 @@ export default function AIInsights() {
                 value: rp != null ? `${Number(rp).toFixed(0)}%` : '—',
                 pct: rp != null ? Math.min(100, rp) : 0,
                 tone: barTone(rp >= 70, rp > 50)
+            },
+            {
+                label: 'First-time impression share',
+                value: fti != null ? `${Number(fti).toFixed(0)}%` : '—',
+                pct: fti != null ? Math.min(100, fti) : 0,
+                tone: barTone(fti != null && fti < 15, fti != null && fti < 30)
             },
             {
                 label: 'CPM vs prior week',
@@ -892,12 +1029,13 @@ export default function AIInsights() {
     const fatigueStatusUi = useMemo(() => {
         const s = fatigueResult?.summary;
         if (!s) return { label: '—', tone: 'mod' };
-        if (s.fatigued > 0) return { label: 'Critical', tone: 'crit' };
-        if (s.warning > 0) return { label: 'Warning', tone: 'warn' };
-        return { label: 'Healthy', tone: 'ok' };
+        if ((s.severe ?? 0) > 0) return { label: 'Severe', tone: 'crit' };
+        if ((s.fatigued ?? 0) > 0) return { label: 'Fatigued', tone: 'warn' };
+        if ((s.aging ?? 0) > 0) return { label: 'Aging', tone: 'mod' };
+        return { label: 'Fresh', tone: 'ok' };
     }, [fatigueResult]);
 
-    const freshCreativesCount = useMemo(() => fatigueResult?.summary?.healthy ?? 0, [fatigueResult]);
+    const freshCreativesCount = useMemo(() => fatigueResult?.summary?.fresh ?? fatigueResult?.summary?.healthy ?? 0, [fatigueResult]);
 
     const hookSecondsDisplay = useMemo(() => {
         const w = displayReel?.watchTime;
@@ -910,35 +1048,48 @@ export default function AIInsights() {
     const leadCategoryBars = useMemo(() => {
         const samples = leadSamples;
         if (!samples.length) return [];
-        const map = { 'Hot Lead': 0, 'Warm Lead': 0, Average: 0, 'Low Intent': 0 };
+        const map = { 'Hot Lead': 0, 'Warm Lead': 0, Nurture: 0, Cold: 0 };
         samples.forEach((s) => {
-            const k = s.category || 'Average';
+            const k = s.category || 'Cold';
             if (map[k] !== undefined) map[k] += 1;
-            else map.Average += 1;
+            else if (String(k).includes('Hot')) map['Hot Lead'] += 1;
+            else if (String(k).includes('Warm')) map['Warm Lead'] += 1;
+            else if (String(k).includes('Nurture') || String(k).includes('Average')) map.Nurture += 1;
+            else map.Cold += 1;
         });
         const total = samples.length;
         const order = [
             { key: 'Hot Lead', short: 'Hot', color: '#ef4444' },
             { key: 'Warm Lead', short: 'Warm', color: '#f97316' },
-            { key: 'Average', short: 'Average', color: '#3b82f6' },
-            { key: 'Low Intent', short: 'Low', color: '#22c55e' }
+            { key: 'Nurture', short: 'Nurture', color: '#3b82f6' },
+            { key: 'Cold', short: 'Cold', color: '#64748b' }
         ];
         return order.map((o) => ({ ...o, pct: Math.round((map[o.key] / total) * 100) }));
     }, [leadSamples]);
 
     const leadIntelStats = useMemo(() => {
+        const summary = qualityResult?.summary;
         const samples = leadSamples;
         const n = samples.length;
-        if (!n) return { total: 0, avgScore: null, highIntentPct: null };
+        if (qualityResult?.success && summary && typeof summary.avg_score === 'number') {
+            return {
+                total: summary.total ?? n,
+                avgScore: summary.avg_score,
+                hotLeadRatePct: summary.hot_lead_rate_pct,
+                hotWarmPct: null,
+            };
+        }
+        if (!n) return { total: 0, avgScore: null, hotLeadRatePct: null, hotWarmPct: null };
         const sum = samples.reduce((s, r) => s + (Number(r.score) || 0), 0);
-        const hot = samples.filter((r) => String(r.category || '').includes('Hot')).length;
-        const warm = samples.filter((r) => String(r.category || '').includes('Warm')).length;
+        const hot = samples.filter((r) => r.tier === 'Hot' || String(r.category || '').includes('Hot')).length;
+        const warm = samples.filter((r) => r.tier === 'Warm' || (String(r.category || '').includes('Warm') && !String(r.category || '').includes('Hot'))).length;
         return {
             total: n,
-            avgScore: Math.round(sum / n),
-            highIntentPct: Math.round(((hot + warm) / n) * 100)
+            avgScore: Math.round((sum / n) * 10) / 10,
+            hotLeadRatePct: Math.round((hot / n) * 1000) / 10,
+            hotWarmPct: Math.round(((hot + warm) / n) * 1000) / 10,
         };
-    }, [leadSamples]);
+    }, [leadSamples, qualityResult]);
 
     const highIntentFollowups = useMemo(() => {
         const samples = leadSamples;
@@ -979,37 +1130,145 @@ export default function AIInsights() {
     ], []);
 
     const fatigueCreativeInsight = useMemo(() => {
-        const sorted = [...(fatigueResult?.creatives || [])].sort((a, b) => (a.cpl || 0) - (b.cpl || 0));
-        const best = sorted.find((c) => (c.status || '').toLowerCase() !== 'fatigued');
-        const worst = topFatigueCreatives.find((c) => (c.status || '').toLowerCase() === 'fatigued');
-        if (best && worst) {
-            return `“${best.ad_name || 'A creative'}” shows lower CPL than “${worst.ad_name || 'a fatigued ad'}”. Reallocate budget toward the stronger creative.`;
+        const list = fatigueResult?.creatives || [];
+        const worst = [...list].sort((a, b) => (b.fatigue_score ?? b.score ?? 0) - (a.fatigue_score ?? a.score ?? 0))[0];
+        const st = (worst?.status || '').toLowerCase();
+        if (worst && (st === 'severe' || st === 'fatigued')) {
+            return `“${worst.ad_name || 'An ad'}” is ${worst.status} (score ${worst.fatigue_score ?? worst.score ?? '—'}). MHS: refresh hook, creative, or angle; pause if severe.`;
         }
-        return recommendations[0]?.justification || currentAd.reason || 'When frequency and CPL rise together, refresh creatives or broaden audiences.';
-    }, [fatigueResult, topFatigueCreatives, recommendations, currentAd]);
+        const sorted = [...list].sort((a, b) => (a.cpl || 0) - (b.cpl || 0));
+        const best = sorted.find((c) => (c.status || '').toLowerCase() === 'fresh');
+        if (best && worst && best.ad_id !== worst.ad_id) {
+            return `“${best.ad_name || 'A creative'}” is Fresh; watch Aging ads and run the weekly audit (CTR, hook, CPL vs first 7d, quality, days live).`;
+        }
+        return recommendations[0]?.justification || currentAd.reason || 'Score = CTR drop×0.4 + age pressure×0.4 + hook drop×0.2 (creative_state.md).';
+    }, [fatigueResult, recommendations, currentAd]);
 
-    const handleAskSubmit = useCallback((e) => {
+    const buildAskContext = useCallback(() => {
+        const reel = displayReel || resolvedCurrentReel;
+        return {
+            dateRange: resolvedInsightsRange,
+            activePeriod: periodLabel,
+            bestAd: {
+                name: currentAd?.name,
+                spend: currentAd?.spend,
+                leads: currentAd?.leads,
+                cpl: currentAd?.cpl,
+                reason: currentAd?.reason,
+                action: currentAd?.action
+            },
+            bestReel: reel
+                ? {
+                    name: reel.name,
+                    reach: reel.reach,
+                    views: reel.views,
+                    engagements: reel.engagements,
+                    saves: reel.saves,
+                    reason: reel.reason
+                }
+                : null,
+            insights: (insights || []).slice(0, 6).map((i) => ({
+                type: i.type,
+                timeWindow: i.timeWindow,
+                text: i.text,
+                action: i.action
+            })),
+            recommendations: (recommendations || []).slice(0, 4).map((r) => ({
+                title: r.title,
+                justification: r.justification
+            })),
+            leadSaturation: saturationResult
+                ? {
+                    level: saturationResult.saturationLevel,
+                    message: saturationResult.message,
+                    summary: saturationResult.summary
+                        ? {
+                            total: saturationResult.summary.total,
+                            saturated: saturationResult.summary.saturated,
+                            warning: saturationResult.summary.warning,
+                            healthy: saturationResult.summary.healthy,
+                            saturation_index_avg: saturationResult.summary.saturation_index_avg
+                        }
+                        : null
+                }
+                : null,
+            creativeFatigue: fatigueResult?.summary ?? null,
+            leadQuality: qualityResult?.summary ?? null
+        };
+    }, [
+        resolvedInsightsRange,
+        periodLabel,
+        currentAd,
+        displayReel,
+        resolvedCurrentReel,
+        insights,
+        recommendations,
+        saturationResult,
+        fatigueResult,
+        qualityResult
+    ]);
+
+    const handleAskSubmit = useCallback(async (e) => {
         e?.preventDefault?.();
-        setAskHint('Refreshing insights…');
-        fetchAIInsights(true).finally(() => {
-            setAskHint('Updated. Review AI Marketing Intelligence below.');
-            setAskInput('');
-        });
-    }, [fetchAIInsights]);
+        const q = String(askInput || '').trim();
+        if (!q) {
+            setAskHint('');
+            setAskAnswer('');
+            setAskError('Type a question first.');
+            return;
+        }
+        setAskHint('');
+        setAskAnswer('');
+        setAskError('');
+        setAskLoading(true);
+        try {
+            const token = getAuthToken();
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetchJsonWithTimeout(
+                `${API_BASE}/api/ai/ask`,
+                {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        question: q,
+                        context: buildAskContext()
+                    })
+                },
+                ASK_AI_FETCH_TIMEOUT_MS
+            );
+            const json = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setAskError(json.details || json.error || res.statusText || 'Could not get an answer.');
+                return;
+            }
+            if (json.success && json.answer) {
+                setAskAnswer(String(json.answer));
+            } else {
+                setAskError(json.error || 'No answer returned.');
+            }
+        } catch (err) {
+            if (err?.name === 'AbortError') {
+                setAskError(
+                    'Timed out waiting for the AI — not because your question was too long. The backend or Gemini was slow or unreachable. Confirm the API server is running (restart locally or redeploy), then try again.'
+                );
+            } else {
+                setAskError(err.message || 'Network error');
+            }
+        } finally {
+            setAskLoading(false);
+        }
+    }, [askInput, buildAskContext]);
 
     const creativeStatusClass = (status) => {
         const s = (status || '').toLowerCase();
-        if (s === 'fatigued') return 'crit';
-        if (s === 'warning') return 'aging';
+        if (s === 'severe') return 'crit';
+        if (s === 'fatigued') return 'warn';
+        if (s === 'aging') return 'aging';
         return 'fresh';
     };
 
-    const creativeStatusLabel = (status) => {
-        const s = (status || '').toLowerCase();
-        if (s === 'fatigued') return 'Fatigued';
-        if (s === 'warning') return 'Aging';
-        return 'Fresh';
-    };
+    const creativeStatusLabel = (status) => status || '—';
 
     const scrollToId = (id) => {
         const el = document.getElementById(id);
@@ -1033,9 +1292,88 @@ export default function AIInsights() {
                     </p>
                 </div>
                 <div className="ai2-hero-actions">
-                    <div className="ai2-date-chip" title="Active analysis range">
-                        <i className="fas fa-calendar-alt" aria-hidden />
-                        {headerDateRange}
+                    <div className="ai2-date-preset-wrap" ref={datePresetWrapRef}>
+                        <button
+                            type="button"
+                            className="ai2-date-preset-trigger"
+                            title="Analysis period"
+                            aria-expanded={datePresetMenuOpen}
+                            aria-haspopup="listbox"
+                            onClick={() => {
+                                setDatePresetMenuOpen((o) => {
+                                    const next = !o;
+                                    if (next && insightsDatePreset === 'custom' && customCommitted.from && customCommitted.to) {
+                                        setCustomDraftFrom(customCommitted.from);
+                                        setCustomDraftTo(customCommitted.to);
+                                    }
+                                    return next;
+                                });
+                            }}
+                        >
+                            <i className="fas fa-calendar-alt" aria-hidden />
+                            <span className="ai2-date-preset-label">{insightsPresetLabel}</span>
+                            <span className="ai2-date-preset-range">{headerDateRangeLabel}</span>
+                            <i className={`fas fa-chevron-down ai2-date-preset-caret${datePresetMenuOpen ? ' ai2-date-preset-caret--open' : ''}`} aria-hidden />
+                        </button>
+                        {datePresetMenuOpen && (
+                            <div className="ai2-date-preset-menu" role="listbox" aria-label="Date range">
+                                {INSIGHTS_DATE_PRESET_OPTIONS.map((opt) => (
+                                    <button
+                                        key={opt.id}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={insightsDatePreset === opt.id}
+                                        className={`ai2-date-preset-option${insightsDatePreset === opt.id ? ' ai2-date-preset-option--active' : ''}`}
+                                        onClick={() => {
+                                            setInsightsDatePreset(opt.id);
+                                            if (opt.id === 'custom') {
+                                                const m = getDateRangeForPreset('this_month');
+                                                setCustomDraftFrom(m.from);
+                                                setCustomDraftTo(m.to);
+                                                setCustomCommitted({ from: m.from, to: m.to });
+                                            } else {
+                                                setDatePresetMenuOpen(false);
+                                            }
+                                        }}
+                                    >
+                                        {opt.label}
+                                    </button>
+                                ))}
+                                {insightsDatePreset === 'custom' && (
+                                    <div className="ai2-date-custom-fields">
+                                        <label className="ai2-date-custom-lbl">
+                                            <span>From</span>
+                                            <input
+                                                type="date"
+                                                className="ai2-date-custom-input"
+                                                value={customDraftFrom}
+                                                onChange={(e) => setCustomDraftFrom(e.target.value)}
+                                            />
+                                        </label>
+                                        <label className="ai2-date-custom-lbl">
+                                            <span>To</span>
+                                            <input
+                                                type="date"
+                                                className="ai2-date-custom-input"
+                                                value={customDraftTo}
+                                                onChange={(e) => setCustomDraftTo(e.target.value)}
+                                            />
+                                        </label>
+                                        <button
+                                            type="button"
+                                            className="ai2-date-custom-apply"
+                                            disabled={!customDraftFrom || !customDraftTo || customDraftFrom > customDraftTo}
+                                            onClick={() => {
+                                                setCustomCommitted({ from: customDraftFrom, to: customDraftTo });
+                                                setDatePresetMenuOpen(false);
+                                            }}
+                                        >
+                                            Apply range
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                     <button
                         type="button"
@@ -1084,7 +1422,7 @@ export default function AIInsights() {
                         </div>
                         <div className="ai2-card-head-text">
                             <h2 id="sat-card-title" className="ai2-card-title">Lead Saturation</h2>
-                            <p className="ai2-card-sub">MHS index: frequency ÷3.5 + reach % ÷70 · CPM &amp; CTR trends</p>
+                            <p className="ai2-card-sub">MHS index + Signal 4 (first-time impressions) + Signal 5 (CTR × frequency × CPM)</p>
                         </div>
                         <span className={`ai2-badge ai2-badge--${saturationStatusUi.tone}`}>{saturationStatusUi.label}</span>
                     </div>
@@ -1105,6 +1443,7 @@ export default function AIInsights() {
                             {(saturationBars.length ? saturationBars : [
                                 { label: 'Frequency', value: '—', pct: 0, tone: 'neutral' },
                                 { label: 'Reach % of pool', value: '—', pct: 0, tone: 'neutral' },
+                                { label: 'First-time impression share', value: '—', pct: 0, tone: 'neutral' },
                                 { label: 'CPM vs prior week', value: '—', pct: 0, tone: 'neutral' },
                                 { label: 'CTR drop vs prior', value: '—', pct: 0, tone: 'neutral' }
                             ]).map((row) => (
@@ -1122,7 +1461,7 @@ export default function AIInsights() {
                     </div>
 
                     <p className="ai2-insight-copy">
-                        {saturationResult?.message || (saturationLoading ? 'Running saturation analysis…' : 'We pull frequency, reach, CPM, and CTR from Meta (current vs prior window), estimate audience from ad sets, and compute the MHS Saturation Index (0–100). Yellow >60, red >80.')}
+                        {saturationResult?.message || (saturationLoading ? 'Running saturation analysis…' : 'We pull frequency, reach, first-time impression share, CPM, and CTR from Meta (current vs prior window), estimate audience from ad sets, compute the MHS Saturation Index (0–100), and classify Signal 5 (audience saturation vs creative fatigue vs full saturation). Yellow >60, red >80; first-time impressions below 30% confirms saturation per MHS.')}
                     </p>
                     {saturationError && (
                         <p className="ai2-inline-err">{saturationError}</p>
@@ -1147,7 +1486,7 @@ export default function AIInsights() {
                         </div>
                         <div className="ai2-card-head-text">
                             <h2 id="fatigue-card-title" className="ai2-card-title">Creative Fatigue</h2>
-                            <p className="ai2-card-sub">Ad performance degradation over time</p>
+                            <p className="ai2-card-sub">MHS score: CTR drop×0.4 + lifespan pressure×0.4 + hook drop×0.2</p>
                         </div>
                         <span className={`ai2-badge ai2-badge--${fatigueStatusUi.tone}`}>{fatigueStatusUi.label}</span>
                     </div>
@@ -1158,7 +1497,7 @@ export default function AIInsights() {
                             <span className="ai2-metric-v">
                                 {fatigueAvgCtrDrop != null ? `-${fatigueAvgCtrDrop}%` : '—'}
                             </span>
-                            <span className="ai2-metric-hint ai2-hint-bad">7d vs prior</span>
+                            <span className="ai2-metric-hint ai2-hint-bad">current vs prior window</span>
                         </div>
                         <div className="ai2-metric-box">
                             <span className="ai2-metric-k">Avg hook / watch</span>
@@ -1168,7 +1507,7 @@ export default function AIInsights() {
                         <div className="ai2-metric-box">
                             <span className="ai2-metric-k">Fresh creatives</span>
                             <span className="ai2-metric-v">{freshCreativesCount}</span>
-                            <span className={`ai2-metric-hint ${freshCreativesCount < 3 ? 'ai2-hint-warn' : ''}`}>Healthy count</span>
+                            <span className={`ai2-metric-hint ${freshCreativesCount < 3 ? 'ai2-hint-warn' : ''}`}>Fresh (0–40)</span>
                         </div>
                     </div>
 
@@ -1200,8 +1539,8 @@ export default function AIInsights() {
                     <div className="ai2-card-foot">
                         <span>
                             {fatigueResult?.summary
-                                ? `Action: pause fatigued ads (${fatigueResult.summary.fatigued ?? 0}) · launch new variants`
-                                : 'Action needed: refresh creatives when CTR drops and CPL climbs.'}
+                                ? `Severe ${fatigueResult.summary.severe ?? 0} · Fatigued ${fatigueResult.summary.fatigued ?? 0} · Aging ${fatigueResult.summary.aging ?? 0} · Fresh ${fatigueResult.summary.fresh ?? 0}`
+                                : 'Weekly audit: CTR >30%, hook <15%, CPL vs first 7d >40%, quality below avg, days >21, neg. feedback >0.1%.'}
                         </span>
                         <button type="button" className="ai2-link-btn" onClick={() => scrollToId('ai2-detail-fatigue')}>
                             Manage creatives <i className="fas fa-arrow-right" />
@@ -1218,7 +1557,7 @@ export default function AIInsights() {
                         </div>
                         <div className="ai2-card-head-text">
                             <h2 id="lead-intel-title" className="ai2-card-title">Lead Intelligence</h2>
-                            <p className="ai2-card-sub">Lead quality, behaviour &amp; conversion signals</p>
+                            <p className="ai2-card-sub">MHS tiers: Hot 80+ · Warm 50–79 · Nurture 25–49 · Cold 0–24</p>
                         </div>
                         <span className={`ai2-pill ai2-pill-soft ${qualityLoading ? 'ai2-pill-animate' : ''}`}>
                             {qualityLoading ? 'Analysing' : 'Live'}
@@ -1233,18 +1572,18 @@ export default function AIInsights() {
                         </div>
                         <div className="ai2-metric-box">
                             <span className="ai2-metric-k">Avg quality score</span>
-                            <span className="ai2-metric-v">{leadIntelStats.avgScore != null ? `${leadIntelStats.avgScore}/100` : '—'}</span>
-                            <span className="ai2-metric-hint">Form + sugar signals</span>
+                            <span className="ai2-metric-v">{leadIntelStats.avgScore != null ? `${leadIntelStats.avgScore}` : '—'}</span>
+                            <span className="ai2-metric-hint">Benchmark {'>'}45 (doc)</span>
                         </div>
                         <div className="ai2-metric-box">
-                            <span className="ai2-metric-k">High-intent share</span>
-                            <span className="ai2-metric-v">{leadIntelStats.highIntentPct != null ? `${leadIntelStats.highIntentPct}%` : '—'}</span>
-                            <span className="ai2-metric-hint ai2-hint-good">Hot + Warm</span>
+                            <span className="ai2-metric-k">Hot lead rate</span>
+                            <span className="ai2-metric-v">{leadIntelStats.hotLeadRatePct != null ? `${leadIntelStats.hotLeadRatePct}%` : '—'}</span>
+                            <span className="ai2-metric-hint ai2-hint-good">Target {'>'}25%</span>
                         </div>
                     </div>
 
                     <div className="ai2-seg-chart">
-                        <p className="ai2-seg-title">Score categories</p>
+                        <p className="ai2-seg-title">MHS score tiers</p>
                         <div className="ai2-seg-bars">
                             {leadCategoryBars.length > 0 ? (
                                 leadCategoryBars.map((seg) => (
@@ -1263,7 +1602,7 @@ export default function AIInsights() {
                     </div>
 
                     <p className="ai2-insight-copy">
-                        {combinedAiInsightText || 'Prioritise follow-up for Hot and Warm leads; scores use form completion and sugar level when available.'}
+                        {combinedAiInsightText || 'Sugar poll points (40/30/20/10) + GHL/TagMango signals via Leads.lead_intel JSON. Hot = personal call within 2h; Warm = WhatsApp in 24h.'}
                     </p>
                     {qualityError && <p className="ai2-inline-err">{qualityError}</p>}
 
@@ -1335,12 +1674,21 @@ export default function AIInsights() {
                         placeholder="e.g. Why is my CPL increasing this week?"
                         value={askInput}
                         onChange={(e) => setAskInput(e.target.value)}
+                        disabled={askLoading}
+                        aria-busy={askLoading}
                     />
-                    <button type="submit" className="ai2-btn-ask">
-                        <i className="fas fa-paper-plane" /> Ask AI
+                    <button type="submit" className="ai2-btn-ask" disabled={askLoading}>
+                        <i className="fas fa-paper-plane" /> {askLoading ? 'Thinking…' : 'Ask AI'}
                     </button>
                 </form>
                 {askHint && <p className="ai2-ask-hint">{askHint}</p>}
+                {askLoading && !askHint && <p className="ai2-ask-hint ai2-ask-hint--muted">Getting an answer…</p>}
+                {askError && <p className="ai2-ask-error" role="alert">{askError}</p>}
+                {askAnswer && (
+                    <div className="ai2-ask-response" role="region" aria-label="AI answer">
+                        {askAnswer}
+                    </div>
+                )}
                 <div className="ai2-suggest">
                     {suggestedQueries.map((q) => (
                         <button key={q} type="button" className="ai2-suggest-pill" onClick={() => { setAskInput(q); }}>
@@ -1378,7 +1726,6 @@ export default function AIInsights() {
                     </div>
                     <div className="ai2-perf-mini ai2-perf-mini--reel">
                             <h3>Best reel</h3>
-                            {resolvedIsReelFallback && <span className="ai2-pill-tiny">Latest reel</span>}
                             <p className="ai2-perf-name">{(displayReel || resolvedCurrentReel)?.name || '—'}</p>
                             {(displayReel || resolvedCurrentReel)?.timestamp && (
                                 <p className="ai2-perf-dates">{fmtDateTime((displayReel || resolvedCurrentReel).timestamp)}</p>
@@ -1387,7 +1734,7 @@ export default function AIInsights() {
                                 {displayReel?.hookRate != null && displayReel.hookRate > 0 ? `Hook ${displayReel.hookRate}% · ` : ''}
                                 {fmtReach((displayReel || resolvedCurrentReel)?.views || (displayReel || resolvedCurrentReel)?.reach || 0)} views
                             </p>
-                            <p className="ai2-perf-reason">{(displayReel || resolvedCurrentReel)?.reason}</p>
+                            <p className="ai2-perf-reason">{(displayReel || resolvedCurrentReel)?.reason || '—'}</p>
                             {displayReelFlags.length > 0 && (
                                 <div className="ai2-reel-flag-row">
                                     {displayReelFlags.map((f) => (
@@ -1445,12 +1792,16 @@ export default function AIInsights() {
                         <table className="ai2-table">
                             <thead>
                                 <tr>
+                                    <th>Ad account</th>
                                     <th>Campaign</th>
                                     <th>Freq</th>
+                                    <th>Freq Δ</th>
                                     <th>Reach %</th>
                                     <th>Index</th>
                                     <th>CPM Δ</th>
                                     <th>CTR Δ</th>
+                                    <th>1st imp %</th>
+                                    <th>Signal 5</th>
                                     <th>Days*</th>
                                     <th>CPL</th>
                                     <th>Dup %</th>
@@ -1460,8 +1811,23 @@ export default function AIInsights() {
                             <tbody>
                                 {saturationResult.campaigns.map((c, i) => (
                                     <tr key={c.campaign_id || i}>
+                                        <td
+                                            className={c.ad_account_name?.trim() ? undefined : 'ai2-td-mono'}
+                                            title={
+                                                c.ad_account_name?.trim()
+                                                    ? fmtAdAccountId(c.ad_account_id)
+                                                    : undefined
+                                            }
+                                        >
+                                            {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
+                                        </td>
                                         <td>{c.campaign_name || c.campaign_id}</td>
                                         <td>{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
+                                        <td>
+                                            {c.freq_wow_pct != null
+                                                ? `${c.freq_wow_pct > 0 ? '+' : ''}${Number(c.freq_wow_pct).toFixed(0)}%`
+                                                : '—'}
+                                        </td>
                                         <td>
                                             {c.reach_pct != null
                                                 ? `${Number(c.reach_pct).toFixed(0)}%${c.reach_pct_is_estimated ? ' ~' : ''}`
@@ -1470,6 +1836,14 @@ export default function AIInsights() {
                                         <td>{c.saturation_index != null ? Number(c.saturation_index).toFixed(0) : (c.score ?? '—')}</td>
                                         <td>{c.cpm_wow_pct != null ? `${c.cpm_wow_pct > 0 ? '+' : ''}${Number(c.cpm_wow_pct).toFixed(0)}%` : '—'}</td>
                                         <td>{c.ctr_drop_pct != null ? `${Number(c.ctr_drop_pct).toFixed(0)}%` : '—'}</td>
+                                        <td>
+                                            {c.first_time_impression_pct != null
+                                                ? `${Number(c.first_time_impression_pct).toFixed(0)}%`
+                                                : '—'}
+                                        </td>
+                                        <td title={c.signal5_fix || undefined}>
+                                            {c.signal5_label || '—'}
+                                        </td>
                                         <td>
                                             {c.days_until_saturation_adjusted != null
                                                 ? `${Math.round(c.days_until_saturation_adjusted)}${c.days_is_estimated ? ' ~' : ''}`
@@ -1484,6 +1858,10 @@ export default function AIInsights() {
                         </table>
                         <p className="ai2-muted ai2-table-footnote">
                             *<strong>Meta</strong> audience = ad set estimate or <strong>reachestimate</strong> (full targeting, then geo/demographic only). Values marked <strong>~</strong> use frequency-band heuristics for display only; <strong>status</strong> and <strong>index</strong> still use Meta reach when available, otherwise frequency + CPM/CTR.
+                            {' '}
+                            <strong>Signal 4</strong>: first-time impression % from Meta (impression-weighted); below 30% confirms saturation. If Meta omits the field, 1st imp % shows —.
+                            {' '}
+                            <strong>Signal 5</strong>: CTR drop vs prior + frequency Δ + CPM Δ — hover the cell for the MHS fix (expand audience / change creative / urgent).
                             {' '}
                             Exact Days (MHS) = (15% × audience estimate) ÷ daily reach ÷ 3.5 when Meta provides an audience size.
                         </p>
@@ -1501,25 +1879,77 @@ export default function AIInsights() {
                         <table className="ai2-table">
                             <thead>
                                 <tr>
+                                    <th>Ad account</th>
                                     <th>Creative</th>
-                                    <th>Frequency</th>
+                                    <th>Freq</th>
+                                    <th>Hook %</th>
                                     <th>CTR %</th>
+                                    <th>CTR Δ</th>
                                     <th>CPL</th>
+                                    <th>1st7 Δ</th>
+                                    <th>Score</th>
+                                    <th>Audit</th>
                                     <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {fatigueResult.creatives.map((c, i) => (
+                                {fatigueResult.creatives.map((c, i) => {
+                                    const auditKeys = c.weekly_audit
+                                        ? Object.entries(c.weekly_audit)
+                                              .filter(([, v]) => v)
+                                              .map(([k]) => k)
+                                              .join(', ')
+                                        : '';
+                                    return (
                                     <tr key={c.ad_id || i}>
+                                        <td
+                                            className={c.ad_account_name?.trim() ? undefined : 'ai2-td-mono'}
+                                            title={
+                                                c.ad_account_name?.trim()
+                                                    ? fmtAdAccountId(c.ad_account_id)
+                                                    : undefined
+                                            }
+                                        >
+                                            {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
+                                        </td>
                                         <td>{c.ad_name || c.ad_id}</td>
                                         <td>{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
+                                        <td title={c.hook_signal_band || undefined}>
+                                            {c.hook_rate != null ? `${Number(c.hook_rate).toFixed(1)}%` : '—'}
+                                        </td>
                                         <td>{typeof c.ctr === 'number' ? `${c.ctr.toFixed(2)}%` : '—'}</td>
+                                        <td>
+                                            {c.ctr_drop_pct != null && c.ctr_drop_pct > 0
+                                                ? `${Number(c.ctr_drop_pct).toFixed(0)}%`
+                                                : '—'}
+                                        </td>
                                         <td>{typeof c.cpl === 'number' ? fmtMoney(c.cpl) : '—'}</td>
-                                        <td>{c.status}</td>
+                                        <td>
+                                            {c.cpl_increase_first7_pct != null && c.cpl_increase_first7_pct > 0
+                                                ? `+${Number(c.cpl_increase_first7_pct).toFixed(0)}%`
+                                                : '—'}
+                                        </td>
+                                        <td>{c.fatigue_score != null ? Number(c.fatigue_score).toFixed(1) : (c.score != null ? Number(c.score).toFixed(1) : '—')}</td>
+                                        <td className="ai2-td-mono" title={auditKeys || undefined}>
+                                            {c.weekly_audit_count != null && c.weekly_audit_count > 0
+                                                ? `${c.weekly_audit_count}`
+                                                : '0'}
+                                        </td>
+                                        <td>
+                                            <span className={`ai2-mini-badge ai2-mini-badge--${creativeStatusClass(c.status)}`}>
+                                                {creativeStatusLabel(c.status)}
+                                            </span>
+                                        </td>
                                     </tr>
-                                ))}
+                                    );
+                                })}
                             </tbody>
                         </table>
+                        <p className="ai2-muted ai2-table-footnote">
+                            <strong>MHS creative_state.md</strong>: Fatigue score = CTR drop×0.4 + (days ÷ adjusted lifespan)×100×0.4 + hook drop×0.2.
+                            Adjusted lifespan = ((audience × 3) ÷ daily reach) × 0.25. Status bands: Fresh 0–40, Aging 40–70, Fatigued 70–100, Severe 100+.
+                            <strong> Audit</strong> column = count of weekly checklist flags (hover for keys). Hook = 3s views ÷ impressions (else plays ÷ impressions).
+                        </p>
                     </div>
                 )}
             </section>
@@ -1530,7 +1960,15 @@ export default function AIInsights() {
                     {qualityLoading ? 'Scoring…' : 'Run scoring'}
                 </button>
                 {qualityResult?.success && (
-                    <p className="ai2-muted">Scored {qualityResult.scored ?? 0} lead(s).</p>
+                    <p className="ai2-muted">
+                        Scored {Math.max(qualityResult.scored ?? 0, qualityResult.samples?.length ?? 0)} lead(s) from your Leads data in this period.
+                        {qualityResult.summary?.avg_score != null && (
+                            <>
+                                {' '}
+                                Avg {qualityResult.summary.avg_score} · Hot {qualityResult.summary.hot_lead_rate_pct ?? '—'}%
+                            </>
+                        )}
+                    </p>
                 )}
                 {(qualityScores.length > 0 || (qualityResult && qualityResult.samples?.length > 0)) && (
                     <div className="ai2-table-wrap">
@@ -1538,20 +1976,33 @@ export default function AIInsights() {
                             <thead>
                                 <tr>
                                     <th>Lead</th>
+                                    <th>Sugar segment</th>
                                     <th>Score</th>
+                                    <th>Tier</th>
                                     <th>Category</th>
+                                    <th>Next action</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {(qualityResult?.samples ?? qualityScores).slice(0, 50).map((r, i) => (
                                     <tr key={r.lead_id || r.phone || i}>
                                         <td>{r.name || r.phone || '—'}</td>
+                                        <td>{r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—'}</td>
                                         <td>{r.score ?? '—'}</td>
+                                        <td>{inferLeadTierFromRow(r)}</td>
                                         <td>{r.category || '—'}</td>
+                                        <td className="ai2-muted" style={{ fontSize: '0.72rem', maxWidth: '220px' }}>
+                                            {r.action_timing || mhsLeadTierActionTiming(inferLeadTierFromRow(r))}
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
+                        <p className="ai2-muted ai2-table-footnote">
+                            <strong>lead-intaligetionn-state.md</strong>: Sugar {'>'}250 +40, 180–250 +30, 126–180 +20, {'<'}126 +10.
+                            Behavioural points from <code>Leads.lead_intel</code> (whatsapp_open_1h, click_link, reply_message, payment_page_visit, masterclass_attend, ask_question, previous_buyer, age).
+                            Run <code>server/migrations/lead-scores-mhs-intelligence.sql</code> for full persistence.
+                        </p>
                     </div>
                 )}
             </section>

@@ -214,6 +214,102 @@ router.post('/insights', async (req, res) => {
   }
 });
 
+const ASK_SYSTEM = `You are a helpful marketing analytics assistant for a Meta/Instagram ads dashboard. Spend and CPL are in Indian Rupees (₹). Use the provided dashboard JSON context when answering. If context is missing or thin, give sound general guidance and mention which metrics would sharpen the answer. Be concise: short paragraphs or bullets. Plain text only — no markdown code fences. Do not invent campaign numbers not present in context.`;
+
+/**
+ * POST /api/ai/ask
+ * Body: { question: string, context?: object } — answers user questions with Gemini using optional dashboard snapshot.
+ */
+router.post('/ask', async (req, res) => {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY.trim() === '') {
+    return res.status(503).json({
+      success: false,
+      error: 'AI not configured',
+      details: 'Add GOOGLE_GEMINI_API_KEY to server .env'
+    });
+  }
+
+  const question = String(req.body?.question ?? '').trim();
+  if (!question) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing question',
+      details: 'Send a non-empty "question" string.'
+    });
+  }
+
+  const rawCtx = req.body?.context;
+  let contextBlock = '';
+  if (rawCtx && typeof rawCtx === 'object') {
+    try {
+      const s = JSON.stringify(rawCtx);
+      contextBlock = s.length > 14000 ? `${s.slice(0, 14000)}…` : s;
+    } catch {
+      contextBlock = '';
+    }
+  }
+
+  const userBlob = contextBlock
+    ? `${ASK_SYSTEM}\n\nDashboard context (JSON):\n${contextBlock}\n\nUser question:\n${question}`
+    : `${ASK_SYSTEM}\n\nUser question:\n${question}`;
+
+  try {
+    const response = await axios.post(
+      `${GEMINI_URL}?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+      {
+        contents: [{ role: 'user', parts: [{ text: userBlob }] }],
+        generationConfig: {
+          temperature: 0.45,
+          maxOutputTokens: 2048
+        }
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 110000
+      }
+    );
+
+    let text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text || !String(text).trim()) {
+      const reason = response.data?.candidates?.[0]?.finishReason || 'No content';
+      return res.status(502).json({
+        success: false,
+        error: 'AI returned no answer',
+        details: reason
+      });
+    }
+
+    text = String(text).trim();
+    const fence = text.match(/^```(?:\w+)?\s*([\s\S]*?)\s*```$/);
+    if (fence) text = fence[1].trim();
+
+    return res.json({ success: true, answer: text });
+  } catch (err) {
+    const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
+    if (isTimeout) {
+      console.error('[AI Ask] Gemini timeout');
+      return res.status(504).json({
+        success: false,
+        error: 'AI request timed out',
+        details: 'Gemini did not respond in time. Try again in a moment.'
+      });
+    }
+    const status = err.response?.status === 400 ? 400 : err.response?.status === 429 ? 429 : 500;
+    const message = err.response?.data?.error?.message || err.message || 'AI request failed';
+    console.error('[AI Ask] Gemini error:', message);
+    const payload = {
+      success: false,
+      error: 'AI ask request failed',
+      details: message
+    };
+    if (status === 429) {
+      const match = message.match(/retry in (\d+(?:\.\d+)?)\s*s/i) || message.match(/(\d+(?:\.\d+)?)\s*sec/i);
+      if (match) payload.retryAfterSeconds = Math.ceil(parseFloat(match[1]));
+    }
+    return res.status(status).json(payload);
+  }
+});
+
 function buildAdSlotFromReal(bestAd) {
   if (!bestAd || typeof bestAd !== 'object') {
     return { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No ad data.', action: 'MONITOR', dateStart: '', dateStop: '' };
@@ -334,7 +430,7 @@ router.post('/lead-saturation', async (req, res) => {
 
 /**
  * POST /api/ai/lead-quality
- * Run lead quality scoring (form-only: form completion, optional sugar). Persist to lead_scores.
+ * MHS Lead Intelligence (lead-intaligetionn-state.md): sugar bands + behavioural flags in lead_intel.
  * Body: { dateFrom, dateTo, campaignIds?: [] }
  */
 router.post('/lead-quality', async (req, res) => {
@@ -353,7 +449,8 @@ router.post('/lead-quality', async (req, res) => {
     return res.json({
       success: true,
       scored: result.scored,
-      samples: result.samples
+      samples: result.samples,
+      summary: result.summary ?? null,
     });
   } catch (err) {
     console.error('[AI Lead Quality] Error:', err.message);

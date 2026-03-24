@@ -259,6 +259,155 @@
     color: var(--ai2-muted);
 }
 
+/* Hero date preset (Today / This Week / … / Custom) */
+.ai2-date-preset-wrap {
+    position: relative;
+    z-index: 20;
+}
+
+.ai2-date-preset-trigger {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--ai2-surface);
+    border: 1px solid var(--ai2-border);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--ai2-muted);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background 0.15s;
+    max-width: min(100vw - 48px, 320px);
+}
+
+.ai2-date-preset-trigger:hover {
+    border-color: var(--ai2-chip-hover-border);
+    background: var(--ai2-metric-box-bg);
+}
+
+.ai2-date-preset-label {
+    color: var(--ai2-text);
+    font-weight: 700;
+}
+
+.ai2-date-preset-range {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--ai2-sub-muted);
+    flex: 1 1 100%;
+    margin-left: 22px;
+}
+
+@media (min-width: 480px) {
+    .ai2-date-preset-range {
+        flex: 0 1 auto;
+        margin-left: 0;
+    }
+}
+
+.ai2-date-preset-caret {
+    margin-left: auto;
+    font-size: 0.65rem;
+    opacity: 0.75;
+    transition: transform 0.15s;
+}
+
+.ai2-date-preset-caret--open {
+    transform: rotate(180deg);
+}
+
+.ai2-date-preset-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    min-width: 220px;
+    max-width: min(100vw - 24px, 300px);
+    padding: 6px;
+    border-radius: 12px;
+    background: var(--ai2-surface);
+    border: 1px solid var(--ai2-border);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.ai2-date-preset-option {
+    display: block;
+    width: 100%;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ai2-text);
+    font-size: 0.88rem;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s;
+}
+
+.ai2-date-preset-option:hover {
+    background: var(--ai2-metric-box-bg);
+}
+
+.ai2-date-preset-option--active {
+    background: var(--ai2-pill-bg);
+    color: var(--ai2-pill-color);
+}
+
+.ai2-date-custom-fields {
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--ai2-border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ai2-date-custom-lbl {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ai2-sub-muted);
+}
+
+.ai2-date-custom-input {
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--ai2-border);
+    background: var(--ai2-input-bg);
+    color: var(--ai2-text);
+    font-size: 0.88rem;
+    font-weight: 600;
+}
+
+.ai2-date-custom-apply {
+    margin-top: 4px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--ai2-btn-refresh-border);
+    background: var(--ai2-btn-refresh-bg);
+    color: var(--ai2-btn-refresh-color);
+    font-weight: 700;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.ai2-date-custom-apply:hover:not(:disabled) {
+    background: var(--ai2-btn-refresh-hover-bg);
+}
+
+.ai2-date-custom-apply:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .ai2-btn-refresh {
     display: inline-flex;
     align-items: center;
@@ -623,6 +772,7 @@
 }
 
 .ai2-mini-badge--crit { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+.ai2-mini-badge--warn { background: rgba(249, 115, 22, 0.2); color: #fdba74; }
 .ai2-mini-badge--aging { background: rgba(234, 179, 8, 0.18); color: #fde047; }
 .ai2-mini-badge--fresh { background: rgba(34, 197, 94, 0.18); color: #86efac; }
 
@@ -845,6 +995,46 @@
     font-size: 0.8rem;
     color: var(--ai2-ask-hint);
     margin: 10px 0 0;
+}
+
+.ai2-ask-hint--muted {
+    color: var(--ai2-muted);
+}
+
+.ai2-ask-error {
+    font-size: 0.85rem;
+    color: var(--ai2-banner-error-text);
+    margin: 10px 0 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--ai2-banner-error-bg);
+    border: 1px solid var(--ai2-banner-error-border);
+}
+
+.ai2-ask-response {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: var(--ai2-details-bg);
+    border: 1px solid var(--ai2-border);
+    color: var(--ai2-insight-copy);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+}
+
+.ai2-btn-ask:disabled {
+    opacity: 0.8;
+    cursor: not-allowed;
+    filter: none;
+}
+
+.ai2-btn-ask:disabled:hover {
+    filter: none;
+}
+
+.ai-insights-v2 .ai2-ask-input:disabled {
+    opacity: 0.75;
 }
 
 .ai2-suggest {
@@ -1124,6 +1314,13 @@
 
 .ai2-table tbody tr:hover {
     background: var(--ai2-table-row-hover);
+}
+
+.ai2-table td.ai2-td-mono {
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    white-space: nowrap;
 }
 
 .ai2-muted {
