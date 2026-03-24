@@ -58,13 +58,14 @@ const getPeriodRanges = () => {
 };
 
 /**
- * Widen fetch range so snapshot tabs (Last month … Today) always have rows in memory.
+ * Widen fetch range so snapshot tabs (last 30d … Today) always have rows in memory.
  * Hero range can extend further backward/forward (e.g. custom) without shrinking below this span.
  */
 const mergeSnapshotDataRange = (hero) => {
-    const p = getPeriodRanges();
-    let from = p.lastMonth.from;
-    let to = p.today.to;
+    const p30 = getDateRangeForPreset('last_30_days');
+    const pToday = getDateRangeForPreset('today');
+    let from = p30.from;
+    let to = pToday.to;
     if (hero?.from && String(hero.from) < from) from = hero.from;
     if (hero?.to && String(hero.to) > to) to = hero.to;
     return { from, to };
@@ -98,6 +99,35 @@ const expandedSingleDayYmds = (period) => {
 };
 
 /**
+ * Wider Y-M-D set for matching Meta `time_increment=1` ad rows to “today” (timezone skew).
+ * Covers local ±2 around the tab day and UTC ±2 around current UTC date.
+ */
+const expandedSingleDayInsightYmds = (period) => {
+    const set = new Set();
+    if (!period || period.from !== period.to) return set;
+    const now = new Date();
+    set.add(period.from);
+    set.add(toYMDLocal(now));
+    set.add(now.toISOString().slice(0, 10));
+    expandedSingleDayYmds(period).forEach((y) => set.add(y));
+    const anchor = new Date(`${period.from}T12:00:00`);
+    if (!Number.isNaN(anchor.getTime())) {
+        for (let d = -2; d <= 2; d++) {
+            const x = new Date(anchor);
+            x.setDate(x.getDate() + d);
+            set.add(toYMDLocal(x));
+        }
+    }
+    const utcMid = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 12, 0, 0));
+    for (let d = -2; d <= 2; d++) {
+        const x = new Date(utcMid);
+        x.setUTCDate(x.getUTCDate() + d);
+        set.add(x.toISOString().slice(0, 10));
+    }
+    return set;
+};
+
+/**
  * Reel publish time vs tab period: local *or* UTC calendar day in [from,to].
  * Single-day tabs (e.g. Today) also use expandedSingleDayYmds — same idea as Best ad when Meta’s day label is one off.
  */
@@ -117,6 +147,15 @@ const timestampInPeriod = (isoTs, period) => {
     return false;
 };
 
+/** Inclusive local calendar window ending on toYmd: [to − (numDays−1), to]. Used so “Today” reel fallback never jumps months back. */
+const rollingDaysEndingOn = (toYmd, numDays) => {
+    const end = new Date(`${toYmd}T12:00:00`);
+    if (Number.isNaN(end.getTime())) return { from: toYmd, to: toYmd };
+    const start = new Date(end);
+    start.setDate(start.getDate() - (numDays - 1));
+    return { from: toYMDLocal(start), to: toYmd };
+};
+
 /** Keep Meta insight rows whose row day falls inside the tab period (time_increment=1 rows). */
 const filterInsightsRowsByPeriod = (rows, period) => {
     if (!rows?.length || !period?.from || !period?.to) return [];
@@ -126,7 +165,7 @@ const filterInsightsRowsByPeriod = (rows, period) => {
         return ymd >= period.from && ymd <= period.to;
     });
     if (out.length === 0 && period.from === period.to) {
-        const alt = expandedSingleDayYmds(period);
+        const alt = expandedSingleDayInsightYmds(period);
         out = rows.filter((r) => {
             const ymd = rowYMD(r);
             return ymd && alt.has(ymd);
@@ -138,10 +177,9 @@ const filterInsightsRowsByPeriod = (rows, period) => {
 /** Preset ids for the hero date control (aligned with getDateRangeForPreset). */
 const INSIGHTS_DATE_PRESET_OPTIONS = [
     { id: 'today', label: 'Today' },
-    { id: 'this_week', label: 'This Week' },
-    { id: 'last_week', label: 'Last Week' },
-    { id: 'this_month', label: 'This Month' },
-    { id: 'last_month', label: 'Last Month' },
+    { id: 'last_7_days', label: 'last 7 days' },
+    { id: 'last_14_days', label: 'last 14 days' },
+    { id: 'last_30_days', label: 'last 30 days' },
     { id: 'custom', label: 'Custom' },
 ];
 
@@ -165,29 +203,18 @@ const getDateRangeForPreset = (presetId) => {
         start.setDate(start.getDate() - 29);
         return { from: toYMDLocal(start), to: toYMDLocal(today) };
     }
-    if (presetId === 'this_week') {
-        const start = new Date(today);
-        start.setDate(start.getDate() - start.getDay());
-        return { from: toYMDLocal(start), to: toYMDLocal(today) };
-    }
-    if (presetId === 'last_week') {
-        const end = new Date(today);
-        end.setDate(end.getDate() - end.getDay() - 1);
-        const start = new Date(end);
-        start.setDate(start.getDate() - 6);
-        return { from: toYMDLocal(start), to: toYMDLocal(end) };
-    }
-    if (presetId === 'this_month') {
-        const start = new Date(today.getFullYear(), today.getMonth(), 1);
-        return { from: toYMDLocal(start), to: toYMDLocal(today) };
-    }
-    if (presetId === 'last_month') {
-        const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-        const end = new Date(today.getFullYear(), today.getMonth(), 0);
-        return { from: toYMDLocal(start), to: toYMDLocal(end) };
-    }
     return null;
 };
+
+/** Rolling windows for Performance snapshot tabs (same logic as hero presets). */
+const getSnapshotPeriodRanges = () => ({
+    today: getDateRangeForPreset('today'),
+    last_7_days: getDateRangeForPreset('last_7_days'),
+    last_14_days: getDateRangeForPreset('last_14_days'),
+    last_30_days: getDateRangeForPreset('last_30_days'),
+});
+
+const SNAPSHOT_TIME_WINDOW_KEYS = ['today', 'last_7_days', 'last_14_days', 'last_30_days'];
 
 const transformActions = (actions = []) => {
     if (!Array.isArray(actions)) return {};
@@ -246,13 +273,14 @@ const mapAdPickToSlot = (best) => {
             dateStop: ''
         };
     }
+    const note = best.snapshotFallbackNote ? String(best.snapshotFallbackNote) : '';
     return {
         name: best.name,
         platform: best.platform || 'Meta',
         spend: best.spend,
         leads: best.leads,
         cpl: best.cpl,
-        reason: `Best in this period: ${best.leads} leads, ${fmtMoney(best.spend)} spend, ${fmtMoney(best.cpl)} CPL.`,
+        reason: `Best in this period: ${best.leads} leads, ${fmtMoney(best.spend)} spend, ${fmtMoney(best.cpl)} CPL.${note}`,
         action: 'MONITOR',
         dateStart: best.dateStart || '',
         dateStop: best.dateStop || ''
@@ -275,10 +303,12 @@ const mapReelPickToSlot = (best) => {
             action: 'MONITOR',
             timestamp: '',
             thumbnail_url: '',
-            permalink: ''
+            permalink: '',
+            hideReelPublishTime: false
         };
     }
     const rch = best.reach || best.views || 0;
+    const note = best.snapshotFallbackNote ? String(best.snapshotFallbackNote) : '';
     return {
         name: best.name,
         platform: best.platform || 'Instagram',
@@ -289,12 +319,52 @@ const mapReelPickToSlot = (best) => {
         likes: best.likes,
         comments: best.comments,
         shares: best.shares,
-        reason: `Top in this period: ${fmtReach(rch)} reach, ${fmtInt(best.engagements)} engagements, ${best.saves} saves.`,
+        reason: `Top in this period: ${fmtReach(rch)} reach, ${fmtInt(best.engagements)} engagements, ${best.saves} saves.${note}`,
         action: 'MONITOR',
         timestamp: best.timestamp || '',
         thumbnail_url: best.thumbnail_url || '',
-        permalink: best.permalink || ''
+        permalink: best.permalink || '',
+        hideReelPublishTime: !!best.hideReelPublishTime
     };
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** When /api/ai/insights returns placeholder reel slots but this run already computed real picks, keep local (avoids blank UI after refresh/races). */
+const preferLocalReelSlotsIfApiEmpty = (localSlots, apiSlots) => {
+    if (!apiSlots || typeof apiSlots !== 'object') return localSlots;
+    const keys = SNAPSHOT_TIME_WINDOW_KEYS;
+    const out = { ...apiSlots };
+    for (const k of keys) {
+        const L = localSlots[k];
+        const A = apiSlots[k];
+        const apiEmpty = !A || String(A.name || '').trim() === '' || String(A.name || '').trim() === '—';
+        const localOk = L && String(L.name || '').trim() !== '' && String(L.name || '').trim() !== '—';
+        if (apiEmpty && localOk) out[k] = L;
+    }
+    return out;
+};
+
+const adSlotLooksEmptyForMerge = (a) => {
+    if (!a || typeof a !== 'object') return true;
+    const name = String(a.name || '').trim();
+    const badName = !name || name === '—';
+    const noActivity = Number(a.leads || 0) === 0 && Number(a.spend || 0) === 0;
+    return badName && noActivity;
+};
+
+/** Same idea as reels: do not let the AI response replace computed Meta picks with empty placeholders. */
+const preferLocalAdSlotsIfApiEmpty = (localSlots, apiSlots) => {
+    if (!apiSlots || typeof apiSlots !== 'object') return localSlots;
+    const keys = SNAPSHOT_TIME_WINDOW_KEYS;
+    const out = { ...apiSlots };
+    for (const k of keys) {
+        const L = localSlots[k];
+        const A = apiSlots[k];
+        const localOk = L && !adSlotLooksEmptyForMerge(L);
+        if (adSlotLooksEmptyForMerge(A) && localOk) out[k] = L;
+    }
+    return out;
 };
 
 const fmtDate = (dateStr) => {
@@ -502,11 +572,83 @@ const pickBestAd = (rows) => {
     return best ? { name: best.name, campaignName: best.campaignName, platform: best.platform, spend: best.spend, leads: best.leads, cpl: best.cpl, ad_account_name: best.ad_account_name || undefined, dateStart: best.dateStart, dateStop: best.dateStop } : null;
 };
 
+/** Today tab: strict day (with timezone-tolerant row matching) then rolling 7d so the card is not blank when Meta dates are UTC-offset. */
+const pickBestAdForTodaySnapshot = (rows, snap) => {
+    const strict = pickBestAd(filterInsightsRowsByPeriod(rows, snap.today));
+    if (strict) return strict;
+    const roll7 = pickBestAd(filterInsightsRowsByPeriod(rows, rollingDaysEndingOn(snap.today.to, 7)));
+    if (roll7) {
+        return {
+            ...roll7,
+            snapshotFallbackNote: ' Meta rows show no activity on local “today” — showing best ad from the last 7 days (date alignment).'
+        };
+    }
+    return null;
+};
+
+/** Instagram captions often lead with “For Appointment / phone / brand”; prefer hook or body lines for titles. */
+const lineLooksLikeContactFooter = (s) => {
+    const t = String(s || '').trim();
+    if (!t) return true;
+    if (/^for\s+appointment\b/i.test(t)) return true;
+    if (/^appointment\b/i.test(t) && /\d{5,}/.test(t)) return true;
+    if (/\b(whatsapp|call\s+now|call\s+us|book\s+now|dm\s+us)\b/i.test(t) && /\d{4,}/.test(t)) return true;
+    const digits = (t.match(/\d/g) || []).length;
+    if (digits >= 10 && digits / Math.max(t.length, 1) > 0.2) return true;
+    return false;
+};
+
+const scoreReelTitleLine = (line) => {
+    if (!line) return -1e9;
+    let score = line.length;
+    if (lineLooksLikeContactFooter(line)) score -= 500;
+    if (/[?!…]/.test(line)) score += 35;
+    if (/\b(benefits|weight|loss|how\s+to|why\s+|doctor|dr\.)\b/i.test(line)) score += 25;
+    return score;
+};
+
+const pickReelTitleFromCaption = (caption, maxLen = 120) => {
+    if (!caption || typeof caption !== 'string') return 'Reel';
+    const trimmed = caption.trim();
+    const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return 'Reel';
+
+    let ordered = [];
+    if (lines.length >= 2) {
+        ordered = lines;
+    } else {
+        const one = lines[0];
+        if (one.includes('|')) {
+            ordered = one.split('|').map((p) => p.trim()).filter(Boolean);
+        } else if (lineLooksLikeContactFooter(one)) {
+            ordered = one.split(/(?<=[.!?…])\s+/).map((p) => p.trim()).filter(Boolean);
+            if (ordered.length <= 1) ordered = [one];
+        } else {
+            ordered = [one];
+        }
+    }
+
+    let chosen = ordered.find((c) => c && !lineLooksLikeContactFooter(c)) || '';
+    if (!chosen) chosen = ordered[0] || '';
+    chosen = chosen.trim();
+    if (lineLooksLikeContactFooter(chosen)) {
+        const stripped = trimmed.replace(/^\s*for\s+appointment\s*[—\-–:]?\s*[^|]*\|\s*/i, '').trim();
+        if (stripped && !lineLooksLikeContactFooter(stripped)) chosen = stripped;
+    }
+    if (!chosen || lineLooksLikeContactFooter(chosen)) {
+        const sorted = [...ordered].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
+        chosen = (sorted[0] || chosen || 'Reel').trim();
+    }
+    if (!chosen) return 'Reel';
+    if (chosen.length <= maxLen) return chosen;
+    return `${chosen.slice(0, maxLen - 1)}…`;
+};
+
 const buildReelResult = (top) => {
     const reach = Number(top.reach) || Number(top.views) || 0;
     const engagements = Number(top.total_interactions) || (Number(top.likes) + Number(top.comments)) || 0;
     const saves = Number(top.saved) || 0;
-    const name = (top.caption && top.caption.slice(0, 80)) || 'Reel';
+    const name = pickReelTitleFromCaption(top.caption, 120);
     return { name, platform: 'Instagram', reach, engagements, saves, caption: top.caption, permalink: top.permalink, timestamp: top.timestamp || '', thumbnail_url: top.thumbnail_url || top.media_url || '', likes: Number(top.likes) || 0, comments: Number(top.comments) || 0, shares: Number(top.shares) || 0, views: Number(top.views) || Number(top.video_views) || 0 };
 };
 
@@ -546,6 +688,96 @@ const pickBestReel = (mediaPayload, period = null) => {
     const result = buildReelResult(best);
     result.score = Math.round(computeReelScore(best));
     return result;
+};
+
+/**
+ * Rolling N-day tab: strict window first, then optional wider windows, then full batch (never leave card blank when IG has data).
+ */
+const pickBestReelForRollingTab = (mediaPayload, endYmd, numDays, widerDays) => {
+    const strict = pickBestReel(mediaPayload, rollingDaysEndingOn(endYmd, numDays));
+    if (strict) return strict;
+    for (const w of widerDays || []) {
+        const r = pickBestReel(mediaPayload, rollingDaysEndingOn(endYmd, w));
+        if (r) {
+            return {
+                ...r,
+                snapshotFallbackNote: ` No reel in the last ${numDays} days — showing top reel from the last ${w} days.`,
+                hideReelPublishTime: true
+            };
+        }
+    }
+    const any = pickBestReel(mediaPayload, null);
+    if (any) {
+        return {
+            ...any,
+            snapshotFallbackNote: ' No reel in this period in the loaded batch — showing top reel from Instagram data returned.',
+            hideReelPublishTime: true
+        };
+    }
+    return null;
+};
+
+/**
+ * “Today” tab: strict today (± expanded day); then rolling 7d / 14d. Never jump to full batch first (misleading vs ad dates).
+ */
+const pickBestReelForTodayTab = (mediaPayload, snap) => {
+    const strict = pickBestReel(mediaPayload, snap.today);
+    if (strict) return strict;
+    const roll7 = pickBestReel(mediaPayload, rollingDaysEndingOn(snap.today.to, 7));
+    if (roll7) {
+        return {
+            ...roll7,
+            snapshotFallbackNote: ' No reel posted today — showing top reel published in the last 7 days.',
+            hideReelPublishTime: true
+        };
+    }
+    const roll14 = pickBestReel(mediaPayload, rollingDaysEndingOn(snap.today.to, 14));
+    if (roll14) {
+        return {
+            ...roll14,
+            snapshotFallbackNote: ' No reel posted today — showing top reel published in the last 14 days.',
+            hideReelPublishTime: true
+        };
+    }
+    return null;
+};
+
+const pickBestReelForLast7Tab = (mediaPayload, snap) =>
+    pickBestReelForRollingTab(mediaPayload, snap.last_7_days.to, 7, [14, 30]);
+
+const pickBestReelForLast14Tab = (mediaPayload, snap) =>
+    pickBestReelForRollingTab(mediaPayload, snap.last_14_days.to, 14, [30]);
+
+/** “last 30 days”: strict 30d, then ~60d / ~90d / full batch (sync may not include full month of posts). */
+const pickBestReelForLast30Tab = (mediaPayload, snap) => {
+    const end = snap.last_30_days.to;
+    const strict = pickBestReel(mediaPayload, rollingDaysEndingOn(end, 30));
+    if (strict) return strict;
+    const roll62 = pickBestReel(mediaPayload, rollingDaysEndingOn(end, 62));
+    if (roll62) {
+        return {
+            ...roll62,
+            snapshotFallbackNote: ' No reels in the last 30 days in the current sync — showing top reel from the last ~60 days.',
+            hideReelPublishTime: true
+        };
+    }
+    const roll90 = pickBestReel(mediaPayload, rollingDaysEndingOn(end, 90));
+    if (roll90) {
+        return {
+            ...roll90,
+            snapshotFallbackNote: ' No reels in the last 30 days in the current sync — showing top reel from the last ~90 days.',
+            hideReelPublishTime: true
+        };
+    }
+    const any = pickBestReel(mediaPayload, null);
+    if (any) {
+        return {
+            ...any,
+            snapshotFallbackNote: ' No reels in the last 30 days in the loaded batch — showing top reel from Instagram data returned.',
+            hideReelPublishTime: true
+        };
+    }
+    return null;
 };
 
 /** Full reel intelligence analysis: normalized scoring, flags, time-based categorization */
@@ -654,13 +886,36 @@ const analyzeReelPerformance = (mediaPayload, periods) => {
         if (f.length === 0) return null;
         return [...f].sort((a, b) => (b.score || 0) - (a.score || 0))[0];
     };
+    /** When strict calendar period has no published reels, align with snapshot reel fallbacks (same data, no extra API). */
+    const bestInRolling = (scoredRows, endYmd, numDays) => {
+        const pr = rollingDaysEndingOn(endYmd, numDays);
+        const f = scoredRows.filter((r) => timestampInPeriod(r.timestamp, pr));
+        if (f.length === 0) return null;
+        return [...f].sort((a, b) => (b.score || 0) - (a.score || 0))[0];
+    };
+
+    const thisWeekBest =
+        bestIn(periods.thisWeek)
+        || bestInRolling(scored, periods.today.to, 7)
+        || bestInRolling(scored, periods.today.to, 14);
+    const dailyBest = bestIn(periods.today) || bestInRolling(scored, periods.today.to, 7);
+    const lastWeekBest =
+        bestIn(periods.lastWeek)
+        || bestInRolling(scored, periods.today.to, 14)
+        || bestInRolling(scored, periods.today.to, 30);
+    const monthlyBest =
+        bestIn(periods.lastMonth)
+        || bestInRolling(scored, periods.today.to, 62)
+        || bestInRolling(scored, periods.today.to, 90)
+        || scored[0]
+        || null;
 
     return {
-        daily_best_reel: bestIn(periods.today),
-        this_week_best_reel: bestIn(periods.thisWeek),
-        last_week_best_reel: bestIn(periods.lastWeek),
-        weekly_best_reel: bestIn(periods.thisWeek) || bestIn(periods.lastWeek),
-        monthly_best_reel: bestIn(periods.lastMonth),
+        daily_best_reel: dailyBest,
+        this_week_best_reel: thisWeekBest,
+        last_week_best_reel: lastWeekBest,
+        weekly_best_reel: thisWeekBest || lastWeekBest,
+        monthly_best_reel: monthlyBest,
         all_time_best_reel: scored[0] || null,
         trending_reels: scored.filter((r) => r.flags.includes('TRENDING')).slice(0, 5),
         repost_recommended: scored.filter((r) => r.flags.includes('REPOST_RECOMMENDED')).slice(0, 5),
@@ -671,21 +926,21 @@ const analyzeReelPerformance = (mediaPayload, periods) => {
 };
 
 const defaultAdsData = {
-    lastMonth: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
-    lastWeek: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
-    thisWeek: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
-    today: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' }
+    today: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_7_days: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_14_days: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_30_days: { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'Loading…', action: 'MONITOR' }
 };
 
 const defaultReelsData = {
-    lastMonth: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    lastWeek: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    thisWeek: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    today: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' }
+    today: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_7_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_14_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
+    last_30_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' }
 };
 
 export default function AIInsights() {
-    const [activeTimeWindow, setActiveTimeWindow] = useState('lastWeek');
+    const [activeTimeWindow, setActiveTimeWindow] = useState('last_30_days');
 
     const [loading, setLoading] = useState(true);
     /** 'data' = fetching Meta ads/reels, 'ai' = calling Gemini */
@@ -717,27 +972,29 @@ export default function AIInsights() {
     const [qualityScores, setQualityScores] = useState([]);
     const [reelAnalysis, setReelAnalysis] = useState(null);
 
-    const [insightsDatePreset, setInsightsDatePreset] = useState('this_month');
+    const [insightsDatePreset, setInsightsDatePreset] = useState('last_30_days');
     const [customDraftFrom, setCustomDraftFrom] = useState('');
     const [customDraftTo, setCustomDraftTo] = useState('');
     /** Applied custom range only updates after “Apply range” (avoids refetch on every date input change). */
     const [customCommitted, setCustomCommitted] = useState({ from: '', to: '' });
     const [datePresetMenuOpen, setDatePresetMenuOpen] = useState(false);
     const datePresetWrapRef = useRef(null);
+    /** Bumps on each fetchAIInsights start so stale async completions cannot overwrite newer results (fixes blank Best reel after refresh). */
+    const aiInsightsFetchGenRef = useRef(0);
 
     const resolvedInsightsRange = useMemo(() => {
         if (insightsDatePreset === 'custom') {
             if (customCommitted.from && customCommitted.to && customCommitted.from <= customCommitted.to) {
                 return { from: customCommitted.from, to: customCommitted.to };
             }
-            return getDateRangeForPreset('this_month');
+            return getDateRangeForPreset('last_30_days');
         }
-        return getDateRangeForPreset(insightsDatePreset) || getDateRangeForPreset('this_month');
+        return getDateRangeForPreset(insightsDatePreset) || getDateRangeForPreset('last_30_days');
     }, [insightsDatePreset, customCommitted.from, customCommitted.to]);
 
     const insightsPresetLabel = useMemo(() => {
         const o = INSIGHTS_DATE_PRESET_OPTIONS.find((x) => x.id === insightsDatePreset);
-        return o?.label || 'This Month';
+        return o?.label || 'last 30 days';
     }, [insightsDatePreset]);
 
     const headerDateRangeLabel = useMemo(() => {
@@ -758,6 +1015,9 @@ export default function AIInsights() {
     }, [datePresetMenuOpen]);
 
     const fetchAIInsights = useCallback(async (forceRefresh = false) => {
+        const gen = ++aiInsightsFetchGenRef.current;
+        const isStale = () => gen !== aiInsightsFetchGenRef.current;
+
         setLoading(true);
         setLoadingPhase('data');
         setError(null);
@@ -766,45 +1026,67 @@ export default function AIInsights() {
             const { from: heroFrom, to: heroTo } = resolvedInsightsRange;
             const dateRange = { from: heroFrom, to: heroTo };
             const { from: dataFrom, to: dataTo } = mergeSnapshotDataRange(resolvedInsightsRange);
-            const [insightsRows, pages] = await Promise.all([
-                fetchInsightsForAI(dataFrom, dataTo, forceRefresh),
-                fetchPages()
-            ]);
-            const mediaPayload = await fetchMediaInsightsForPages(pages, {
+            const mediaOptsBase = {
                 from: dataFrom,
                 to: dataTo,
                 forceRefresh,
                 timeoutMs: 20000
-            });
-            const allPeriods = getPeriodRanges();
-            setReelAnalysis(analyzeReelPerformance(mediaPayload, allPeriods));
+            };
 
+            let [insightsRows, pages] = await Promise.all([
+                fetchInsightsForAI(dataFrom, dataTo, forceRefresh),
+                fetchPages()
+            ]);
+            if (!isStale() && (!pages || pages.length === 0)) {
+                await sleep(450);
+                if (!isStale()) pages = await fetchPages();
+            }
+
+            let mediaPayload = await fetchMediaInsightsForPages(pages, mediaOptsBase);
+            if (!isStale() && insightsRows.length > 0 && (!mediaPayload?.media || mediaPayload.media.length === 0)) {
+                await sleep(500);
+                if (!isStale()) {
+                    mediaPayload = await fetchMediaInsightsForPages(pages, {
+                        ...mediaOptsBase,
+                        forceRefresh: true
+                    });
+                }
+            }
+
+            const calendarPeriods = getPeriodRanges();
+            const snapPeriods = getSnapshotPeriodRanges();
             const bestAds = {
-                lastMonth: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.lastMonth)),
-                lastWeek: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.lastWeek)),
-                thisWeek: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.thisWeek)),
-                today: pickBestAd(filterInsightsRowsByPeriod(insightsRows, allPeriods.today))
+                today: pickBestAdForTodaySnapshot(insightsRows, snapPeriods),
+                last_7_days: pickBestAd(filterInsightsRowsByPeriod(insightsRows, snapPeriods.last_7_days)),
+                last_14_days: pickBestAd(filterInsightsRowsByPeriod(insightsRows, snapPeriods.last_14_days)),
+                last_30_days: pickBestAd(filterInsightsRowsByPeriod(insightsRows, snapPeriods.last_30_days))
             };
             const bestReels = {
-                lastMonth: pickBestReel(mediaPayload, allPeriods.lastMonth),
-                lastWeek: pickBestReel(mediaPayload, allPeriods.lastWeek),
-                thisWeek: pickBestReel(mediaPayload, allPeriods.thisWeek),
-                today: pickBestReel(mediaPayload, allPeriods.today)
+                today: pickBestReelForTodayTab(mediaPayload, snapPeriods),
+                last_7_days: pickBestReelForLast7Tab(mediaPayload, snapPeriods),
+                last_14_days: pickBestReelForLast14Tab(mediaPayload, snapPeriods),
+                last_30_days: pickBestReelForLast30Tab(mediaPayload, snapPeriods)
+            };
+            const reelSlotsLocal = {
+                today: mapReelPickToSlot(bestReels.today),
+                last_7_days: mapReelPickToSlot(bestReels.last_7_days),
+                last_14_days: mapReelPickToSlot(bestReels.last_14_days),
+                last_30_days: mapReelPickToSlot(bestReels.last_30_days)
             };
 
+            if (isStale()) return;
+
+            setReelAnalysis(analyzeReelPerformance(mediaPayload, calendarPeriods));
+
+            const adsSlotsLocal = {
+                today: mapAdPickToSlot(bestAds.today),
+                last_7_days: mapAdPickToSlot(bestAds.last_7_days),
+                last_14_days: mapAdPickToSlot(bestAds.last_14_days),
+                last_30_days: mapAdPickToSlot(bestAds.last_30_days)
+            };
             // Show live ad/reel results immediately even if the AI summary step is slow.
-            setAdsData({
-                lastMonth: mapAdPickToSlot(bestAds.lastMonth),
-                lastWeek: mapAdPickToSlot(bestAds.lastWeek),
-                thisWeek: mapAdPickToSlot(bestAds.thisWeek),
-                today: mapAdPickToSlot(bestAds.today)
-            });
-            setReelsData({
-                lastMonth: mapReelPickToSlot(bestReels.lastMonth),
-                lastWeek: mapReelPickToSlot(bestReels.lastWeek),
-                thisWeek: mapReelPickToSlot(bestReels.thisWeek),
-                today: mapReelPickToSlot(bestReels.today)
-            });
+            setAdsData(adsSlotsLocal);
+            setReelsData(reelSlotsLocal);
 
             setLoadingPhase('ai');
             const token = getAuthToken();
@@ -822,29 +1104,37 @@ export default function AIInsights() {
             }, 20000);
             const json = await res.json().catch(() => ({}));
             if (!res.ok) {
-                if (res.status === 429) {
-                    setError('AI quota exceeded. Showing last analysis below.');
-                    setQuotaRetrySeconds(typeof json.retryAfterSeconds === 'number' ? json.retryAfterSeconds : 60);
-                } else {
-                    setError(json.details || json.error || res.statusText || 'Failed to load AI insights');
+                if (!isStale()) {
+                    if (res.status === 429) {
+                        setError('AI quota exceeded. Showing last analysis below.');
+                        setQuotaRetrySeconds(typeof json.retryAfterSeconds === 'number' ? json.retryAfterSeconds : 60);
+                    } else {
+                        setError(json.details || json.error || res.statusText || 'Failed to load AI insights');
+                    }
                 }
                 return;
             }
-            if (json.success && json.data) {
-                if (json.data.adsData) setAdsData(json.data.adsData);
-                if (json.data.reelsData) setReelsData(json.data.reelsData);
+            if (!isStale() && json.success && json.data) {
+                if (json.data.adsData) setAdsData(preferLocalAdSlotsIfApiEmpty(adsSlotsLocal, json.data.adsData));
+                if (json.data.reelsData) {
+                    setReelsData(preferLocalReelSlotsIfApiEmpty(reelSlotsLocal, json.data.reelsData));
+                }
                 if (Array.isArray(json.data.insights)) setInsights(json.data.insights);
                 if (Array.isArray(json.data.recommendations)) setRecommendations(json.data.recommendations);
             }
         } catch (err) {
-            if (err?.name === 'AbortError') {
-                setError('AI insights timed out. Showing live ad and reel data only.');
-            } else {
-                setError(err.message || 'Network error');
+            if (!isStale()) {
+                if (err?.name === 'AbortError') {
+                    setError('AI insights timed out. Showing live ad and reel data only.');
+                } else {
+                    setError(err.message || 'Network error');
+                }
             }
         } finally {
-            setLastAnalysedAt(new Date());
-            setLoading(false);
+            if (!isStale()) {
+                setLastAnalysedAt(new Date());
+                setLoading(false);
+            }
         }
     }, [resolvedInsightsRange]);
 
@@ -943,8 +1233,10 @@ export default function AIInsights() {
                 return;
             }
             setQualityResult(json);
-            if (json.success && json.samples?.length) setQualityScores(json.samples);
-            if (json.success) await loadLeadScores();
+            if (json.success) {
+                setQualityScores(Array.isArray(json.samples) ? json.samples : []);
+                await loadLeadScores();
+            }
         } catch (err) {
             setQualityError(err.message || 'Network error');
         } finally {
@@ -965,7 +1257,7 @@ export default function AIInsights() {
         fetchCreativeFatigue();
     }, [fetchLeadSaturation, fetchCreativeFatigue]);
 
-    const currentAd = adsData[activeTimeWindow] || defaultAdsData.lastWeek;
+    const currentAd = adsData[activeTimeWindow] || defaultAdsData.last_30_days;
     const rawReel = reelsData[activeTimeWindow];
     const reelSlotLooksEmpty = (r) => {
         if (!r) return true;
@@ -975,12 +1267,21 @@ export default function AIInsights() {
         const hasMeta = !!(r.permalink || r.thumbnail_url || r.timestamp);
         return !hasName && !hasMetrics && !hasMeta;
     };
-    const periodReel = reelSlotLooksEmpty(rawReel) ? null : rawReel;
-    const periodLabels = { lastMonth: 'Last Month', lastWeek: 'Last Week', thisWeek: 'This Week', today: 'Today' };
+    const periodLabels = {
+        today: 'Today',
+        last_7_days: 'last 7 days',
+        last_14_days: 'last 14 days',
+        last_30_days: 'last 30 days'
+    };
 
     const analysisReelForPeriod = useMemo(() => {
         if (!reelAnalysis) return null;
-        const map = { lastMonth: 'monthly_best_reel', lastWeek: 'last_week_best_reel', thisWeek: 'this_week_best_reel', today: 'daily_best_reel' };
+        const map = {
+            today: 'daily_best_reel',
+            last_7_days: 'this_week_best_reel',
+            last_14_days: 'last_week_best_reel',
+            last_30_days: 'monthly_best_reel'
+        };
         return reelAnalysis[map[activeTimeWindow]] || null;
     }, [reelAnalysis, activeTimeWindow]);
 
@@ -999,12 +1300,36 @@ export default function AIInsights() {
         );
     };
     const hasUsableAnalysisReel = analysisReelNonEmpty(analysisReelForPeriod);
-    const displayReel = hasUsableAnalysisReel ? analysisReelForPeriod : periodReel;
-    const displayReelFlags = displayReel?.flags || [];
+    /** Prefer Instagram snapshot slot when it has real data; analysis row is a fallback (avoids blank when daily_best uses a different day scope). */
+    const displayReel = !reelSlotLooksEmpty(rawReel)
+        ? rawReel
+        : (hasUsableAnalysisReel ? analysisReelForPeriod : null);
+    /** Merge flags from intelligence lists + period bests so Repost / Stable pills show for every tab, not only when analysis row wins. */
+    const displayReelFlags = useMemo(() => {
+        const base = displayReel?.flags || [];
+        if (!reelAnalysis || !displayReel) return base;
+        const p = String(displayReel.permalink || '').trim();
+        const nm = String(displayReel.name || '').trim().slice(0, 80);
+        const merge = new Set(base);
+        const addFrom = (r) => {
+            if (!r || !Array.isArray(r.flags) || r.flags.length === 0) return;
+            const rp = String(r.permalink || '').trim();
+            const rn = String(r.name || '').trim().slice(0, 80);
+            const match = (p && rp && p === rp) || (nm && rn && rn === nm);
+            if (match) r.flags.forEach((f) => merge.add(f));
+        };
+        [reelAnalysis.top_reels, reelAnalysis.repost_recommended, reelAnalysis.stable_top_performers, reelAnalysis.trending_reels, reelAnalysis.rising_reels].forEach((arr) => {
+            if (!Array.isArray(arr)) return;
+            arr.forEach(addFrom);
+        });
+        [reelAnalysis.monthly_best_reel, reelAnalysis.this_week_best_reel, reelAnalysis.daily_best_reel, reelAnalysis.last_week_best_reel, reelAnalysis.all_time_best_reel].forEach(addFrom);
+        return [...merge];
+    }, [reelAnalysis, displayReel]);
     const flagLabels = { TRENDING: 'Trending Reel', REPOST_RECOMMENDED: 'Repost Recommended', RISING: 'Rising Reel', STABLE_TOP_PERFORMER: 'Stable Top Performer' };
     const flagColors = { TRENDING: '#ef4444', REPOST_RECOMMENDED: '#8b5cf6', RISING: '#f59e0b', STABLE_TOP_PERFORMER: '#22c55e' };
     const flagIcons = { TRENDING: 'fa-fire', REPOST_RECOMMENDED: 'fa-retweet', RISING: 'fa-arrow-trend-up', STABLE_TOP_PERFORMER: 'fa-shield-check' };
     const periodLabel = periodLabels[activeTimeWindow] || '';
+    const snapshotRollingLabelPeriod = activeTimeWindow !== 'today' ? getSnapshotPeriodRanges()[activeTimeWindow] : null;
 
     const saturationIndexPct = useMemo(() => {
         const avgFromSummary = saturationResult?.summary?.saturation_index_avg;
@@ -1134,15 +1459,22 @@ export default function AIInsights() {
         const summary = qualityResult?.summary;
         const samples = leadSamples;
         const n = samples.length;
-        if (qualityResult?.success && summary && typeof summary.avg_score === 'number') {
+        const summaryTotal = summary && typeof summary.total === 'number' ? summary.total : null;
+        const effectiveN = Math.max(n, summaryTotal ?? 0);
+        if (
+            qualityResult?.success &&
+            summary &&
+            typeof summary.avg_score === 'number' &&
+            effectiveN > 0
+        ) {
             return {
-                total: summary.total ?? n,
+                total: summaryTotal ?? n,
                 avgScore: summary.avg_score,
                 hotLeadRatePct: summary.hot_lead_rate_pct,
                 hotWarmPct: null,
             };
         }
-        if (!n) return { total: 0, avgScore: null, hotLeadRatePct: null, hotWarmPct: null };
+        if (!n) return { total: null, avgScore: null, hotLeadRatePct: null, hotWarmPct: null };
         const sum = samples.reduce((s, r) => s + (Number(r.score) || 0), 0);
         const hot = samples.filter((r) => r.tier === 'Hot' || String(r.category || '').includes('Hot')).length;
         const warm = samples.filter((r) => r.tier === 'Warm' || (String(r.category || '').includes('Warm') && !String(r.category || '').includes('Hot'))).length;
@@ -1389,7 +1721,7 @@ export default function AIInsights() {
                                         onClick={() => {
                                             setInsightsDatePreset(opt.id);
                                             if (opt.id === 'custom') {
-                                                const m = getDateRangeForPreset('this_month');
+                                                const m = getDateRangeForPreset('last_30_days');
                                                 setCustomDraftFrom(m.from);
                                                 setCustomDraftTo(m.to);
                                                 setCustomCommitted({ from: m.from, to: m.to });
@@ -1629,7 +1961,7 @@ export default function AIInsights() {
                     <div className="ai2-metric-row3">
                         <div className="ai2-metric-box">
                             <span className="ai2-metric-k">Scored leads</span>
-                            <span className="ai2-metric-v">{leadIntelStats.total || '—'}</span>
+                            <span className="ai2-metric-v">{leadIntelStats.total != null ? leadIntelStats.total : '—'}</span>
                             <span className="ai2-metric-hint ai2-hint-good">In selected window</span>
                         </div>
                         <div className="ai2-metric-box">
@@ -1763,7 +2095,7 @@ export default function AIInsights() {
             <details className="ai2-details">
                 <summary>Performance snapshot · ads &amp; reels ({periodLabel})</summary>
                 <div className="ai2-time-tabs">
-                    {(['lastMonth', 'lastWeek', 'thisWeek', 'today']).map((k) => (
+                    {SNAPSHOT_TIME_WINDOW_KEYS.map((k) => (
                         <button
                             key={k}
                             type="button"
@@ -1791,6 +2123,17 @@ export default function AIInsights() {
                             <p className="ai2-perf-name">{displayReel?.name || '—'}</p>
                             {displayReel?.timestamp && (
                                 <p className="ai2-perf-dates">{fmtDateTime(displayReel.timestamp)}</p>
+                            )}
+                            {!displayReel?.timestamp && activeTimeWindow === 'today' && displayReel?.hideReelPublishTime && (currentAd?.dateStart || currentAd?.dateStop) && (
+                                <p className="ai2-perf-dates">
+                                    Snapshot day (same as Best ad): {fmtDate(currentAd.dateStart || currentAd.dateStop)}
+                                    {currentAd.dateStop && currentAd.dateStop !== currentAd.dateStart ? ` — ${fmtDate(currentAd.dateStop)}` : ''}
+                                </p>
+                            )}
+                            {!displayReel?.timestamp && snapshotRollingLabelPeriod && displayReel?.hideReelPublishTime && snapshotRollingLabelPeriod.from && snapshotRollingLabelPeriod.to && (
+                                <p className="ai2-perf-dates">
+                                    Period: {fmtDate(snapshotRollingLabelPeriod.from)} — {fmtDate(snapshotRollingLabelPeriod.to)}
+                                </p>
                             )}
                             <p className="ai2-perf-meta">
                                 {displayReel?.hookRate != null && displayReel.hookRate > 0 ? `Hook ${displayReel.hookRate}% · ` : ''}
@@ -2021,17 +2364,40 @@ export default function AIInsights() {
                 <button type="button" className="ai2-btn-secondary" onClick={fetchLeadQuality} disabled={qualityLoading}>
                     {qualityLoading ? 'Scoring…' : 'Run scoring'}
                 </button>
-                {qualityResult?.success && (
-                    <p className="ai2-muted">
-                        Scored {Math.max(qualityResult.scored ?? 0, qualityResult.samples?.length ?? 0)} lead(s) from your Leads data in this period.
-                        {qualityResult.summary?.avg_score != null && (
-                            <>
-                                {' '}
-                                Avg {qualityResult.summary.avg_score} · Hot {qualityResult.summary.hot_lead_rate_pct ?? '—'}%
-                            </>
-                        )}
-                    </p>
-                )}
+                {qualityResult?.success && (() => {
+                    const nScored = Math.max(qualityResult.scored ?? 0, qualityResult.samples?.length ?? 0);
+                    const s = qualityResult.summary;
+                    const hasStats =
+                        s &&
+                        typeof s.avg_score === 'number' &&
+                        (s.total ?? nScored) > 0;
+                    return (
+                        <p className="ai2-muted">
+                            {nScored === 0 ? (
+                                <>
+                                    <strong>No leads matched this filter.</strong> Scoring only reads rows from your{' '}
+                                    <code>Leads</code> table whose date falls in the AI Insights range{' '}
+                                    <strong>{headerDateRangeLabel}</strong>
+                                    {insightsDatePreset !== 'custom' ? (
+                                        <> (preset: {insightsPresetLabel})</>
+                                    ) : null}
+                                    . This is an empty result, not a system error. To see scores: widen the range with the date control above, use <strong>Custom</strong> to include
+                                    when your leads were captured, or sync/import leads into Supabase for that period.
+                                </>
+                            ) : (
+                                <>
+                                    Scored {nScored} lead(s) from your Leads data in this period.
+                                    {hasStats && (
+                                        <>
+                                            {' '}
+                                            Avg {s.avg_score} · Hot {s.hot_lead_rate_pct ?? '—'}%
+                                        </>
+                                    )}
+                                </>
+                            )}
+                        </p>
+                    );
+                })()}
                 {(qualityScores.length > 0 || (qualityResult && qualityResult.samples?.length > 0)) && (
                     <div className="ai2-table-wrap">
                         <table className="ai2-table">

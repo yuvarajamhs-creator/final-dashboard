@@ -53,19 +53,19 @@ Required JSON shape (use these exact keys):
 
 {
   "adsData": {
-    "lastMonth": { "name": "string", "platform": "Meta or Website", "spend": number, "leads": number, "cpl": number (2 decimals), "reason": "1-2 sentence insight", "action": "SCALE" or "MONITOR" or "PAUSE" },
-    "lastWeek": { ... same shape },
-    "thisWeek": { ... same shape },
-    "today": { ... same shape }
+    "today": { "name": "string", "platform": "Meta or Website", "spend": number, "leads": number, "cpl": number (2 decimals), "reason": "1-2 sentence insight", "action": "SCALE" or "MONITOR" or "PAUSE" },
+    "last_7_days": { ... same shape },
+    "last_14_days": { ... same shape },
+    "last_30_days": { ... same shape }
   },
   "reelsData": {
-    "lastMonth": { "name": "string", "platform": "Instagram or Facebook", "reach": number, "engagements": number, "saves": number, "reason": "1-2 sentence insight", "action": "REPURPOSE" or "BOOST" or "MONITOR" },
-    "lastWeek": { ... same shape },
-    "thisWeek": { ... same shape },
-    "today": { ... same shape }
+    "today": { "name": "string", "platform": "Instagram or Facebook", "reach": number, "engagements": number, "saves": number, "reason": "1-2 sentence insight", "action": "REPURPOSE" or "BOOST" or "MONITOR" },
+    "last_7_days": { ... same shape },
+    "last_14_days": { ... same shape },
+    "last_30_days": { ... same shape }
   },
   "insights": [
-    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "Last Week or This Week or Today or Last Month", "category": "success" or "warning" or "info", "text": "1-2 sentence insight", "action": "→ Short action phrase" }
+    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "Today or last 7 days or last 14 days or last 30 days", "category": "success" or "warning" or "info", "text": "1-2 sentence insight", "action": "→ Short action phrase" }
   ],
   "recommendations": [
     { "id": 1, "title": "string", "icon": "single emoji", "color": "green" or "red" or "blue" or "purple", "justification": "1-2 sentence data-driven reason" }
@@ -84,7 +84,7 @@ Real data:
 Return a single JSON object with exactly these keys:
 {
   "insights": [
-    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "Last Week or This Week or Today or Last Month", "category": "success" or "warning" or "info", "text": "1-2 sentence insight based on the real data above", "action": "→ Short action phrase" }
+    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "Today or last 7 days or last 14 days or last 30 days", "category": "success" or "warning" or "info", "text": "1-2 sentence insight based on the real data above", "action": "→ Short action phrase" }
   ],
   "recommendations": [
     { "id": 1, "title": "string", "icon": "single emoji", "color": "green" or "red" or "blue" or "purple", "justification": "1-2 sentence data-driven reason using the real metrics" }
@@ -95,7 +95,7 @@ Rules: Include exactly 6 items in "insights" and 4 in "recommendations". ids 1-b
 
 /**
  * POST /api/ai/insights
- * Body: { bestAd?, bestReel?, bestAds?: { lastMonth, lastWeek, thisWeek, today }, bestReels?: { ... }, dateRange?: { from, to } }
+ * Body: { bestAd?, bestReel?, bestAds?: { today, last_7_days, last_14_days, last_30_days }, bestReels?: { ... }, dateRange?: { from, to } }
  * When bestAds/bestReels (per period) are provided, server builds adsData/reelsData from them.
  * Otherwise falls back to single bestAd/bestReel or full AI-generated data.
  */
@@ -126,8 +126,12 @@ router.post('/insights', async (req, res) => {
   try {
     let prompt = PROMPT;
     if (useRealData) {
-      const adForPrompt = hasPerPeriod ? bestAds.lastWeek || bestAds.thisWeek || bestAds.lastMonth : bestAd;
-      const reelForPrompt = hasPerPeriod ? bestReels.lastWeek || bestReels.thisWeek || bestReels.lastMonth : bestReel;
+      const adForPrompt = hasPerPeriod
+        ? bestAds.last_30_days || bestAds.last_14_days || bestAds.last_7_days || bestAds.today
+        : bestAd;
+      const reelForPrompt = hasPerPeriod
+        ? bestReels.last_30_days || bestReels.last_14_days || bestReels.last_7_days || bestReels.today
+        : bestReel;
       prompt = PROMPT_WITH_REAL_DATA(adForPrompt, reelForPrompt, dateRange);
     }
 
@@ -170,7 +174,7 @@ router.post('/insights', async (req, res) => {
     if (useRealData) {
       reelsData = {};
       adsData = {};
-      const timeKeys = ['lastMonth', 'lastWeek', 'thisWeek', 'today'];
+      const timeKeys = ['today', 'last_7_days', 'last_14_days', 'last_30_days'];
       if (hasPerPeriod) {
         timeKeys.forEach((k) => {
           adsData[k] = buildAdSlotFromReal(bestAds[k]);
@@ -310,6 +314,64 @@ router.post('/ask', async (req, res) => {
   }
 });
 
+function lineLooksLikeContactFooter(s) {
+  const t = String(s || '').trim();
+  if (!t) return true;
+  if (/^for\s+appointment\b/i.test(t)) return true;
+  if (/^appointment\b/i.test(t) && /\d{5,}/.test(t)) return true;
+  if (/\b(whatsapp|call\s+now|call\s+us|book\s+now|dm\s+us)\b/i.test(t) && /\d{4,}/.test(t)) return true;
+  const digits = (t.match(/\d/g) || []).length;
+  if (digits >= 10 && digits / Math.max(t.length, 1) > 0.2) return true;
+  return false;
+}
+
+function scoreReelTitleLine(line) {
+  if (!line) return -1e9;
+  let score = line.length;
+  if (lineLooksLikeContactFooter(line)) score -= 500;
+  if (/[?!…]/.test(line)) score += 35;
+  if (/\b(benefits|weight|loss|how\s+to|why\s+|doctor|dr\.)\b/i.test(line)) score += 25;
+  return score;
+}
+
+/** Match client AIInsights.jsx — prefer hook/body over “For Appointment / phone” captions. */
+function pickReelTitleFromCaption(caption, maxLen = 120) {
+  if (!caption || typeof caption !== 'string') return 'Reel';
+  const trimmed = caption.trim();
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return 'Reel';
+
+  let ordered = [];
+  if (lines.length >= 2) {
+    ordered = lines;
+  } else {
+    const one = lines[0];
+    if (one.includes('|')) {
+      ordered = one.split('|').map((p) => p.trim()).filter(Boolean);
+    } else if (lineLooksLikeContactFooter(one)) {
+      ordered = one.split(/(?<=[.!?…])\s+/).map((p) => p.trim()).filter(Boolean);
+      if (ordered.length <= 1) ordered = [one];
+    } else {
+      ordered = [one];
+    }
+  }
+
+  let chosen = ordered.find((c) => c && !lineLooksLikeContactFooter(c)) || '';
+  if (!chosen) chosen = ordered[0] || '';
+  chosen = chosen.trim();
+  if (lineLooksLikeContactFooter(chosen)) {
+    const stripped = trimmed.replace(/^\s*for\s+appointment\s*[—\-–:]?\s*[^|]*\|\s*/i, '').trim();
+    if (stripped && !lineLooksLikeContactFooter(stripped)) chosen = stripped;
+  }
+  if (!chosen || lineLooksLikeContactFooter(chosen)) {
+    const sorted = [...ordered].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
+    chosen = (sorted[0] || chosen || 'Reel').trim();
+  }
+  if (!chosen) return 'Reel';
+  if (chosen.length <= maxLen) return chosen;
+  return `${chosen.slice(0, maxLen - 1)}…`;
+}
+
 function buildAdSlotFromReal(bestAd) {
   if (!bestAd || typeof bestAd !== 'object') {
     return { name: '—', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No ad data.', action: 'MONITOR', dateStart: '', dateStop: '' };
@@ -320,7 +382,8 @@ function buildAdSlotFromReal(bestAd) {
   const name = bestAd.name || bestAd.campaignName || bestAd.ad_name || 'Campaign';
   const platform = bestAd.platform || 'Meta';
   const fmtSpend = spend.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const reason = bestAd.reason || `Best performer: ${leads} leads, ₹${fmtSpend} spend, ₹${cpl.toFixed(2)} CPL.`;
+  let reason = bestAd.reason || `Best performer: ${leads} leads, ₹${fmtSpend} spend, ₹${cpl.toFixed(2)} CPL.`;
+  if (bestAd.snapshotFallbackNote) reason += String(bestAd.snapshotFallbackNote);
   return {
     name: String(name).slice(0, 120),
     platform: String(platform).slice(0, 32),
@@ -341,7 +404,9 @@ function buildReelSlotFromReal(bestReel) {
   const reach = Number(bestReel.reach) || 0;
   const engagements = Number(bestReel.engagements) || Number(bestReel.total_interactions) || 0;
   const saves = Number(bestReel.saves) || 0;
-  const name = bestReel.name || (bestReel.caption && bestReel.caption.slice(0, 60)) || 'Reel';
+  const name = (bestReel.caption && String(bestReel.caption).trim())
+    ? pickReelTitleFromCaption(bestReel.caption, 120)
+    : (bestReel.name || 'Reel');
   const platform = bestReel.platform || 'Instagram';
   const fmtReach = reach >= 1000 ? `${(reach / 1000).toFixed(1)}K` : String(reach);
   const reason = bestReel.reason || `Top content: ${fmtReach} reach, ${engagements.toLocaleString('en-IN')} engagements, ${saves} saves.`;
@@ -363,12 +428,12 @@ function buildReelSlotFromReal(bestReel) {
   };
 }
 
-/** Ensure lastMonth, lastWeek, thisWeek, today exist with valid shape so UI does not break */
+/** Ensure today, last_7_days, last_14_days, last_30_days exist with valid shape so UI does not break */
 function ensureTimeWindows(obj, type) {
   const defaults = type === 'ads'
     ? { name: 'Campaign', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No data.', action: 'MONITOR' }
     : { name: 'Reel', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'No data.', action: 'MONITOR' };
-  const keys = ['lastMonth', 'lastWeek', 'thisWeek', 'today'];
+  const keys = ['today', 'last_7_days', 'last_14_days', 'last_30_days'];
   const out = {};
   for (const k of keys) {
     const v = obj[k];

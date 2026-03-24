@@ -450,7 +450,43 @@ function buildByContentTypeAggregates(media) {
 }
 
 /** Max number of media items to fetch insights for (reduces API calls and load time). */
-const MEDIA_INSIGHTS_LIMIT = 50;
+const MEDIA_INSIGHTS_LIMIT = 100;
+
+/**
+ * Take up to maxItems for per-media insights, round-robin across calendar months (YYYY-MM).
+ * Prevents "newest 50 only" from dropping last month's reels when the date range spans two months.
+ */
+function takeDiverseByMonthForInsights(filtered, maxItems) {
+  if (!filtered || filtered.length <= maxItems) return filtered;
+  const sorted = [...filtered].sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return tb - ta;
+  });
+  const byMonth = new Map();
+  for (const m of sorted) {
+    const k = m.timestamp ? String(m.timestamp).slice(0, 7) : "_";
+    if (!byMonth.has(k)) byMonth.set(k, []);
+    byMonth.get(k).push(m);
+  }
+  const monthKeys = [...byMonth.keys()].sort((a, b) => b.localeCompare(a));
+  const out = [];
+  let round = 0;
+  while (out.length < maxItems) {
+    let added = false;
+    for (const k of monthKeys) {
+      const bucket = byMonth.get(k);
+      if (bucket.length > round) {
+        out.push(bucket[round]);
+        added = true;
+        if (out.length >= maxItems) break;
+      }
+    }
+    if (!added) break;
+    round += 1;
+  }
+  return out;
+}
 
 /** Max stories to fetch when using the dedicated /stories endpoint (limits per-account API calls). */
 const STORY_FETCH_LIMIT = 25;
@@ -560,7 +596,7 @@ async function fetchAccountMediaInsights(igAccountId, accessToken, opts = {}) {
     const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
     return tb - ta;
   });
-  filtered = filtered.slice(0, MEDIA_INSIGHTS_LIMIT);
+  filtered = takeDiverseByMonthForInsights(filtered, MEDIA_INSIGHTS_LIMIT);
 
   const results = await Promise.all(filtered.map((media) => fetchMediaInsights(media, accessToken)));
   return results;
