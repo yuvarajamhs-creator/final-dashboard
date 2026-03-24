@@ -57,20 +57,82 @@ const getPeriodRanges = () => {
     return { lastMonth, lastWeek, thisWeek, today: todayRange };
 };
 
+/**
+ * Widen fetch range so snapshot tabs (Last month … Today) always have rows in memory.
+ * Hero range can extend further backward/forward (e.g. custom) without shrinking below this span.
+ */
+const mergeSnapshotDataRange = (hero) => {
+    const p = getPeriodRanges();
+    let from = p.lastMonth.from;
+    let to = p.today.to;
+    if (hero?.from && String(hero.from) < from) from = hero.from;
+    if (hero?.to && String(hero.to) > to) to = hero.to;
+    return { from, to };
+};
+
+const isReelMediaItem = (m) => {
+    if (!m) return false;
+    const pl = String(m.permalink || '').toLowerCase();
+    if (m.product_type === 'REELS') return true;
+    if (!m.product_type && pl.includes('/reel')) return true;
+    if (m.media_type === 'VIDEO' && pl.includes('/reel')) return true;
+    return false;
+};
+
 const rowYMD = (r) => {
     const s = r?.date_start || r?.date_stop || r?.date;
     if (!s) return null;
     return String(s).slice(0, 10);
 };
 
+/** Single-day tabs: Meta often labels rows in account/UTC date — one day behind local “today”. */
+const expandedSingleDayYmds = (period) => {
+    const set = new Set([period.from, new Date().toISOString().slice(0, 10)]);
+    const anchor = new Date(`${period.from}T12:00:00`);
+    if (!Number.isNaN(anchor.getTime())) {
+        const prev = new Date(anchor);
+        prev.setDate(prev.getDate() - 1);
+        set.add(toYMDLocal(prev));
+    }
+    return set;
+};
+
+/**
+ * Reel publish time vs tab period: local *or* UTC calendar day in [from,to].
+ * Single-day tabs (e.g. Today) also use expandedSingleDayYmds — same idea as Best ad when Meta’s day label is one off.
+ */
+const timestampInPeriod = (isoTs, period) => {
+    if (!period?.from || !period?.to) return true;
+    if (!isoTs) return false;
+    const d = new Date(isoTs);
+    if (Number.isNaN(d.getTime())) return false;
+    const inRange = (ymd) => ymd >= period.from && ymd <= period.to;
+    const yLocal = toYMDLocal(d);
+    const yUtc = d.toISOString().slice(0, 10);
+    if (inRange(yLocal) || inRange(yUtc)) return true;
+    if (period.from === period.to) {
+        const alt = expandedSingleDayYmds(period);
+        return alt.has(yLocal) || alt.has(yUtc);
+    }
+    return false;
+};
+
 /** Keep Meta insight rows whose row day falls inside the tab period (time_increment=1 rows). */
 const filterInsightsRowsByPeriod = (rows, period) => {
     if (!rows?.length || !period?.from || !period?.to) return [];
-    return rows.filter((r) => {
+    let out = rows.filter((r) => {
         const ymd = rowYMD(r);
         if (!ymd) return false;
         return ymd >= period.from && ymd <= period.to;
     });
+    if (out.length === 0 && period.from === period.to) {
+        const alt = expandedSingleDayYmds(period);
+        out = rows.filter((r) => {
+            const ymd = rowYMD(r);
+            return ymd && alt.has(ymd);
+        });
+    }
+    return out;
 };
 
 /** Preset ids for the hero date control (aligned with getDateRangeForPreset). */
@@ -450,14 +512,10 @@ const buildReelResult = (top) => {
 
 const filterReels = (mediaPayload, period = null) => {
     const media = mediaPayload?.media || [];
-    let reels = media.filter((m) => (m.product_type === 'REELS' || (m.media_type === 'VIDEO' && (m.permalink || '').includes('/reel/'))) && (m.availability === 'available' || (m.views || m.reach) > 0));
+    // Match analyzeReelPerformance / server: include reels even when insights are not_supported + zeros (otherwise Best reel stays blank).
+    let reels = media.filter((m) => isReelMediaItem(m));
     if (period && period.from && period.to) {
-        reels = reels.filter((m) => {
-            const ts = m.timestamp;
-            if (!ts) return false;
-            const ymd = toYMDLocal(new Date(ts));
-            return ymd >= period.from && ymd <= period.to;
-        });
+        reels = reels.filter((m) => timestampInPeriod(m.timestamp, period));
     }
     return reels;
 };
@@ -493,10 +551,7 @@ const pickBestReel = (mediaPayload, period = null) => {
 /** Full reel intelligence analysis: normalized scoring, flags, time-based categorization */
 const analyzeReelPerformance = (mediaPayload, periods) => {
     const media = mediaPayload?.media || [];
-    const allReels = media.filter((m) =>
-        (m.product_type === 'REELS' || (m.media_type === 'VIDEO' && (m.permalink || '').includes('/reel/')))
-        && (m.availability === 'available' || (m.views || m.reach) > 0)
-    );
+    const allReels = media.filter((m) => isReelMediaItem(m));
     const empty = { daily_best_reel: null, this_week_best_reel: null, last_week_best_reel: null, weekly_best_reel: null, monthly_best_reel: null, all_time_best_reel: null, trending_reels: [], repost_recommended: [], rising_reels: [], stable_top_performers: [], top_reels: [] };
     if (allReels.length === 0) return empty;
 
@@ -591,11 +646,7 @@ const analyzeReelPerformance = (mediaPayload, periods) => {
 
     const inPeriod = (reels, period) => {
         if (!period?.from || !period?.to) return [];
-        return reels.filter((r) => {
-            if (!r.timestamp) return false;
-            const ymd = toYMDLocal(new Date(r.timestamp));
-            return ymd >= period.from && ymd <= period.to;
-        });
+        return reels.filter((r) => timestampInPeriod(r.timestamp, period));
     };
     /** Best-scoring reel in period (not first row in global sort). */
     const bestIn = (period) => {
@@ -712,10 +763,19 @@ export default function AIInsights() {
         setError(null);
         setQuotaRetrySeconds(null);
         try {
-            const { from, to } = resolvedInsightsRange;
-            const dateRange = { from, to };
-            const [insightsRows, pages] = await Promise.all([fetchInsightsForAI(from, to, forceRefresh), fetchPages()]);
-            const mediaPayload = await fetchMediaInsightsForPages(pages, { from, to, forceRefresh, timeoutMs: 20000 });
+            const { from: heroFrom, to: heroTo } = resolvedInsightsRange;
+            const dateRange = { from: heroFrom, to: heroTo };
+            const { from: dataFrom, to: dataTo } = mergeSnapshotDataRange(resolvedInsightsRange);
+            const [insightsRows, pages] = await Promise.all([
+                fetchInsightsForAI(dataFrom, dataTo, forceRefresh),
+                fetchPages()
+            ]);
+            const mediaPayload = await fetchMediaInsightsForPages(pages, {
+                from: dataFrom,
+                to: dataTo,
+                forceRefresh,
+                timeoutMs: 20000
+            });
             const allPeriods = getPeriodRanges();
             setReelAnalysis(analyzeReelPerformance(mediaPayload, allPeriods));
 
@@ -907,7 +967,15 @@ export default function AIInsights() {
 
     const currentAd = adsData[activeTimeWindow] || defaultAdsData.lastWeek;
     const rawReel = reelsData[activeTimeWindow];
-    const periodReel = rawReel && (rawReel.name !== '—' || rawReel.reach > 0 || rawReel.views > 0) ? rawReel : null;
+    const reelSlotLooksEmpty = (r) => {
+        if (!r) return true;
+        const name = String(r.name || '').trim();
+        const hasName = name && name !== '—';
+        const hasMetrics = Number(r.reach || 0) > 0 || Number(r.views || 0) > 0;
+        const hasMeta = !!(r.permalink || r.thumbnail_url || r.timestamp);
+        return !hasName && !hasMetrics && !hasMeta;
+    };
+    const periodReel = reelSlotLooksEmpty(rawReel) ? null : rawReel;
     const periodLabels = { lastMonth: 'Last Month', lastWeek: 'Last Week', thisWeek: 'This Week', today: 'Today' };
 
     const analysisReelForPeriod = useMemo(() => {
@@ -916,27 +984,22 @@ export default function AIInsights() {
         return reelAnalysis[map[activeTimeWindow]] || null;
     }, [reelAnalysis, activeTimeWindow]);
 
-    const hasUsablePeriodReel = !!(periodReel && (
-        Number(periodReel.reach || 0) > 0 ||
-        Number(periodReel.views || 0) > 0 ||
-        Number(periodReel.likes || 0) > 0 ||
-        Number(periodReel.comments || 0) > 0 ||
-        Number(periodReel.shares || 0) > 0 ||
-        Number(periodReel.saves || periodReel.saved || 0) > 0 ||
-        periodReel.thumbnail_url ||
-        periodReel.permalink ||
-        periodReel.timestamp
-    ));
-    /* Do not substitute "latest reel" from another day — it made e.g. Today show a January post. */
-    const resolvedCurrentReel = hasUsablePeriodReel ? periodReel : null;
-    const hasUsableAnalysisReel = !!(analysisReelForPeriod && (
-        Number(analysisReelForPeriod.reach || 0) > 0 ||
-        Number(analysisReelForPeriod.views || 0) > 0 ||
-        analysisReelForPeriod.thumbnail_url ||
-        analysisReelForPeriod.permalink ||
-        analysisReelForPeriod.timestamp
-    ));
-    const displayReel = hasUsableAnalysisReel ? analysisReelForPeriod : resolvedCurrentReel;
+    /* Use slot whenever it has a real title, metrics, or a link — not only when views > 0 (Meta can return zeros). */
+    const analysisReelNonEmpty = (r) => {
+        if (!r) return false;
+        const name = String(r.name || '').trim();
+        const hasName = name && name !== '—';
+        return !!(
+            hasName ||
+            Number(r.reach || 0) > 0 ||
+            Number(r.views || 0) > 0 ||
+            r.thumbnail_url ||
+            r.permalink ||
+            r.timestamp
+        );
+    };
+    const hasUsableAnalysisReel = analysisReelNonEmpty(analysisReelForPeriod);
+    const displayReel = hasUsableAnalysisReel ? analysisReelForPeriod : periodReel;
     const displayReelFlags = displayReel?.flags || [];
     const flagLabels = { TRENDING: 'Trending Reel', REPOST_RECOMMENDED: 'Repost Recommended', RISING: 'Rising Reel', STABLE_TOP_PERFORMER: 'Stable Top Performer' };
     const flagColors = { TRENDING: '#ef4444', REPOST_RECOMMENDED: '#8b5cf6', RISING: '#f59e0b', STABLE_TOP_PERFORMER: '#22c55e' };
@@ -1145,7 +1208,7 @@ export default function AIInsights() {
     }, [fatigueResult, recommendations, currentAd]);
 
     const buildAskContext = useCallback(() => {
-        const reel = displayReel || resolvedCurrentReel;
+        const reel = displayReel;
         return {
             dateRange: resolvedInsightsRange,
             activePeriod: periodLabel,
@@ -1200,7 +1263,6 @@ export default function AIInsights() {
         periodLabel,
         currentAd,
         displayReel,
-        resolvedCurrentReel,
         insights,
         recommendations,
         saturationResult,
@@ -1726,15 +1788,15 @@ export default function AIInsights() {
                     </div>
                     <div className="ai2-perf-mini ai2-perf-mini--reel">
                             <h3>Best reel</h3>
-                            <p className="ai2-perf-name">{(displayReel || resolvedCurrentReel)?.name || '—'}</p>
-                            {(displayReel || resolvedCurrentReel)?.timestamp && (
-                                <p className="ai2-perf-dates">{fmtDateTime((displayReel || resolvedCurrentReel).timestamp)}</p>
+                            <p className="ai2-perf-name">{displayReel?.name || '—'}</p>
+                            {displayReel?.timestamp && (
+                                <p className="ai2-perf-dates">{fmtDateTime(displayReel.timestamp)}</p>
                             )}
                             <p className="ai2-perf-meta">
                                 {displayReel?.hookRate != null && displayReel.hookRate > 0 ? `Hook ${displayReel.hookRate}% · ` : ''}
-                                {fmtReach((displayReel || resolvedCurrentReel)?.views || (displayReel || resolvedCurrentReel)?.reach || 0)} views
+                                {fmtReach(displayReel?.views || displayReel?.reach || 0)} views
                             </p>
-                            <p className="ai2-perf-reason">{(displayReel || resolvedCurrentReel)?.reason || '—'}</p>
+                            <p className="ai2-perf-reason">{displayReel?.reason || '—'}</p>
                             {displayReelFlags.length > 0 && (
                                 <div className="ai2-reel-flag-row">
                                     {displayReelFlags.map((f) => (
