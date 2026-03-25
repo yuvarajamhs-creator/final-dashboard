@@ -1030,7 +1030,7 @@ export default function AIInsights() {
                 from: dataFrom,
                 to: dataTo,
                 forceRefresh,
-                timeoutMs: 20000
+                timeoutMs: 45000
             };
 
             let [insightsRows, pages] = await Promise.all([
@@ -1038,13 +1038,11 @@ export default function AIInsights() {
                 fetchPages()
             ]);
             if (!isStale() && (!pages || pages.length === 0)) {
-                await sleep(450);
                 if (!isStale()) pages = await fetchPages();
             }
 
             let mediaPayload = await fetchMediaInsightsForPages(pages, mediaOptsBase);
             if (!isStale() && insightsRows.length > 0 && (!mediaPayload?.media || mediaPayload.media.length === 0)) {
-                await sleep(500);
                 if (!isStale()) {
                     mediaPayload = await fetchMediaInsightsForPages(pages, {
                         ...mediaOptsBase,
@@ -1101,7 +1099,7 @@ export default function AIInsights() {
                     dateRange,
                     context: { platform: 'all', location: 'all', age: 'all' }
                 })
-            }, 20000);
+            }, 90000);
             const json = await res.json().catch(() => ({}));
             if (!res.ok) {
                 if (!isStale()) {
