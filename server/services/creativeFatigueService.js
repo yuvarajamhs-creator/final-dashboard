@@ -26,7 +26,7 @@ const HISTORY_MAX_DAYS_BACK = 400;
 
 const INSIGHT_FIELDS_FULL =
   'ad_id,ad_name,campaign_id,campaign_name,impressions,reach,clicks,spend,ctr,cpc,actions,date_start,date_stop,' +
-  'video_play_actions,video_3_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,' +
+  'video_play_actions,video_p25_watched_actions,video_p50_watched_actions,' +
   'video_p75_watched_actions,video_p100_watched_actions,quality_ranking,engagement_rate_ranking,conversion_rate_ranking';
 
 const INSIGHT_FIELDS_BASE =
