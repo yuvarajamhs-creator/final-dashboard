@@ -186,14 +186,9 @@ function buildLeadsRelativeUrl(formId, { fields, limit, after, since, until } = 
  * Fetch leads from Meta API for a given page and date range
  */
 async function fetchLeadsFromMeta(pageId, startDate, endDate) {
-  // Use system token for forms list
-  const systemToken = getSystemToken();
-  
-  // Use META_ACCESS_TOKEN for leads API calls
-  const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
-  if (!accessToken) {
-    throw new Error("META_ACCESS_TOKEN missing. Please configure META_ACCESS_TOKEN in server/.env file.");
-  }
+  // Meta's /leadgen_forms endpoint requires a Page Access Token (not a system/user token)
+  const pageAccessToken = await getPageAccessToken(pageId);
+  const accessToken = pageAccessToken;
   
   // Convert date range to Unix timestamps for Meta API
   const startTimestamp = Math.floor(startDate.getTime() / 1000);
@@ -218,15 +213,15 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
       let responseData;
       if (formsPageCount === 0) {
         const formsResponse = await axios.get(formsUrl, {
-          headers: { Authorization: `Bearer ${systemToken}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
           params: { fields: formsFields, limit: 100 },
           timeout: 60000,
         });
         responseData = formsResponse.data;
-       
+
       } else {
         const nextResponse = await axios.get(nextUrl, {
-          headers: { Authorization: `Bearer ${systemToken}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
           timeout: 60000,
         });
         responseData = nextResponse.data;

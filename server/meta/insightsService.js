@@ -249,7 +249,7 @@ async function fetchInsightsFromMetaLive(opts) {
       level: 'ad',
       time_increment: 1,
       time_range: timeRange,
-      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_3_sec_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
+      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
       limit: 1000,
       filtering: JSON.stringify(filtering),
     };
