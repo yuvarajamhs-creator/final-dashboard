@@ -769,11 +769,11 @@ const pickBestReelForLast30Tab = (mediaPayload, snap) => {
             hideReelPublishTime: true
         };
     }
-    const any = pickBestReel(mediaPayload, null);
-    if (any) {
+    const roll180 = pickBestReel(mediaPayload, rollingDaysEndingOn(end, 180));
+    if (roll180) {
         return {
-            ...any,
-            snapshotFallbackNote: ' No reels in the last 30 days in the loaded batch — showing top reel from Instagram data returned.',
+            ...roll180,
+            snapshotFallbackNote: ' No reels in the last 90 days — showing top reel from the last ~6 months.',
             hideReelPublishTime: true
         };
     }
@@ -907,7 +907,7 @@ const analyzeReelPerformance = (mediaPayload, periods) => {
         bestIn(periods.lastMonth)
         || bestInRolling(scored, periods.today.to, 62)
         || bestInRolling(scored, periods.today.to, 90)
-        || scored[0]
+        || bestInRolling(scored, periods.today.to, 180)
         || null;
 
     return {
@@ -2118,6 +2118,14 @@ export default function AIInsights() {
                     </div>
                     <div className="ai2-perf-mini ai2-perf-mini--reel">
                             <h3>Best reel</h3>
+                            {(displayReel?.thumbnail_url || displayReel?.media_url) && (
+                                <img
+                                    src={displayReel.thumbnail_url || displayReel.media_url}
+                                    alt={displayReel?.name || 'Best reel'}
+                                    style={{ width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 8, marginBottom: 8 }}
+                                    onError={(e) => { e.target.style.display = 'none'; }}
+                                />
+                            )}
                             <p className="ai2-perf-name">{displayReel?.name || '—'}</p>
                             {displayReel?.timestamp && (
                                 <p className="ai2-perf-dates">{fmtDateTime(displayReel.timestamp)}</p>
