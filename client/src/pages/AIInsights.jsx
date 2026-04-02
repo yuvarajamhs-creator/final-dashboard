@@ -291,6 +291,7 @@ const mapReelPickToSlot = (best) => {
     if (!best) {
         return {
             name: '—',
+            headlineLine: '',
             platform: 'Instagram',
             reach: 0,
             engagements: 0,
@@ -299,18 +300,28 @@ const mapReelPickToSlot = (best) => {
             likes: 0,
             comments: 0,
             shares: 0,
+            hookRate: 0,
+            video_avg_time_watched: 0,
+            engagementRatePct: 0,
             reason: 'No reel in this calendar period within the loaded analysis range.',
             action: 'MONITOR',
             timestamp: '',
             thumbnail_url: '',
             permalink: '',
-            hideReelPublishTime: false
+            subtitle: '',
+            hideReelPublishTime: false,
+            snapshotFallbackNote: ''
         };
     }
     const rch = best.reach || best.views || 0;
     const note = best.snapshotFallbackNote ? String(best.snapshotFallbackNote) : '';
+    const hookR = Math.min(Number(best.hookRate ?? best.hook_rate ?? 0), 100);
+    const watch = capWatchTime(best.video_avg_time_watched ?? best.watchTime);
+    const engPct = best.engagementRatePct != null ? Number(best.engagementRatePct) : (best.engagementRate != null ? Number(best.engagementRate) : undefined);
     return {
         name: best.name,
+        headlineLine: String(best.headlineLine || pickReelHeadlineLineFromCaption(best.caption, 200) || best.name || '').slice(0, 200),
+        subtitle: best.subtitle || pickReelSubtitleFromCaption(best.caption, best.name, 140) || '',
         platform: best.platform || 'Instagram',
         reach: best.reach,
         engagements: best.engagements,
@@ -319,13 +330,85 @@ const mapReelPickToSlot = (best) => {
         likes: best.likes,
         comments: best.comments,
         shares: best.shares,
+        hookRate: hookR,
+        video_avg_time_watched: watch,
+        engagementRatePct: engPct != null && !Number.isNaN(engPct) ? engPct : (rch > 0 ? Math.round(((Number(best.engagements) || 0) / rch) * 1000) / 10 : 0),
         reason: `Top in this period: ${fmtReach(rch)} reach, ${fmtInt(best.engagements)} engagements, ${best.saves} saves.${note}`,
         action: 'MONITOR',
         timestamp: best.timestamp || '',
         thumbnail_url: best.thumbnail_url || '',
         permalink: best.permalink || '',
-        hideReelPublishTime: !!best.hideReelPublishTime
+        hideReelPublishTime: !!best.hideReelPublishTime,
+        snapshotFallbackNote: note.trim()
     };
+};
+
+/** Match snapshot card to a scored row from reel intelligence (rich reason + flags). */
+const findMatchedAnalysisReel = (card, reelAnalysis) => {
+    if (!card || !reelAnalysis) return null;
+    const p = String(card.permalink || '').trim();
+    const nm = String(card.name || '').trim().slice(0, 80);
+    const hl = String(card.headlineLine || '').trim().slice(0, 120);
+    const buckets = [
+        reelAnalysis.trending_reels,
+        reelAnalysis.repost_recommended,
+        reelAnalysis.rising_reels,
+        reelAnalysis.stable_top_performers,
+        reelAnalysis.top_reels
+    ];
+    const singles = [
+        reelAnalysis.monthly_best_reel,
+        reelAnalysis.daily_best_reel,
+        reelAnalysis.this_week_best_reel,
+        reelAnalysis.last_week_best_reel,
+        reelAnalysis.all_time_best_reel
+    ].filter(Boolean);
+    const candidates = [];
+    buckets.forEach((arr) => {
+        if (Array.isArray(arr)) arr.forEach((x) => x && candidates.push(x));
+    });
+    singles.forEach((x) => candidates.push(x));
+    const seen = new Set();
+    for (const row of candidates) {
+        const k = `${row.permalink || ''}#${row.name || ''}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const rp = String(row.permalink || '').trim();
+        const rn = String(row.name || '').trim().slice(0, 80);
+        if (p && rp && p === rp) return row;
+        if (nm && rn && (rn === nm || nm.startsWith(rn) || rn.startsWith(nm.slice(0, 40)))) return row;
+        if (hl && rn) {
+            const a = hl.slice(0, 40);
+            const b = rn.slice(0, 40);
+            if (a && b && (hl.includes(rn.slice(0, 35)) || rn.includes(a) || a === b)) return row;
+        }
+    }
+    return null;
+};
+
+const buildFallbackReelPerfSummary = (r, flags = []) => {
+    if (!r) return '—';
+    const views = Number(r.views || r.reach || 0);
+    const reach = Number(r.reach || r.views || 0);
+    let engPct = r.engagementRate ?? r.engagementRatePct;
+    if (engPct == null || Number.isNaN(Number(engPct))) {
+        const e = Number(r.engagements) || (Number(r.likes || 0) + Number(r.comments || 0) + Number(r.shares || 0) + Number(r.saves || 0));
+        engPct = reach > 0 ? Math.round((e / reach) * 1000) / 10 : 0;
+    } else {
+        engPct = Number(engPct);
+    }
+    const shares = Number(r.shares || 0);
+    const watch = capWatchTime(r.video_avg_time_watched ?? r.watchTime ?? 0);
+    const hook = Math.round(Number(r.hookRate ?? r.hook_rate ?? 0));
+    const engStr = engPct % 1 === 0 ? String(engPct) : engPct.toFixed(1);
+    const parts = [`${fmtReach(views)} views`, `${engStr}% engagement`, `${fmtInt(shares)} shares`, `${watch.toFixed(1)}s avg watch`, `${hook}% hook rate`];
+    const narrative = [];
+    if (flags.includes('TRENDING')) narrative.push('rapid view growth and high engagement spike');
+    if (flags.includes('STABLE_TOP_PERFORMER')) narrative.push('consistently high performance over 3+ days');
+    if (flags.includes('RISING')) narrative.push('strong early traction');
+    if (flags.includes('REPOST_RECOMMENDED')) narrative.push('high shares and saves — strong repost candidate');
+    const prefix = narrative.length ? `${narrative.join('; ')}. ` : '';
+    return `${prefix}Key metrics: ${parts.join(', ')}.`.trim();
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -598,10 +681,33 @@ const lineLooksLikeContactFooter = (s) => {
     return false;
 };
 
+/** “Dr. Name | My Health School” style byline — not the creative hook. */
+const lineLooksLikeReelSignature = (s) => {
+    const t = String(s || '').trim();
+    if (!t) return true;
+    const low = t.toLowerCase();
+    if (/\b(my\s+health\s+school|^\s*my\s+health\s+school)\b/i.test(t)) return true;
+    if (/^dr\.?\s+/i.test(t) && t.length < 72 && !/[?!…]/.test(t)) {
+        if (!/\b(benefits|loss|weight|how|why|what|secret|tip|explains|watch|reel|body|health\s+tip)\b/i.test(low)) return true;
+    }
+    if (/\|\s*my\s+health\s+school\b/i.test(t) && t.length < 120) return true;
+    return false;
+};
+
+const lineLooksLikeFollowHandleCta = (s) => {
+    const t = String(s || '').trim();
+    if (!t) return false;
+    if (/^follow\s+@/i.test(t)) return true;
+    if (/\bfollow\s+@[\w.]+\b/i.test(t) && /\b(for\s+more|more\s+tips|tips|updates)\b/i.test(t.toLowerCase())) return true;
+    return false;
+};
+
 const scoreReelTitleLine = (line) => {
     if (!line) return -1e9;
     let score = line.length;
     if (lineLooksLikeContactFooter(line)) score -= 500;
+    if (lineLooksLikeFollowHandleCta(line)) score -= 450;
+    if (lineLooksLikeReelSignature(line)) score -= 400;
     if (/[?!…]/.test(line)) score += 35;
     if (/\b(benefits|weight|loss|how\s+to|why\s+|doctor|dr\.)\b/i.test(line)) score += 25;
     return score;
@@ -613,11 +719,20 @@ const pickReelTitleFromCaption = (caption, maxLen = 120) => {
     const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (lines.length === 0) return 'Reel';
 
+    let bodyLines = lines;
+    if (lines.length >= 2 && lineLooksLikeFollowHandleCta(lines[0])) {
+        bodyLines = lines.slice(1);
+    }
+    if (bodyLines.length === 0) return 'Reel';
+
     let ordered = [];
-    if (lines.length >= 2) {
-        ordered = lines;
+    if (bodyLines.length >= 2) {
+        ordered = bodyLines;
     } else {
-        const one = lines[0];
+        const one = bodyLines[0];
+        if (lineLooksLikeFollowHandleCta(one) && !one.includes('|')) {
+            return 'Reel';
+        }
         if (one.includes('|')) {
             ordered = one.split('|').map((p) => p.trim()).filter(Boolean);
         } else if (lineLooksLikeContactFooter(one)) {
@@ -628,28 +743,104 @@ const pickReelTitleFromCaption = (caption, maxLen = 120) => {
         }
     }
 
-    let chosen = ordered.find((c) => c && !lineLooksLikeContactFooter(c)) || '';
-    if (!chosen) chosen = ordered[0] || '';
+    const work = ordered.filter((c) => !lineLooksLikeFollowHandleCta(c));
+    const parts = work.length ? work : ordered;
+
+    const usable = (c) => c && !lineLooksLikeContactFooter(c) && !lineLooksLikeReelSignature(c) && !lineLooksLikeFollowHandleCta(c);
+    let chosen = parts.find((c) => usable(c)) || '';
+    if (!chosen) chosen = parts.find((c) => c && !lineLooksLikeContactFooter(c) && !lineLooksLikeFollowHandleCta(c)) || '';
+    if (!chosen) chosen = parts[0] || '';
     chosen = chosen.trim();
     if (lineLooksLikeContactFooter(chosen)) {
         const stripped = trimmed.replace(/^\s*for\s+appointment\s*[—\-–:]?\s*[^|]*\|\s*/i, '').trim();
         if (stripped && !lineLooksLikeContactFooter(stripped)) chosen = stripped;
     }
-    if (!chosen || lineLooksLikeContactFooter(chosen)) {
-        const sorted = [...ordered].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
+    if (!chosen || lineLooksLikeContactFooter(chosen) || lineLooksLikeReelSignature(chosen)) {
+        const sorted = [...parts].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
         chosen = (sorted[0] || chosen || 'Reel').trim();
+    }
+    /* Only signature / brand pipe parts left (e.g. Dr… | My Health School) — show together, not “Follow @…”. */
+    const noFollow = parts.filter((c) => !lineLooksLikeFollowHandleCta(c));
+    const hasContentHook = noFollow.some((c) => usable(c));
+    if (!hasContentHook && noFollow.length >= 2) {
+        const sigJoin = noFollow.filter((c) => lineLooksLikeReelSignature(c) || /\b(dr\.|doctor|school|clinic)\b/i.test(c));
+        if (sigJoin.length >= 2) {
+            chosen = sigJoin.join(' | ').trim();
+        }
     }
     if (!chosen) return 'Reel';
     if (chosen.length <= maxLen) return chosen;
     return `${chosen.slice(0, maxLen - 1)}…`;
 };
 
+/** Text after the chosen title on the first caption line (e.g. “Dr… | Brand”). */
+const pickReelSubtitleFromCaption = (caption, primaryTitle, maxLen = 140) => {
+    if (!caption || typeof caption !== 'string' || !primaryTitle) return '';
+    const firstLine = caption.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+    if (!firstLine.includes('|')) return '';
+    const parts = firstLine.split('|').map((p) => p.trim()).filter(Boolean);
+    if (parts.length < 2) return '';
+    const key = primaryTitle.trim().toLowerCase();
+    let idx = parts.findIndex((p) => {
+        const pl = p.toLowerCase();
+        return pl === key || key.startsWith(pl) || pl.startsWith(key.slice(0, Math.min(28, key.length)));
+    });
+    if (idx < 0) idx = 0;
+    const rest = parts.slice(idx + 1);
+    if (rest.length === 0) return '';
+    let sub = rest.join(' | ');
+    if (sub.length > maxLen) sub = `${sub.slice(0, maxLen - 1)}…`;
+    return sub;
+};
+
+/** First caption line for snapshot card (long hook + emoji + “Dr… |” on one line), after skipping a leading “Follow @…”. */
+const pickReelHeadlineLineFromCaption = (caption, maxLen = 200) => {
+    if (!caption || typeof caption !== 'string') return '';
+    const lines = caption.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return '';
+    let body = lines;
+    if (lines.length >= 2 && lineLooksLikeFollowHandleCta(lines[0])) body = lines.slice(1);
+    const first = body[0] || lines[0] || '';
+    if (!first) return '';
+    return first.length <= maxLen ? first : `${first.slice(0, maxLen - 1)}…`;
+};
+
+/** Sanitize watch time — Meta sometimes returns impossibly high values */
+const capWatchTime = (raw) => Math.min(Number(raw) || 0, 120);
+
 const buildReelResult = (top) => {
     const reach = Number(top.reach) || Number(top.views) || 0;
-    const engagements = Number(top.total_interactions) || (Number(top.likes) + Number(top.comments)) || 0;
+    const likes = Number(top.likes) || 0;
+    const comments = Number(top.comments) || 0;
+    const shares = Number(top.shares) || 0;
     const saves = Number(top.saved) || 0;
+    const engagements = Number(top.total_interactions) || (likes + comments + shares + saves);
     const name = pickReelTitleFromCaption(top.caption, 120);
-    return { name, platform: 'Instagram', reach, engagements, saves, caption: top.caption, permalink: top.permalink, timestamp: top.timestamp || '', thumbnail_url: top.thumbnail_url || top.media_url || '', likes: Number(top.likes) || 0, comments: Number(top.comments) || 0, shares: Number(top.shares) || 0, views: Number(top.views) || Number(top.video_views) || 0 };
+    const headlineLine = pickReelHeadlineLineFromCaption(top.caption, 200) || name;
+    const subtitle = pickReelSubtitleFromCaption(top.caption, name, 140);
+    const hookRate = Math.min(Number(top.hook_rate || 0), 100);
+    const video_avg_time_watched = capWatchTime(top.video_avg_time_watched);
+    const engagementRatePct = reach > 0 ? Math.round((engagements / reach) * 1000) / 10 : 0;
+    return {
+        name,
+        headlineLine,
+        subtitle,
+        platform: 'Instagram',
+        reach,
+        engagements,
+        saves,
+        caption: top.caption,
+        permalink: top.permalink,
+        timestamp: top.timestamp || '',
+        thumbnail_url: top.thumbnail_url || top.media_url || '',
+        likes,
+        comments,
+        shares,
+        views: Number(top.views) || Number(top.video_views) || 0,
+        hookRate,
+        video_avg_time_watched,
+        engagementRatePct
+    };
 };
 
 const filterReels = (mediaPayload, period = null) => {
@@ -661,9 +852,6 @@ const filterReels = (mediaPayload, period = null) => {
     }
     return reels;
 };
-
-/** Sanitize watch time — Meta sometimes returns impossibly high values */
-const capWatchTime = (raw) => Math.min(Number(raw) || 0, 120);
 
 /** Performance Score = weighted sum of reel metrics (sanitized inputs) */
 const computeReelScore = (reel) => {
@@ -693,7 +881,7 @@ const pickBestReel = (mediaPayload, period = null) => {
 /**
  * Rolling N-day tab: strict window first, then optional wider windows, then full batch (never leave card blank when IG has data).
  */
-const pickBestReelForRollingTab = (mediaPayload, endYmd, numDays, widerDays) => {
+const pickBestReelForRollingTab = (mediaPayload, endYmd, numDays, widerDays, finalCapDays = 90) => {
     const strict = pickBestReel(mediaPayload, rollingDaysEndingOn(endYmd, numDays));
     if (strict) return strict;
     for (const w of widerDays || []) {
@@ -706,13 +894,16 @@ const pickBestReelForRollingTab = (mediaPayload, endYmd, numDays, widerDays) => 
             };
         }
     }
-    const any = pickBestReel(mediaPayload, null);
-    if (any) {
-        return {
-            ...any,
-            snapshotFallbackNote: ' No reel in this period in the loaded batch — showing top reel from Instagram data returned.',
-            hideReelPublishTime: true
-        };
+    const maxWider = (widerDays && widerDays.length) ? Math.max(...widerDays) : numDays;
+    if (finalCapDays != null && finalCapDays > maxWider) {
+        const capped = pickBestReel(mediaPayload, rollingDaysEndingOn(endYmd, finalCapDays));
+        if (capped) {
+            return {
+                ...capped,
+                snapshotFallbackNote: ` No reel in the last ${numDays} days in range — showing top reel within the last ${finalCapDays} days.`,
+                hideReelPublishTime: true
+            };
+        }
     }
     return null;
 };
@@ -769,11 +960,11 @@ const pickBestReelForLast30Tab = (mediaPayload, snap) => {
             hideReelPublishTime: true
         };
     }
-    const any = pickBestReel(mediaPayload, null);
-    if (any) {
+    const roll120 = pickBestReel(mediaPayload, rollingDaysEndingOn(end, 120));
+    if (roll120) {
         return {
-            ...any,
-            snapshotFallbackNote: ' No reels in the last 30 days in the loaded batch — showing top reel from Instagram data returned.',
+            ...roll120,
+            snapshotFallbackNote: ' No reels in the last 30 days in the current sync — showing top reel from the last ~120 days.',
             hideReelPublishTime: true
         };
     }
@@ -933,10 +1124,10 @@ const defaultAdsData = {
 };
 
 const defaultReelsData = {
-    today: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    last_7_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    last_14_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' },
-    last_30_days: { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'Loading…', action: 'MONITOR' }
+    today: { name: '—', headlineLine: '', subtitle: '', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, hookRate: 0, video_avg_time_watched: 0, engagementRatePct: 0, reason: 'Loading…', action: 'MONITOR', thumbnail_url: '', permalink: '', timestamp: '', snapshotFallbackNote: '' },
+    last_7_days: { name: '—', headlineLine: '', subtitle: '', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, hookRate: 0, video_avg_time_watched: 0, engagementRatePct: 0, reason: 'Loading…', action: 'MONITOR', thumbnail_url: '', permalink: '', timestamp: '', snapshotFallbackNote: '' },
+    last_14_days: { name: '—', headlineLine: '', subtitle: '', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, hookRate: 0, video_avg_time_watched: 0, engagementRatePct: 0, reason: 'Loading…', action: 'MONITOR', thumbnail_url: '', permalink: '', timestamp: '', snapshotFallbackNote: '' },
+    last_30_days: { name: '—', headlineLine: '', subtitle: '', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, hookRate: 0, video_avg_time_watched: 0, engagementRatePct: 0, reason: 'Loading…', action: 'MONITOR', thumbnail_url: '', permalink: '', timestamp: '', snapshotFallbackNote: '' }
 };
 
 export default function AIInsights() {
@@ -970,6 +1161,21 @@ export default function AIInsights() {
     const [qualityError, setQualityError] = useState(null);
     const [qualityResult, setQualityResult] = useState(null);
     const [qualityScores, setQualityScores] = useState([]);
+    const [leadDownloadOpen, setLeadDownloadOpen] = useState(false);
+    const leadDownloadRef = useRef(null);
+    const [satSort, setSatSort] = useState({ field: 'saturation_index', dir: 'desc' });
+    const [fatSort, setFatSort] = useState({ field: 'fatigue_score', dir: 'desc' });
+    const [leadSort, setLeadSort] = useState({ field: 'score', dir: 'desc' });
+    useEffect(() => {
+        if (!leadDownloadOpen) return;
+        const handler = (e) => {
+            if (leadDownloadRef.current && !leadDownloadRef.current.contains(e.target)) {
+                setLeadDownloadOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [leadDownloadOpen]);
     const [reelAnalysis, setReelAnalysis] = useState(null);
 
     const [insightsDatePreset, setInsightsDatePreset] = useState('last_30_days');
@@ -1304,6 +1510,47 @@ export default function AIInsights() {
     const displayReel = !reelSlotLooksEmpty(rawReel)
         ? rawReel
         : (hasUsableAnalysisReel ? analysisReelForPeriod : null);
+
+    /** Thumbnail / subtitle / link: fill from snapshot slot when analysis row omits them. */
+    const reelForCard = useMemo(() => {
+        if (!displayReel) return null;
+        const thumb = String(displayReel.thumbnail_url || rawReel?.thumbnail_url || '').trim();
+        const permalink = String(displayReel.permalink || rawReel?.permalink || '').trim();
+        const cap = displayReel.caption || rawReel?.caption || '';
+        let subtitle = String(displayReel.subtitle || '').trim();
+        if (!subtitle && cap && displayReel.name) {
+            subtitle = pickReelSubtitleFromCaption(cap, displayReel.name, 140);
+        }
+        const headlineLine = String(displayReel.headlineLine || rawReel?.headlineLine || '').trim()
+            || (cap ? pickReelHeadlineLineFromCaption(cap, 200) : '')
+            || displayReel.name;
+        const hookRate = Math.min(Number(displayReel.hookRate ?? displayReel.hook_rate ?? rawReel?.hookRate ?? rawReel?.hook_rate ?? 0), 100);
+        const video_avg_time_watched = capWatchTime(
+            displayReel.video_avg_time_watched ?? rawReel?.video_avg_time_watched ?? displayReel.watchTime ?? rawReel?.watchTime ?? 0
+        );
+        let engagementRatePct = displayReel.engagementRate ?? displayReel.engagementRatePct ?? rawReel?.engagementRatePct ?? rawReel?.engagementRate;
+        if (engagementRatePct == null || Number.isNaN(Number(engagementRatePct))) {
+            const reach = Number(displayReel.reach || displayReel.views || rawReel?.reach || rawReel?.views || 0);
+            const eng = Number(displayReel.engagements) || Number(rawReel?.engagements)
+                || (Number(displayReel.likes || 0) + Number(displayReel.comments || 0) + Number(displayReel.shares || 0) + Number(displayReel.saves || 0));
+            engagementRatePct = reach > 0 ? Math.round((eng / reach) * 1000) / 10 : 0;
+        } else {
+            engagementRatePct = Number(engagementRatePct);
+        }
+        const snapshotFallbackNote = String(displayReel.snapshotFallbackNote || rawReel?.snapshotFallbackNote || '').trim();
+        return {
+            ...displayReel,
+            thumbnail_url: thumb,
+            permalink,
+            subtitle,
+            headlineLine,
+            hookRate,
+            video_avg_time_watched,
+            engagementRatePct,
+            snapshotFallbackNote
+        };
+    }, [displayReel, rawReel]);
+
     /** Merge flags from intelligence lists + period bests so Repost / Stable pills show for every tab, not only when analysis row wins. */
     const displayReelFlags = useMemo(() => {
         const base = displayReel?.flags || [];
@@ -1325,6 +1572,23 @@ export default function AIInsights() {
         [reelAnalysis.monthly_best_reel, reelAnalysis.this_week_best_reel, reelAnalysis.daily_best_reel, reelAnalysis.last_week_best_reel, reelAnalysis.all_time_best_reel].forEach(addFrom);
         return [...merge];
     }, [reelAnalysis, displayReel]);
+
+    const reelPerfSummary = useMemo(() => {
+        if (!reelForCard) return '—';
+        const matched = findMatchedAnalysisReel(reelForCard, reelAnalysis);
+        let text = '';
+        if (matched?.reason && String(matched.reason).trim()) {
+            text = String(matched.reason).trim();
+        } else {
+            text = buildFallbackReelPerfSummary(reelForCard, displayReelFlags);
+        }
+        const note = String(reelForCard.snapshotFallbackNote || '').trim();
+        if (note && !text.includes(note.slice(0, Math.min(28, note.length)))) {
+            text = `${text}${text.endsWith('.') ? '' : '.'} ${note}`;
+        }
+        return text;
+    }, [reelForCard, reelAnalysis, displayReelFlags]);
+
     const flagLabels = { TRENDING: 'Trending Reel', REPOST_RECOMMENDED: 'Repost Recommended', RISING: 'Rising Reel', STABLE_TOP_PERFORMER: 'Stable Top Performer' };
     const flagColors = { TRENDING: '#ef4444', REPOST_RECOMMENDED: '#8b5cf6', RISING: '#f59e0b', STABLE_TOP_PERFORMER: '#22c55e' };
     const flagIcons = { TRENDING: 'fa-fire', REPOST_RECOMMENDED: 'fa-retweet', RISING: 'fa-arrow-trend-up', STABLE_TOP_PERFORMER: 'fa-shield-check' };
@@ -1521,7 +1785,22 @@ export default function AIInsights() {
         'How to reach ₹600 CPL?',
         'Best audience segment?',
         'When will audience saturate?',
-        'Best WhatsApp message today?'
+        'Best WhatsApp message today?',
+        'How should I split budget across campaigns?',
+        'Why did spend go up but leads drop?',
+        'Which ad has the best hook rate vs CPL?',
+        'Should I scale the top reel or double down on ads?',
+        'How do I fix high CPM in the last 7 days?',
+        'What to test next: creative, audience, or placement?',
+        'How can I improve lead quality without raising CPL?',
+        'Which lookalike or interest stack makes sense now?',
+        'Is my funnel bottleneck awareness or conversion?',
+        'What metrics should I watch daily vs weekly?',
+        'How to refresh fatigued creatives safely?',
+        'Compare Reels vs ad creatives for cost per lead.',
+        'What’s a realistic CPL target for my niche?',
+        'How much should I increase budget after a winning ad?',
+        'When should I kill an ad vs let it learn?'
     ], []);
 
     const fatigueCreativeInsight = useMemo(() => {
@@ -1540,7 +1819,7 @@ export default function AIInsights() {
     }, [fatigueResult, recommendations, currentAd]);
 
     const buildAskContext = useCallback(() => {
-        const reel = displayReel;
+        const reel = reelForCard;
         return {
             dateRange: resolvedInsightsRange,
             activePeriod: periodLabel,
@@ -1555,11 +1834,19 @@ export default function AIInsights() {
             bestReel: reel
                 ? {
                     name: reel.name,
+                    headlineLine: reel.headlineLine,
+                    subtitle: reel.subtitle,
+                    thumbnail_url: reel.thumbnail_url,
+                    permalink: reel.permalink,
                     reach: reel.reach,
                     views: reel.views,
                     engagements: reel.engagements,
                     saves: reel.saves,
-                    reason: reel.reason
+                    hookRate: reel.hookRate,
+                    engagementRatePct: reel.engagementRatePct,
+                    video_avg_time_watched: reel.video_avg_time_watched,
+                    reason: reel.reason,
+                    performanceSummary: reelPerfSummary
                 }
                 : null,
             insights: (insights || []).slice(0, 6).map((i) => ({
@@ -1594,7 +1881,8 @@ export default function AIInsights() {
         resolvedInsightsRange,
         periodLabel,
         currentAd,
-        displayReel,
+        reelForCard,
+        reelPerfSummary,
         insights,
         recommendations,
         saturationResult,
@@ -1667,6 +1955,96 @@ export default function AIInsights() {
     const scrollToId = (id) => {
         const el = document.getElementById(id);
         el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+
+    const allLeadScoringRows = qualityResult?.samples ?? qualityScores;
+
+    const sortRows = (rows, field, dir) => {
+        if (!field || !rows?.length) return rows ?? [];
+        return [...rows].sort((a, b) => {
+            const av = a[field] ?? (typeof a[field] === 'number' ? 0 : '');
+            const bv = b[field] ?? (typeof b[field] === 'number' ? 0 : '');
+            const cmp = typeof av === 'number' && typeof bv === 'number'
+                ? av - bv
+                : String(av).localeCompare(String(bv));
+            return dir === 'desc' ? -cmp : cmp;
+        });
+    };
+
+    const handleSort = (setter, field) => {
+        setter(prev => ({ field, dir: prev.field === field && prev.dir === 'desc' ? 'asc' : 'desc' }));
+    };
+
+    const SortTh = ({ label, field, sort, setSort, align = 'left' }) => {
+        const active = sort.field === field;
+        return (
+            <th className={align === 'right' ? 'text-end' : ''} style={{ fontSize: '0.7rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none' }} onClick={() => handleSort(setSort, field)}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', justifyContent: align === 'right' ? 'flex-end' : 'flex-start', width: '100%' }}>
+                    {label}
+                    <span style={{ display: 'inline-flex', flexDirection: 'column', fontSize: '0.5rem', lineHeight: '0.65', marginLeft: '2px' }}>
+                        <span style={{ color: active && sort.dir === 'asc'  ? '#2563eb' : '#9ca3af', opacity: active && sort.dir === 'asc'  ? 1 : 0.5 }}>▲</span>
+                        <span style={{ color: active && sort.dir === 'desc' ? '#2563eb' : '#9ca3af', opacity: active && sort.dir === 'desc' ? 1 : 0.5, marginTop: '-2px' }}>▼</span>
+                    </span>
+                </span>
+            </th>
+        );
+    };
+
+    const sortedSatCampaigns = sortRows(saturationResult?.campaigns, satSort.field, satSort.dir);
+    const sortedFatCreatives = sortRows(fatigueResult?.creatives, fatSort.field, fatSort.dir);
+    const sortedLeadRows     = sortRows(allLeadScoringRows, leadSort.field, leadSort.dir);
+    const leadScoringRows    = sortedLeadRows.slice(0, 50);
+
+    const downloadLeadsCSV = () => {
+        const headers = ['Lead', 'Phone Number', 'Sugar Segment', 'Score', 'Tier', 'Category', 'Next Action'];
+        const rows = allLeadScoringRows.map(r => [
+            r.name || '—',
+            r.phone || '—',
+            r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—',
+            r.score ?? '—',
+            inferLeadTierFromRow(r),
+            r.category || '—',
+            r.action_timing || mhsLeadTierActionTiming(inferLeadTierFromRow(r)),
+        ].map(v => `"${String(v).replace(/"/g, '""')}"`));
+        const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'lead-intelligence-scoring.csv';
+        a.click();
+        setLeadDownloadOpen(false);
+    };
+
+    const downloadLeadsExcel = async () => {
+        const ExcelJS = (await import('exceljs')).default;
+        const wb = new ExcelJS.Workbook();
+        const ws = wb.addWorksheet('Lead Scoring');
+        ws.columns = [
+            { header: 'Lead', key: 'name', width: 24 },
+            { header: 'Phone Number', key: 'phone', width: 18 },
+            { header: 'Sugar Segment', key: 'sugar_segment', width: 16 },
+            { header: 'Score', key: 'score', width: 8 },
+            { header: 'Tier', key: 'tier', width: 10 },
+            { header: 'Category', key: 'category', width: 12 },
+            { header: 'Next Action', key: 'next_action', width: 32 },
+        ];
+        ws.getRow(1).font = { bold: true };
+        allLeadScoringRows.forEach(r => ws.addRow({
+            name: r.name || '—',
+            phone: r.phone || '—',
+            sugar_segment: r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—',
+            score: r.score ?? '—',
+            tier: inferLeadTierFromRow(r),
+            category: r.category || '—',
+            next_action: r.action_timing || mhsLeadTierActionTiming(inferLeadTierFromRow(r)),
+        }));
+        const buf = await wb.xlsx.writeBuffer();
+        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'lead-intelligence-scoring.xlsx';
+        a.click();
+        setLeadDownloadOpen(false);
     };
 
     return (
@@ -2120,35 +2498,62 @@ export default function AIInsights() {
                     </div>
                     <div className="ai2-perf-mini ai2-perf-mini--reel">
                             <h3>Best reel</h3>
-                            <p className="ai2-perf-name">{displayReel?.name || '—'}</p>
-                            {displayReel?.timestamp && (
-                                <p className="ai2-perf-dates">{fmtDateTime(displayReel.timestamp)}</p>
-                            )}
-                            {!displayReel?.timestamp && activeTimeWindow === 'today' && displayReel?.hideReelPublishTime && (currentAd?.dateStart || currentAd?.dateStop) && (
-                                <p className="ai2-perf-dates">
-                                    Snapshot day (same as Best ad): {fmtDate(currentAd.dateStart || currentAd.dateStop)}
-                                    {currentAd.dateStop && currentAd.dateStop !== currentAd.dateStart ? ` — ${fmtDate(currentAd.dateStop)}` : ''}
-                                </p>
-                            )}
-                            {!displayReel?.timestamp && snapshotRollingLabelPeriod && displayReel?.hideReelPublishTime && snapshotRollingLabelPeriod.from && snapshotRollingLabelPeriod.to && (
-                                <p className="ai2-perf-dates">
-                                    Period: {fmtDate(snapshotRollingLabelPeriod.from)} — {fmtDate(snapshotRollingLabelPeriod.to)}
-                                </p>
-                            )}
-                            <p className="ai2-perf-meta">
-                                {displayReel?.hookRate != null && displayReel.hookRate > 0 ? `Hook ${displayReel.hookRate}% · ` : ''}
-                                {fmtReach(displayReel?.views || displayReel?.reach || 0)} views
-                            </p>
-                            <p className="ai2-perf-reason">{displayReel?.reason || '—'}</p>
-                            {displayReelFlags.length > 0 && (
-                                <div className="ai2-reel-flag-row">
-                                    {displayReelFlags.map((f) => (
-                                        <span key={f} className="ai2-mini-pill" style={{ background: flagColors[f] }}>
-                                            <i className={`fas ${flagIcons[f]}`} /> {flagLabels[f]}
+                            <div className="ai2-perf-reel-row">
+                                {reelForCard?.thumbnail_url ? (
+                                    reelForCard.permalink ? (
+                                        <a
+                                            href={reelForCard.permalink}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="ai2-perf-reel-thumb-wrap"
+                                            aria-label="Open reel on Instagram"
+                                        >
+                                            <img src={reelForCard.thumbnail_url} alt="" className="ai2-perf-reel-thumb" loading="lazy" />
+                                        </a>
+                                    ) : (
+                                        <span className="ai2-perf-reel-thumb-wrap">
+                                            <img src={reelForCard.thumbnail_url} alt="" className="ai2-perf-reel-thumb" loading="lazy" />
                                         </span>
-                                    ))}
+                                    )
+                                ) : null}
+                                <div className="ai2-perf-reel-body">
+                                    <p className="ai2-perf-name ai2-perf-reel-headline">{reelForCard?.headlineLine || reelForCard?.name || '—'}</p>
+                                    {reelForCard?.subtitle
+                                    && !String(reelForCard.headlineLine || '').includes(String(reelForCard.subtitle).trim()) ? (
+                                        <p className="ai2-perf-reel-sub">{reelForCard.subtitle}</p>
+                                    ) : null}
+                                    {reelForCard?.timestamp && (
+                                        <p className="ai2-perf-dates">{fmtDateTime(reelForCard.timestamp)}</p>
+                                    )}
+                                    {!reelForCard?.timestamp && activeTimeWindow === 'today' && reelForCard?.hideReelPublishTime && (currentAd?.dateStart || currentAd?.dateStop) && (
+                                        <p className="ai2-perf-dates">
+                                            Snapshot day (same as Best ad): {fmtDate(currentAd.dateStart || currentAd.dateStop)}
+                                            {currentAd.dateStop && currentAd.dateStop !== currentAd.dateStart ? ` — ${fmtDate(currentAd.dateStop)}` : ''}
+                                        </p>
+                                    )}
+                                    {!reelForCard?.timestamp && snapshotRollingLabelPeriod && reelForCard?.hideReelPublishTime && snapshotRollingLabelPeriod.from && snapshotRollingLabelPeriod.to && (
+                                        <p className="ai2-perf-dates">
+                                            Period: {fmtDate(snapshotRollingLabelPeriod.from)} — {fmtDate(snapshotRollingLabelPeriod.to)}
+                                        </p>
+                                    )}
+                                    <p className="ai2-perf-meta">
+                                        {reelForCard?.hookRate != null && reelForCard.hookRate > 0
+                                            ? `Hook ${Math.round(Number(reelForCard.hookRate))}% · `
+                                            : ''}
+                                        {fmtReach(reelForCard?.views || reelForCard?.reach || 0)} views
+                                    </p>
+                                    <p className="ai2-perf-reel-summary">{reelPerfSummary}</p>
+                                    {displayReelFlags.length > 0 && (
+                                        <div className="ai2-reel-flag-row">
+                                            {displayReelFlags.map((f) => (
+                                                <span key={f} className="ai2-mini-pill" style={{ background: flagColors[f] }}>
+                                                    <i className={`fas ${flagIcons[f]}`} /> {flagLabels[f]}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
-                            )}
+                            </div>
                     </div>
                 </div>
             </details>
@@ -2187,253 +2592,256 @@ export default function AIInsights() {
                 </div>
             </div>
 
-            <section id="ai2-detail-sat" className="ai2-detail-block">
-                <h3 className="ai2-h3">Lead saturation · campaigns</h3>
-                <button type="button" className="ai2-btn-secondary" onClick={fetchLeadSaturation} disabled={saturationLoading}>
-                    {saturationLoading ? 'Analysing…' : 'Re-run analysis'}
-                </button>
-                {saturationResult?.campaigns?.length > 0 && (
-                    <div className="ai2-table-wrap">
-                        <table className="ai2-table">
-                            <thead>
-                                <tr>
-                                    <th>Ad account</th>
-                                    <th>Campaign</th>
-                                    <th>Freq</th>
-                                    <th>Freq Δ</th>
-                                    <th>Reach %</th>
-                                    <th>Index</th>
-                                    <th>CPM Δ</th>
-                                    <th>CTR Δ</th>
-                                    <th>1st imp %</th>
-                                    <th>Signal 5</th>
-                                    <th>Days*</th>
-                                    <th>CPL</th>
-                                    <th>Dup %</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {saturationResult.campaigns.map((c, i) => (
-                                    <tr key={c.campaign_id || i}>
-                                        <td
-                                            className={c.ad_account_name?.trim() ? undefined : 'ai2-td-mono'}
-                                            title={
-                                                c.ad_account_name?.trim()
-                                                    ? fmtAdAccountId(c.ad_account_id)
-                                                    : undefined
-                                            }
-                                        >
-                                            {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
-                                        </td>
-                                        <td>{c.campaign_name || c.campaign_id}</td>
-                                        <td>{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
-                                        <td>
-                                            {c.freq_wow_pct != null
-                                                ? `${c.freq_wow_pct > 0 ? '+' : ''}${Number(c.freq_wow_pct).toFixed(0)}%`
-                                                : '—'}
-                                        </td>
-                                        <td>
-                                            {c.reach_pct != null
-                                                ? `${Number(c.reach_pct).toFixed(0)}%${c.reach_pct_is_estimated ? ' ~' : ''}`
-                                                : '—'}
-                                        </td>
-                                        <td>{c.saturation_index != null ? Number(c.saturation_index).toFixed(0) : (c.score ?? '—')}</td>
-                                        <td>{c.cpm_wow_pct != null ? `${c.cpm_wow_pct > 0 ? '+' : ''}${Number(c.cpm_wow_pct).toFixed(0)}%` : '—'}</td>
-                                        <td>{c.ctr_drop_pct != null ? `${Number(c.ctr_drop_pct).toFixed(0)}%` : '—'}</td>
-                                        <td>
-                                            {c.first_time_impression_pct != null
-                                                ? `${Number(c.first_time_impression_pct).toFixed(0)}%`
-                                                : '—'}
-                                        </td>
-                                        <td title={c.signal5_fix || undefined}>
-                                            {c.signal5_label || '—'}
-                                        </td>
-                                        <td>
-                                            {c.days_until_saturation_adjusted != null
-                                                ? `${Math.round(c.days_until_saturation_adjusted)}${c.days_is_estimated ? ' ~' : ''}`
-                                                : '—'}
-                                        </td>
-                                        <td>{typeof c.cpl === 'number' ? fmtMoney(c.cpl) : '—'}</td>
-                                        <td>{typeof c.duplicate_rate === 'number' ? `${c.duplicate_rate.toFixed(1)}%` : '—'}</td>
-                                        <td>{c.status}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                        <p className="ai2-muted ai2-table-footnote">
-                            *<strong>Meta</strong> audience = ad set estimate or <strong>reachestimate</strong> (full targeting, then geo/demographic only). Values marked <strong>~</strong> use frequency-band heuristics for display only; <strong>status</strong> and <strong>index</strong> still use Meta reach when available, otherwise frequency + CPM/CTR.
-                            {' '}
-                            <strong>Signal 4</strong>: first-time impression % from Meta (impression-weighted); below 30% confirms saturation. If Meta omits the field, 1st imp % shows —.
-                            {' '}
-                            <strong>Signal 5</strong>: CTR drop vs prior + frequency Δ + CPM Δ — hover the cell for the MHS fix (expand audience / change creative / urgent).
-                            {' '}
-                            Exact Days (MHS) = (15% × audience estimate) ÷ daily reach ÷ 3.5 when Meta provides an audience size.
-                        </p>
+            <div id="ai2-detail-sat" className="ai2-analysis-card">
+                <div className="ai2-analysis-card-header">
+                    <strong className="ai2-analysis-card-title">
+                        <span style={{ fontSize: '1.1rem' }}>📉</span> Lead Saturation · Campaigns
+                    </strong>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        {saturationResult?.campaigns?.length > 0 && (
+                            <small className="ai2-analysis-card-meta">{saturationResult.campaigns.length} campaign(s)</small>
+                        )}
+                        <small className="ai2-analysis-card-meta">MHS index · Signal 4 · Signal 5</small>
+                        <button type="button" className="ai2-btn-secondary" style={{ margin: 0 }} onClick={fetchLeadSaturation} disabled={saturationLoading}>
+                            {saturationLoading ? <><i className="fas fa-spinner fa-spin" /> Analysing…</> : <><i className="fas fa-rotate-right" /> Re-run analysis</>}
+                        </button>
                     </div>
-                )}
-            </section>
-
-            <section id="ai2-detail-fatigue" className="ai2-detail-block">
-                <h3 className="ai2-h3">Creative fatigue · ads</h3>
-                <button type="button" className="ai2-btn-secondary" onClick={fetchCreativeFatigue} disabled={fatigueLoading}>
-                    {fatigueLoading ? 'Analysing…' : 'Re-run analysis'}
-                </button>
-                {fatigueResult?.creatives?.length > 0 && (
-                    <div className="ai2-table-wrap">
-                        <table className="ai2-table">
-                            <thead>
+                </div>
+                {saturationResult?.campaigns?.length > 0 ? (
+                    <>
+                    <div className="ai2-scroll-table">
+                        <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
+                            <thead className="table-light" style={{ backgroundColor: 'var(--card, #f8f9fa)' }}>
                                 <tr>
-                                    <th>Ad account</th>
-                                    <th>Creative</th>
-                                    <th>Freq</th>
-                                    <th>Hook %</th>
-                                    <th>CTR %</th>
-                                    <th>CTR Δ</th>
-                                    <th>CPL</th>
-                                    <th>1st7 Δ</th>
-                                    <th>Score</th>
-                                    <th>Audit</th>
-                                    <th>Status</th>
+                                    <SortTh label="Ad Account"  field="ad_account_name"             sort={satSort} setSort={setSatSort} />
+                                    <SortTh label="Campaign"    field="campaign_name"                sort={satSort} setSort={setSatSort} />
+                                    <SortTh label="Freq"        field="frequency"                    sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Freq Δ"      field="freq_wow_pct"                 sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Reach %"     field="reach_pct"                    sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Index"       field="saturation_index"             sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="CPM Δ"       field="cpm_wow_pct"                  sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="CTR Δ"       field="ctr_drop_pct"                 sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="1st Imp %"   field="first_time_impression_pct"    sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Signal 5"    field="signal5_label"                sort={satSort} setSort={setSatSort} />
+                                    <SortTh label="Days*"       field="days_until_saturation_adjusted" sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="CPL"         field="cpl"                          sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Dup %"       field="duplicate_rate"               sort={satSort} setSort={setSatSort} align="right" />
+                                    <SortTh label="Status"      field="status"                       sort={satSort} setSort={setSatSort} />
                                 </tr>
                             </thead>
                             <tbody>
-                                {fatigueResult.creatives.map((c, i) => {
-                                    const auditKeys = c.weekly_audit
-                                        ? Object.entries(c.weekly_audit)
-                                              .filter(([, v]) => v)
-                                              .map(([k]) => k)
-                                              .join(', ')
-                                        : '';
+                                {sortedSatCampaigns.map((c, i) => {
+                                    const statusLower = String(c.status || '').toLowerCase();
+                                    const badgeClass = statusLower.includes('saturat') ? 'ai2-badge-danger' : statusLower.includes('warn') ? 'ai2-badge-warn' : 'ai2-badge-success';
+                                    const idx = c.saturation_index != null ? Number(c.saturation_index) : (c.score != null ? Number(c.score) : null);
+                                    const chipClass = idx == null ? '' : idx >= 70 ? 'ai2-chip-danger' : idx >= 40 ? 'ai2-chip-warn' : 'ai2-chip-success';
                                     return (
-                                    <tr key={c.ad_id || i}>
-                                        <td
-                                            className={c.ad_account_name?.trim() ? undefined : 'ai2-td-mono'}
-                                            title={
-                                                c.ad_account_name?.trim()
-                                                    ? fmtAdAccountId(c.ad_account_id)
-                                                    : undefined
-                                            }
-                                        >
-                                            {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
-                                        </td>
-                                        <td>{c.ad_name || c.ad_id}</td>
-                                        <td>{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
-                                        <td title={c.hook_signal_band || undefined}>
-                                            {c.hook_rate != null ? `${Number(c.hook_rate).toFixed(1)}%` : '—'}
-                                        </td>
-                                        <td>{typeof c.ctr === 'number' ? `${c.ctr.toFixed(2)}%` : '—'}</td>
-                                        <td>
-                                            {c.ctr_drop_pct != null && c.ctr_drop_pct > 0
-                                                ? `${Number(c.ctr_drop_pct).toFixed(0)}%`
-                                                : '—'}
-                                        </td>
-                                        <td>{typeof c.cpl === 'number' ? fmtMoney(c.cpl) : '—'}</td>
-                                        <td>
-                                            {c.cpl_increase_first7_pct != null && c.cpl_increase_first7_pct > 0
-                                                ? `+${Number(c.cpl_increase_first7_pct).toFixed(0)}%`
-                                                : '—'}
-                                        </td>
-                                        <td>{c.fatigue_score != null ? Number(c.fatigue_score).toFixed(1) : (c.score != null ? Number(c.score).toFixed(1) : '—')}</td>
-                                        <td className="ai2-td-mono" title={auditKeys || undefined}>
-                                            {c.weekly_audit_count != null && c.weekly_audit_count > 0
-                                                ? `${c.weekly_audit_count}`
-                                                : '0'}
-                                        </td>
-                                        <td>
-                                            <span className={`ai2-mini-badge ai2-mini-badge--${creativeStatusClass(c.status)}`}>
-                                                {creativeStatusLabel(c.status)}
-                                            </span>
-                                        </td>
-                                    </tr>
+                                        <tr key={c.campaign_id || i} style={{ cursor: 'default' }}>
+                                            <td className="text-muted small" title={c.ad_account_name?.trim() ? fmtAdAccountId(c.ad_account_id) : undefined}>
+                                                {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
+                                            </td>
+                                            <td className="fw-medium">{c.campaign_name || c.campaign_id}</td>
+                                            <td className="text-end">{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
+                                            <td className="text-end">{c.freq_wow_pct != null ? `${c.freq_wow_pct > 0 ? '+' : ''}${Number(c.freq_wow_pct).toFixed(0)}%` : '—'}</td>
+                                            <td className="text-end">{c.reach_pct != null ? `${Number(c.reach_pct).toFixed(0)}%${c.reach_pct_is_estimated ? ' ~' : ''}` : '—'}</td>
+                                            <td className="text-end">
+                                                {idx != null ? <span className={`ai2-chip ${chipClass}`}>{idx.toFixed(0)}</span> : '—'}
+                                            </td>
+                                            <td className="text-end">{c.cpm_wow_pct != null ? `${c.cpm_wow_pct > 0 ? '+' : ''}${Number(c.cpm_wow_pct).toFixed(0)}%` : '—'}</td>
+                                            <td className="text-end">{c.ctr_drop_pct != null ? `${Number(c.ctr_drop_pct).toFixed(0)}%` : '—'}</td>
+                                            <td className="text-end">{c.first_time_impression_pct != null ? `${Number(c.first_time_impression_pct).toFixed(0)}%` : '—'}</td>
+                                            <td title={c.signal5_fix || undefined}>{c.signal5_label || '—'}</td>
+                                            <td className="text-end">{c.days_until_saturation_adjusted != null ? `${Math.round(c.days_until_saturation_adjusted)}${c.days_is_estimated ? ' ~' : ''}` : '—'}</td>
+                                            <td className="text-end fw-medium">{typeof c.cpl === 'number' ? fmtMoney(c.cpl) : '—'}</td>
+                                            <td className="text-end">{typeof c.duplicate_rate === 'number' ? `${c.duplicate_rate.toFixed(1)}%` : '—'}</td>
+                                            <td><span className={`ai2-badge ${badgeClass}`}>{c.status}</span></td>
+                                        </tr>
                                     );
                                 })}
                             </tbody>
                         </table>
-                        <p className="ai2-muted ai2-table-footnote">
-                            <strong>MHS creative_state.md</strong>: Fatigue score = CTR drop×0.4 + (days ÷ adjusted lifespan)×100×0.4 + hook drop×0.2.
-                            Adjusted lifespan = ((audience × 3) ÷ daily reach) × 0.25. Status bands: Fresh 0–40, Aging 40–70, Fatigued 70–100, Severe 100+.
-                            <strong> Audit</strong> column = count of weekly checklist flags (hover for keys). Hook = 3s views ÷ impressions (else plays ÷ impressions).
-                        </p>
+                    </div>
+                    <p className="ai2-muted ai2-table-footnote mt-2 mb-0" style={{ fontSize: '0.72rem' }}>
+                        *Days = (15% × audience) ÷ daily reach ÷ 3.5. Values marked <strong>~</strong> use frequency-band heuristics.
+                        {' '}<strong>Signal 4</strong>: first-time imp % below 30% = saturated.
+                        {' '}<strong>Signal 5</strong>: hover cell for fix.
+                    </p>
+                    </>
+                ) : (
+                    <div className="text-center py-4" style={{ color: '#64748b' }}>
+                        <p className="mb-0 small">Run analysis to see saturation data for your campaigns.</p>
                     </div>
                 )}
-            </section>
+            </div>
 
-            <section id="ai2-detail-leads" className="ai2-detail-block">
-                <h3 className="ai2-h3">Lead intelligence · scoring</h3>
-                <button type="button" className="ai2-btn-secondary" onClick={fetchLeadQuality} disabled={qualityLoading}>
-                    {qualityLoading ? 'Scoring…' : 'Run scoring'}
-                </button>
-                {qualityResult?.success && (() => {
-                    const nScored = Math.max(qualityResult.scored ?? 0, qualityResult.samples?.length ?? 0);
-                    const s = qualityResult.summary;
-                    const hasStats =
-                        s &&
-                        typeof s.avg_score === 'number' &&
-                        (s.total ?? nScored) > 0;
-                    return (
-                        <p className="ai2-muted">
-                            {nScored === 0 ? (
-                                <>
-                                    <strong>No leads matched this filter.</strong> Scoring only reads rows from your{' '}
-                                    <code>Leads</code> table whose date falls in the AI Insights range{' '}
-                                    <strong>{headerDateRangeLabel}</strong>
-                                    {insightsDatePreset !== 'custom' ? (
-                                        <> (preset: {insightsPresetLabel})</>
-                                    ) : null}
-                                    . This is an empty result, not a system error. To see scores: widen the range with the date control above, use <strong>Custom</strong> to include
-                                    when your leads were captured, or sync/import leads into Supabase for that period.
-                                </>
-                            ) : (
-                                <>
-                                    Scored {nScored} lead(s) from your Leads data in this period.
-                                    {hasStats && (
-                                        <>
-                                            {' '}
-                                            Avg {s.avg_score} · Hot {s.hot_lead_rate_pct ?? '—'}%
-                                        </>
-                                    )}
-                                </>
-                            )}
-                        </p>
-                    );
-                })()}
-                {(qualityScores.length > 0 || (qualityResult && qualityResult.samples?.length > 0)) && (
-                    <div className="ai2-table-wrap">
-                        <table className="ai2-table">
-                            <thead>
+            <div id="ai2-detail-fatigue" className="ai2-analysis-card">
+                <div className="ai2-analysis-card-header">
+                    <strong className="ai2-analysis-card-title">
+                        <span style={{ fontSize: '1.1rem' }}>🔥</span> Creative Fatigue · Ads
+                    </strong>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        {fatigueResult?.creatives?.length > 0 && (
+                            <small className="ai2-analysis-card-meta">{fatigueResult.creatives.length} ad(s)</small>
+                        )}
+                        <small className="ai2-analysis-card-meta">CTR drop×0.4 + lifespan×0.4 + hook×0.2</small>
+                        <button type="button" className="ai2-btn-secondary" style={{ margin: 0 }} onClick={fetchCreativeFatigue} disabled={fatigueLoading}>
+                            {fatigueLoading ? <><i className="fas fa-spinner fa-spin" /> Analysing…</> : <><i className="fas fa-rotate-right" /> Re-run analysis</>}
+                        </button>
+                    </div>
+                </div>
+                {fatigueResult?.creatives?.length > 0 ? (
+                    <>
+                    <div className="ai2-scroll-table">
+                        <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
+                            <thead className="table-light">
                                 <tr>
-                                    <th>Lead</th>
-                                    <th>Sugar segment</th>
-                                    <th>Score</th>
-                                    <th>Tier</th>
-                                    <th>Category</th>
-                                    <th>Next action</th>
+                                    <SortTh label="Ad Account"  field="ad_account_name"          sort={fatSort} setSort={setFatSort} />
+                                    <SortTh label="Creative"    field="ad_name"                   sort={fatSort} setSort={setFatSort} />
+                                    <SortTh label="Freq"        field="frequency"                 sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="Hook %"      field="hook_rate"                 sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="CTR %"       field="ctr"                       sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="CTR Δ"       field="ctr_drop_pct"              sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="CPL"         field="cpl"                       sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="1st7 Δ"      field="cpl_increase_first7_pct"   sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="Score"       field="fatigue_score"             sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="Audit"       field="weekly_audit_count"        sort={fatSort} setSort={setFatSort} align="right" />
+                                    <SortTh label="Status"      field="status"                    sort={fatSort} setSort={setFatSort} />
                                 </tr>
                             </thead>
                             <tbody>
-                                {(qualityResult?.samples ?? qualityScores).slice(0, 50).map((r, i) => (
-                                    <tr key={r.lead_id || r.phone || i}>
-                                        <td>{r.name || r.phone || '—'}</td>
-                                        <td>{r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—'}</td>
-                                        <td>{r.score ?? '—'}</td>
-                                        <td>{inferLeadTierFromRow(r)}</td>
-                                        <td>{r.category || '—'}</td>
-                                        <td className="ai2-muted" style={{ fontSize: '0.72rem', maxWidth: '220px' }}>
-                                            {r.action_timing || mhsLeadTierActionTiming(inferLeadTierFromRow(r))}
-                                        </td>
-                                    </tr>
-                                ))}
+                                {sortedFatCreatives.map((c, i) => {
+                                    const auditKeys = c.weekly_audit ? Object.entries(c.weekly_audit).filter(([, v]) => v).map(([k]) => k).join(', ') : '';
+                                    const rawScore = c.fatigue_score != null ? Number(c.fatigue_score) : (c.score != null ? Number(c.score) : null);
+                                    const chipClass = rawScore == null ? '' : rawScore >= 100 ? 'ai2-chip-danger' : rawScore >= 70 ? 'ai2-chip-warn' : rawScore >= 40 ? 'ai2-chip-warn' : 'ai2-chip-success';
+                                    const statusLower = String(c.status || '').toLowerCase();
+                                    const badgeClass = statusLower.includes('severe') ? 'ai2-badge-danger' : statusLower.includes('fatigue') ? 'ai2-badge-warn' : statusLower.includes('aging') ? 'ai2-badge-yellow' : 'ai2-badge-success';
+                                    return (
+                                        <tr key={c.ad_id || i} style={{ cursor: 'default' }}>
+                                            <td className="text-muted small" title={c.ad_account_name?.trim() ? fmtAdAccountId(c.ad_account_id) : undefined}>
+                                                {c.ad_account_name?.trim() || fmtAdAccountId(c.ad_account_id)}
+                                            </td>
+                                            <td className="fw-medium">{c.ad_name || c.ad_id}</td>
+                                            <td className="text-end">{typeof c.frequency === 'number' ? c.frequency.toFixed(2) : '—'}</td>
+                                            <td className="text-end" title={c.hook_signal_band || undefined}>{c.hook_rate != null ? `${Number(c.hook_rate).toFixed(1)}%` : '—'}</td>
+                                            <td className="text-end">{typeof c.ctr === 'number' ? `${c.ctr.toFixed(2)}%` : '—'}</td>
+                                            <td className="text-end">{c.ctr_drop_pct != null && c.ctr_drop_pct > 0 ? `${Number(c.ctr_drop_pct).toFixed(0)}%` : '—'}</td>
+                                            <td className="text-end fw-medium">{typeof c.cpl === 'number' ? fmtMoney(c.cpl) : '—'}</td>
+                                            <td className="text-end">{c.cpl_increase_first7_pct != null && c.cpl_increase_first7_pct > 0 ? `+${Number(c.cpl_increase_first7_pct).toFixed(0)}%` : '—'}</td>
+                                            <td className="text-end">
+                                                {rawScore != null ? <span className={`ai2-chip ${chipClass}`}>{rawScore.toFixed(1)}</span> : '—'}
+                                            </td>
+                                            <td className="text-end" title={auditKeys || undefined}>{c.weekly_audit_count ?? 0}</td>
+                                            <td><span className={`ai2-badge ${badgeClass}`}>{creativeStatusLabel(c.status)}</span></td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
-                        <p className="ai2-muted ai2-table-footnote">
-                            <strong>lead-intaligetionn-state.md</strong>: Sugar {'>'}250 +40, 180–250 +30, 126–180 +20, {'<'}126 +10.
-                            Behavioural points from <code>Leads.lead_intel</code> (whatsapp_open_1h, click_link, reply_message, payment_page_visit, masterclass_attend, ask_question, previous_buyer, age).
-                            Run <code>server/migrations/lead-scores-mhs-intelligence.sql</code> for full persistence.
-                        </p>
+                    </div>
+                    <p className="ai2-muted ai2-table-footnote mt-2 mb-0" style={{ fontSize: '0.72rem' }}>
+                        Score bands: Fresh 0–40 · Aging 40–70 · Fatigued 70–100 · Severe 100+. Audit = weekly checklist flags (hover for keys).
+                    </p>
+                    </>
+                ) : (
+                    <div className="text-center py-4" style={{ color: '#64748b' }}>
+                        <p className="mb-0 small">Run analysis to see creative fatigue data for your ads.</p>
                     </div>
                 )}
-            </section>
+            </div>
+
+            <div id="ai2-detail-leads" className="ai2-analysis-card">
+                <div className="ai2-analysis-card-header">
+                    <strong className="ai2-analysis-card-title">
+                        <span style={{ fontSize: '1.1rem' }}>🎯</span> Lead Intelligence · Scoring
+                    </strong>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        {qualityResult?.success && (() => {
+                            const n = Math.max(qualityResult.scored ?? 0, qualityResult.samples?.length ?? 0);
+                            const s = qualityResult.summary;
+                            return n > 0 ? (
+                                <small className="ai2-analysis-card-meta">
+                                    {n} lead(s){s && typeof s.avg_score === 'number' ? ` · Avg ${s.avg_score} · Hot ${s.hot_lead_rate_pct ?? '—'}%` : ''}
+                                </small>
+                            ) : null;
+                        })()}
+                        <small className="ai2-analysis-card-meta">Sugar score · behavioural signals · tier</small>
+                        <button type="button" className="ai2-btn-secondary" style={{ margin: 0 }} onClick={fetchLeadQuality} disabled={qualityLoading}>
+                            {qualityLoading ? <><i className="fas fa-spinner fa-spin" /> Scoring…</> : <><i className="fas fa-rotate-right" /> Run scoring</>}
+                        </button>
+                        {allLeadScoringRows.length > 0 && (
+                            <div ref={leadDownloadRef} style={{ position: 'relative' }}>
+                                <button type="button" className="ai2-btn-secondary"
+                                    onClick={() => setLeadDownloadOpen(o => !o)}
+                                    style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <i className="fas fa-download" /> Download <i className="fas fa-chevron-down" style={{ fontSize: '0.6rem' }} />
+                                </button>
+                                {leadDownloadOpen && (
+                                    <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 200, background: 'var(--card, #fff)', border: '1px solid rgba(0,0,0,0.1)', borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)', minWidth: '185px', overflow: 'hidden' }}>
+                                        <button type="button" onClick={downloadLeadsCSV}
+                                            style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '10px 16px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.83rem', color: 'var(--text, #374151)', textAlign: 'left' }}
+                                            onMouseEnter={e => e.currentTarget.style.background = '#f3f4f6'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                                            <i className="fas fa-file-csv" style={{ color: '#16a34a', width: '16px' }} /> Download as CSV
+                                        </button>
+                                        <button type="button" onClick={downloadLeadsExcel}
+                                            style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '10px 16px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.83rem', color: 'var(--text, #374151)', textAlign: 'left' }}
+                                            onMouseEnter={e => e.currentTarget.style.background = '#f3f4f6'} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                                            <i className="fas fa-file-excel" style={{ color: '#15803d', width: '16px' }} /> Download as Excel
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+                {(qualityScores.length > 0 || (qualityResult && qualityResult.samples?.length > 0)) ? (
+                    <>
+                    <div className="ai2-scroll-table">
+                        <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
+                            <thead className="table-light">
+                                <tr>
+                                    <SortTh label="Lead"          field="name"          sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Phone Number"  field="phone"         sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Sugar Segment" field="sugar_segment" sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Score"         field="score"         sort={leadSort} setSort={setLeadSort} align="right" />
+                                    <SortTh label="Tier"          field="tier"          sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Category"      field="category"      sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Next Action"   field="action_timing" sort={leadSort} setSort={setLeadSort} />
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {leadScoringRows.map((r, i) => {
+                                    const tier = inferLeadTierFromRow(r);
+                                    const tierLower = String(tier || '').toLowerCase();
+                                    const badgeClass = tierLower === 'hot' ? 'ai2-badge-danger' : tierLower === 'warm' ? 'ai2-badge-warn' : tierLower === 'nurture' ? 'ai2-badge-info' : 'ai2-badge-muted';
+                                    const score = r.score ?? null;
+                                    const chipClass = score == null ? '' : score >= 70 ? 'ai2-chip-success' : score >= 40 ? 'ai2-chip-warn' : 'ai2-chip-muted';
+                                    return (
+                                        <tr key={r.lead_id || r.phone || i} style={{ cursor: 'default' }}>
+                                            <td className="fw-medium">{r.name || '—'}</td>
+                                            <td className="text-muted small">{r.phone || '—'}</td>
+                                            <td>{r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—'}</td>
+                                            <td className="text-end">
+                                                {score != null ? <span className={`ai2-chip ${chipClass}`}>{score}</span> : '—'}
+                                            </td>
+                                            <td><span className={`ai2-badge ${badgeClass}`}>{tier}</span></td>
+                                            <td>{r.category || '—'}</td>
+                                            <td className="text-muted small">{r.action_timing || mhsLeadTierActionTiming(tier)}</td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                    <p className="ai2-muted ai2-table-footnote mt-2 mb-0" style={{ fontSize: '0.72rem' }}>
+                        Sugar {'>'}250 = +40 · 180–250 = +30 · 126–180 = +20 · {'<'}126 = +10. Showing top 50 of {allLeadScoringRows.length} — download for all.
+                    </p>
+                    </>
+                ) : (
+                    <div className="text-center py-4" style={{ color: '#64748b' }}>
+                        <p className="mb-0 small">Run scoring to see lead intelligence data.</p>
+                    </div>
+                )}
+            </div>
         </div>
     );
 

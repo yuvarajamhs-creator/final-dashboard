@@ -4534,7 +4534,8 @@ async function handleBackfillRequest(req, res) {
         error: "Meta Access Token expired or invalid",
         details: err.response.data.error.message,
         isAuthError: true,
-        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
+        instruction:
+          "Lead batch calls need a Page Access Token. Set META_PAGE_ACCESS_TOKEN, or use a User token in META_SYSTEM_ACCESS_TOKEN that can load this page’s token, or set META_ACCESS_TOKEN to a Page token (not a user token). Then restart the server.",
       });
     }
 

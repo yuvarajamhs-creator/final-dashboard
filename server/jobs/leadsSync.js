@@ -27,35 +27,43 @@ function getSystemToken() {
  * @returns {Promise<string>} - The page access token
  */
 async function getPageAccessToken(pageId) {
-  // Option 1: Direct configuration via environment variable
-  if (process.env.META_PAGE_ACCESS_TOKEN) {
-    return process.env.META_PAGE_ACCESS_TOKEN;
-  }
-  
-  // Option 2: Fetch from Meta API using system token
+  const fromEnvPage = (process.env.META_PAGE_ACCESS_TOKEN || '').trim();
+  if (fromEnvPage) return fromEnvPage;
+
+  // Prefer Graph: exchange a User (system) token for this page's Page Access Token.
   try {
     const systemToken = getSystemToken();
     const response = await axios.get(
       `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
       {
-        params: { 
+        params: {
           fields: 'access_token',
-          access_token: systemToken 
+          access_token: systemToken,
         },
         timeout: 30000,
       }
     );
-    
-    if (!response.data || !response.data.access_token) {
-      throw new Error(`Page access token not found in API response for page ${pageId}`);
+    if (response.data?.access_token) {
+      return response.data.access_token;
     }
-    
-    return response.data.access_token;
   } catch (error) {
     const errorMsg = error.response?.data?.error?.message || error.message;
-    console.error(`[LeadsSync] Failed to fetch page access token: ${errorMsg}`);
-    throw new Error(`Failed to get page access token for page ${pageId}: ${errorMsg}. Please configure META_PAGE_ACCESS_TOKEN in environment or ensure your system token has 'pages_show_list' permission.`);
+    console.warn(`[LeadsSync] Could not fetch page token via Graph for page ${pageId}: ${errorMsg}`);
   }
+
+  const metaAccess = (process.env.META_ACCESS_TOKEN || '').trim();
+  if (metaAccess) {
+    console.warn(
+      '[LeadsSync] Using META_ACCESS_TOKEN for /leads batch; it must be a Page Access Token or Graph returns #190.'
+    );
+    return metaAccess;
+  }
+
+  throw new Error(
+    `No page access token for page ${pageId}. Options: (1) Set META_PAGE_ACCESS_TOKEN to the page token, or ` +
+      `(2) use a User token in META_SYSTEM_ACCESS_TOKEN with access to this page so GET /${pageId}?fields=access_token works, or ` +
+      `(3) set META_ACCESS_TOKEN to a Page Access Token (Lead Ads require a page token, not a user token).`
+  );
 }
 
 function sleep(ms) {
@@ -186,15 +194,9 @@ function buildLeadsRelativeUrl(formId, { fields, limit, after, since, until } = 
  * Fetch leads from Meta API for a given page and date range
  */
 async function fetchLeadsFromMeta(pageId, startDate, endDate) {
-  // Use system token for forms list
-  const systemToken = getSystemToken();
-  
-  // Use META_ACCESS_TOKEN for leads API calls
-  const accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
-  if (!accessToken) {
-    throw new Error("META_ACCESS_TOKEN missing. Please configure META_ACCESS_TOKEN in server/.env file.");
-  }
-  
+  // leadgen_forms and {form}/leads both require a Page Access Token on many apps (#190 with a user token).
+  const pageAccessToken = await getPageAccessToken(pageId);
+
   // Convert date range to Unix timestamps for Meta API
   const startTimestamp = Math.floor(startDate.getTime() / 1000);
   const endTimestamp = Math.floor(endDate.getTime() / 1000);
@@ -218,7 +220,7 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
       let responseData;
       if (formsPageCount === 0) {
         const formsResponse = await axios.get(formsUrl, {
-          headers: { Authorization: `Bearer ${systemToken}` },
+          headers: { Authorization: `Bearer ${pageAccessToken}` },
           params: { fields: formsFields, limit: 100 },
           timeout: 60000,
         });
@@ -226,7 +228,7 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
        
       } else {
         const nextResponse = await axios.get(nextUrl, {
-          headers: { Authorization: `Bearer ${systemToken}` },
+          headers: { Authorization: `Bearer ${pageAccessToken}` },
           timeout: 60000,
         });
         responseData = nextResponse.data;
@@ -303,7 +305,7 @@ async function fetchLeadsFromMeta(pageId, startDate, endDate) {
         };
       });
 
-      const batchResponses = await postGraphBatch(accessToken, batch);
+      const batchResponses = await postGraphBatch(pageAccessToken, batch);
       
       // Log raw batch response structure for debugging (only for first batch)
       if (activeForms.length === allFormIds.length) {

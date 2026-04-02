@@ -343,7 +343,7 @@ async function runLeadScoring(opts = {}) {
   return {
     success: true,
     scored: results.length,
-    samples: results.slice(0, 100),
+    samples: results,
     summary,
   };
 }

@@ -13,7 +13,7 @@ async function backfillLeads() {
     const url = `${API_BASE}/api/meta/leads/backfill?pageId=${PAGE_ID}&days=${DAYS}`;
     console.log(`Calling: ${url}`);
     
-    const response = await axios.get(url, {
+    const response = await axios.post(url, null, {
       timeout: 600000 // 10 minutes timeout for large backfills
     });
     

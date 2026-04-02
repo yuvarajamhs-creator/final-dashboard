@@ -325,27 +325,58 @@ function lineLooksLikeContactFooter(s) {
   return false;
 }
 
+function lineLooksLikeReelSignature(s) {
+  const t = String(s || '').trim();
+  if (!t) return true;
+  const low = t.toLowerCase();
+  if (/\b(my\s+health\s+school|^\s*my\s+health\s+school)\b/i.test(t)) return true;
+  if (/^dr\.?\s+/i.test(t) && t.length < 72 && !/[?!…]/.test(t)) {
+    if (!/\b(benefits|loss|weight|how|why|what|secret|tip|explains|watch|reel|body|health\s+tip)\b/i.test(low)) return true;
+  }
+  if (/\|\s*my\s+health\s+school\b/i.test(t) && t.length < 120) return true;
+  return false;
+}
+
+function lineLooksLikeFollowHandleCta(s) {
+  const t = String(s || '').trim();
+  if (!t) return false;
+  if (/^follow\s+@/i.test(t)) return true;
+  if (/\bfollow\s+@[\w.]+\b/i.test(t) && /\b(for\s+more|more\s+tips|tips|updates)\b/i.test(t.toLowerCase())) return true;
+  return false;
+}
+
 function scoreReelTitleLine(line) {
   if (!line) return -1e9;
   let score = line.length;
   if (lineLooksLikeContactFooter(line)) score -= 500;
+  if (lineLooksLikeFollowHandleCta(line)) score -= 450;
+  if (lineLooksLikeReelSignature(line)) score -= 400;
   if (/[?!…]/.test(line)) score += 35;
   if (/\b(benefits|weight|loss|how\s+to|why\s+|doctor|dr\.)\b/i.test(line)) score += 25;
   return score;
 }
 
-/** Match client AIInsights.jsx — prefer hook/body over “For Appointment / phone” captions. */
+/** Match client AIInsights.jsx — skip “Follow @…”, prefer hook; else join Dr | brand. */
 function pickReelTitleFromCaption(caption, maxLen = 120) {
   if (!caption || typeof caption !== 'string') return 'Reel';
   const trimmed = caption.trim();
   const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return 'Reel';
 
+  let bodyLines = lines;
+  if (lines.length >= 2 && lineLooksLikeFollowHandleCta(lines[0])) {
+    bodyLines = lines.slice(1);
+  }
+  if (bodyLines.length === 0) return 'Reel';
+
   let ordered = [];
-  if (lines.length >= 2) {
-    ordered = lines;
+  if (bodyLines.length >= 2) {
+    ordered = bodyLines;
   } else {
-    const one = lines[0];
+    const one = bodyLines[0];
+    if (lineLooksLikeFollowHandleCta(one) && !one.includes('|')) {
+      return 'Reel';
+    }
     if (one.includes('|')) {
       ordered = one.split('|').map((p) => p.trim()).filter(Boolean);
     } else if (lineLooksLikeContactFooter(one)) {
@@ -356,20 +387,63 @@ function pickReelTitleFromCaption(caption, maxLen = 120) {
     }
   }
 
-  let chosen = ordered.find((c) => c && !lineLooksLikeContactFooter(c)) || '';
-  if (!chosen) chosen = ordered[0] || '';
+  const work = ordered.filter((c) => !lineLooksLikeFollowHandleCta(c));
+  const parts = work.length ? work : ordered;
+
+  const usable = (c) => c && !lineLooksLikeContactFooter(c) && !lineLooksLikeReelSignature(c) && !lineLooksLikeFollowHandleCta(c);
+  let chosen = parts.find((c) => usable(c)) || '';
+  if (!chosen) chosen = parts.find((c) => c && !lineLooksLikeContactFooter(c) && !lineLooksLikeFollowHandleCta(c)) || '';
+  if (!chosen) chosen = parts[0] || '';
   chosen = chosen.trim();
   if (lineLooksLikeContactFooter(chosen)) {
     const stripped = trimmed.replace(/^\s*for\s+appointment\s*[—\-–:]?\s*[^|]*\|\s*/i, '').trim();
     if (stripped && !lineLooksLikeContactFooter(stripped)) chosen = stripped;
   }
-  if (!chosen || lineLooksLikeContactFooter(chosen)) {
-    const sorted = [...ordered].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
+  if (!chosen || lineLooksLikeContactFooter(chosen) || lineLooksLikeReelSignature(chosen)) {
+    const sorted = [...parts].sort((a, b) => scoreReelTitleLine(b) - scoreReelTitleLine(a));
     chosen = (sorted[0] || chosen || 'Reel').trim();
+  }
+  const noFollow = parts.filter((c) => !lineLooksLikeFollowHandleCta(c));
+  const hasContentHook = noFollow.some((c) => usable(c));
+  if (!hasContentHook && noFollow.length >= 2) {
+    const sigJoin = noFollow.filter((c) => lineLooksLikeReelSignature(c) || /\b(dr\.|doctor|school|clinic)\b/i.test(c));
+    if (sigJoin.length >= 2) {
+      chosen = sigJoin.join(' | ').trim();
+    }
   }
   if (!chosen) return 'Reel';
   if (chosen.length <= maxLen) return chosen;
   return `${chosen.slice(0, maxLen - 1)}…`;
+}
+
+function pickReelSubtitleFromCaption(caption, primaryTitle, maxLen = 140) {
+  if (!caption || typeof caption !== 'string' || !primaryTitle) return '';
+  const firstLine = caption.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+  if (!firstLine.includes('|')) return '';
+  const parts = firstLine.split('|').map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 2) return '';
+  const key = primaryTitle.trim().toLowerCase();
+  let idx = parts.findIndex((p) => {
+    const pl = p.toLowerCase();
+    return pl === key || key.startsWith(pl) || pl.startsWith(key.slice(0, Math.min(28, key.length)));
+  });
+  if (idx < 0) idx = 0;
+  const rest = parts.slice(idx + 1);
+  if (rest.length === 0) return '';
+  let sub = rest.join(' | ');
+  if (sub.length > maxLen) sub = `${sub.slice(0, maxLen - 1)}…`;
+  return sub;
+}
+
+function pickReelHeadlineLineFromCaption(caption, maxLen = 200) {
+  if (!caption || typeof caption !== 'string') return '';
+  const lines = caption.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return '';
+  let body = lines;
+  if (lines.length >= 2 && lineLooksLikeFollowHandleCta(lines[0])) body = lines.slice(1);
+  const first = body[0] || lines[0] || '';
+  if (!first) return '';
+  return first.length <= maxLen ? first : `${first.slice(0, maxLen - 1)}…`;
 }
 
 function buildAdSlotFromReal(bestAd) {
@@ -399,32 +473,81 @@ function buildAdSlotFromReal(bestAd) {
 
 function buildReelSlotFromReal(bestReel) {
   if (!bestReel || typeof bestReel !== 'object') {
-    return { name: '—', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'No reel data.', action: 'MONITOR', timestamp: '', thumbnail_url: '', likes: 0, comments: 0, shares: 0, views: 0, permalink: '' };
+    return {
+      name: '—',
+      headlineLine: '',
+      subtitle: '',
+      platform: 'Instagram',
+      reach: 0,
+      engagements: 0,
+      saves: 0,
+      hookRate: 0,
+      video_avg_time_watched: 0,
+      engagementRatePct: 0,
+      reason: 'No reel data.',
+      action: 'MONITOR',
+      timestamp: '',
+      thumbnail_url: '',
+      likes: 0,
+      comments: 0,
+      shares: 0,
+      views: 0,
+      permalink: '',
+      hideReelPublishTime: false,
+      snapshotFallbackNote: ''
+    };
   }
-  const reach = Number(bestReel.reach) || 0;
-  const engagements = Number(bestReel.engagements) || Number(bestReel.total_interactions) || 0;
+  const reach = Number(bestReel.reach) || Number(bestReel.views) || 0;
+  const likes = Number(bestReel.likes) || 0;
+  const comments = Number(bestReel.comments) || 0;
+  const shares = Number(bestReel.shares) || 0;
   const saves = Number(bestReel.saves) || 0;
+  const engagements = Number(bestReel.engagements) || Number(bestReel.total_interactions) || (likes + comments + shares + saves);
   const name = (bestReel.caption && String(bestReel.caption).trim())
     ? pickReelTitleFromCaption(bestReel.caption, 120)
     : (bestReel.name || 'Reel');
+  const headlineLine = String(
+    bestReel.headlineLine
+    || (bestReel.caption && String(bestReel.caption).trim() ? pickReelHeadlineLineFromCaption(bestReel.caption, 200) : '')
+    || name
+  ).slice(0, 200);
+  const subtitle = (bestReel.caption && String(bestReel.caption).trim())
+    ? pickReelSubtitleFromCaption(bestReel.caption, name, 140)
+    : String(bestReel.subtitle || '').slice(0, 140);
   const platform = bestReel.platform || 'Instagram';
   const fmtReach = reach >= 1000 ? `${(reach / 1000).toFixed(1)}K` : String(reach);
   const reason = bestReel.reason || `Top content: ${fmtReach} reach, ${engagements.toLocaleString('en-IN')} engagements, ${saves} saves.`;
+  const hookRate = Math.min(Number(bestReel.hookRate ?? bestReel.hook_rate ?? 0), 100);
+  const video_avg_time_watched = Math.min(Number(bestReel.video_avg_time_watched ?? bestReel.watchTime ?? 0) || 0, 120);
+  let engagementRatePct = bestReel.engagementRatePct ?? bestReel.engagementRate;
+  if (engagementRatePct == null || Number.isNaN(Number(engagementRatePct))) {
+    engagementRatePct = reach > 0 ? Math.round((engagements / reach) * 1000) / 10 : 0;
+  } else {
+    engagementRatePct = Number(engagementRatePct);
+  }
+  const note = bestReel.snapshotFallbackNote ? String(bestReel.snapshotFallbackNote).trim() : '';
   return {
     name: String(name).slice(0, 120),
+    headlineLine,
+    subtitle: String(subtitle || '').slice(0, 140),
     platform: String(platform).slice(0, 32),
     reach,
     engagements,
     saves,
-    likes: Number(bestReel.likes) || 0,
-    comments: Number(bestReel.comments) || 0,
-    shares: Number(bestReel.shares) || 0,
+    likes,
+    comments,
+    shares,
     views: Number(bestReel.views) || 0,
+    hookRate,
+    video_avg_time_watched,
+    engagementRatePct,
     reason: String(reason).slice(0, 400),
     action: bestReel.action === 'REPURPOSE' || bestReel.action === 'BOOST' ? bestReel.action : 'MONITOR',
     timestamp: bestReel.timestamp || '',
     thumbnail_url: bestReel.thumbnail_url || '',
-    permalink: bestReel.permalink || ''
+    permalink: bestReel.permalink || '',
+    hideReelPublishTime: !!bestReel.hideReelPublishTime,
+    snapshotFallbackNote: note
   };
 }
 
@@ -432,7 +555,25 @@ function buildReelSlotFromReal(bestReel) {
 function ensureTimeWindows(obj, type) {
   const defaults = type === 'ads'
     ? { name: 'Campaign', platform: 'Meta', spend: 0, leads: 0, cpl: 0, reason: 'No data.', action: 'MONITOR' }
-    : { name: 'Reel', platform: 'Instagram', reach: 0, engagements: 0, saves: 0, reason: 'No data.', action: 'MONITOR' };
+    : {
+      name: 'Reel',
+      headlineLine: '',
+      subtitle: '',
+      platform: 'Instagram',
+      reach: 0,
+      engagements: 0,
+      saves: 0,
+      hookRate: 0,
+      video_avg_time_watched: 0,
+      engagementRatePct: 0,
+      reason: 'No data.',
+      action: 'MONITOR',
+      thumbnail_url: '',
+      permalink: '',
+      timestamp: '',
+      hideReelPublishTime: false,
+      snapshotFallbackNote: ''
+    };
   const keys = ['today', 'last_7_days', 'last_14_days', 'last_30_days'];
   const out = {};
   for (const k of keys) {
