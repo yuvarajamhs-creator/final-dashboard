@@ -6,7 +6,10 @@ const {
   getLeads,
   getDuplicates,
   deleteDuplicate,
-  bulkDeleteDuplicates
+  bulkDeleteDuplicates,
+  bulkDeleteLeads,
+  getLeadsAutoDeleteInfo,
+  deleteLeadsOlderThan30Days
 } = require('../repositories/uniqueLeadsRepository');
 
 const router = express.Router();
@@ -47,6 +50,21 @@ router.post('/import', authMiddleware, async (req, res) => {
 });
 
 /**
+ * GET /api/unique-leads/auto-delete-info?category=all|paid|youtube|free|direct_walk_in
+ * Returns total count, days remaining before auto-deletion, and expiry date.
+ */
+router.get('/auto-delete-info', authMiddleware, async (req, res) => {
+  try {
+    const category = (req.query.category || 'all').toLowerCase();
+    const info = await getLeadsAutoDeleteInfo(category);
+    return res.json(info);
+  } catch (err) {
+    console.error('[uniqueLeads] auto-delete-info error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to fetch auto-delete info' });
+  }
+});
+
+/**
  * GET /api/unique-leads/export?category=all|paid|youtube|free|direct_walk_in
  */
 router.get('/export', authMiddleware, async (req, res) => {
@@ -74,6 +92,25 @@ router.get('/duplicates', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[uniqueLeads] duplicates error:', err);
     return res.status(500).json({ error: err.message || 'Failed to fetch duplicates' });
+  }
+});
+
+/**
+ * DELETE /api/unique-leads/bulk
+ * Body: { ids: number[] }
+ * Bulk delete regular leads (All Leads / Paid / YouTube / Free / Walk-In).
+ */
+router.delete('/bulk', authMiddleware, async (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array is required' });
+    }
+    const result = await bulkDeleteLeads(ids.map(Number));
+    return res.json(result);
+  } catch (err) {
+    console.error('[uniqueLeads] bulk delete leads error:', err);
+    return res.status(500).json({ error: err.message || 'Bulk delete failed' });
   }
 });
 

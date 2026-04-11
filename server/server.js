@@ -1113,6 +1113,10 @@ let tokenRefreshIntervalId = null;
 const { startStorySnapshotsScheduler } = require('./jobs/storySnapshotsSync');
 let storySnapshotsIntervalId = null;
 
+// Auto-delete unique leads older than 30 days
+const { startAutoDeleteScheduler } = require('./jobs/autoDeleteLeads');
+let autoDeleteLeadsIntervalId = null;
+
 const PORT = process.env.PORT || 4000;
 
 function startSchedulers() {
@@ -1120,6 +1124,7 @@ function startSchedulers() {
   try { insightsSyncIntervalId = startInsightsSyncScheduler(); } catch (e) { console.error('Error starting insights sync scheduler:', e.message); }
   try { tokenRefreshIntervalId = startTokenRefreshScheduler(); } catch (e) { console.error('Error starting token refresh scheduler:', e.message); }
   try { storySnapshotsIntervalId = startStorySnapshotsScheduler(); } catch (e) { console.error('Error starting story snapshots scheduler:', e.message); }
+  try { autoDeleteLeadsIntervalId = startAutoDeleteScheduler(); } catch (e) { console.error('Error starting auto-delete leads scheduler:', e.message); }
 }
 
 function startServer(retries = 3) {

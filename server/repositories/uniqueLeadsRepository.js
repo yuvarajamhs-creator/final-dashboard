@@ -245,34 +245,100 @@ async function importLeads(sourceType, rows) {
   };
 }
 
+const AUTO_DELETE_DAYS = 30;
+
+function applyLeadsFilter(query, filter) {
+  if (filter === 'duplicates') {
+    return query.like('lead_source_type', '%,%');
+  } else if (filter && filter !== 'all') {
+    const sourceLabel = SOURCE_LABELS[filter];
+    if (sourceLabel) return query.eq('lead_source_type', sourceLabel);
+  } else {
+    return query.not('lead_source_type', 'like', '%,%');
+  }
+  return query;
+}
+
 async function getLeads(filter) {
   if (!supabase) throw new Error('Supabase not configured');
 
-  let query = supabase.from('unique_leads').select('*').order('id', { ascending: true });
+  const PAGE_SIZE = 1000;
+  const allData = [];
+  let from = 0;
 
-  if (filter === 'duplicates') {
-    query = query.like('lead_source_type', '%,%');
-  } else if (filter && filter !== 'all') {
-    const sourceLabel = SOURCE_LABELS[filter];
-    if (sourceLabel) {
-      query = query.eq('lead_source_type', sourceLabel);
-    }
-  } else {
-    query = query.not('lead_source_type', 'like', '%,%');
+  while (true) {
+    const baseQuery = supabase
+      .from('unique_leads')
+      .select('*')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    const { data, error } = await applyLeadsFilter(baseQuery, filter);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    allData.push(...data);
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
   }
 
-  const { data, error } = await query;
-  if (error) throw error;
-
-  return (data || []).map(row => ({
+  return allData.map(row => ({
+    id: row.id,
     dateTime: row.date_time,
     batchCode: row.batch_code,
     phoneNumber: row.phone,
     userId: row.user_id,
     sugarPoll: row.sugar_poll,
     email: row.email,
-    leadSourceType: row.lead_source_type
+    leadSourceType: row.lead_source_type,
+    importedAt: row.created_at ?? null
   }));
+}
+
+async function getLeadsAutoDeleteInfo(category) {
+  if (!supabase) throw new Error('Supabase not configured');
+
+  // Count query
+  const countBase = supabase.from('unique_leads').select('*', { count: 'exact', head: true });
+  const { count, error: countErr } = await applyLeadsFilter(countBase, category || 'all');
+  if (countErr) throw countErr;
+
+  // Oldest imported_at query
+  const oldestBase = supabase
+    .from('unique_leads')
+    .select('created_at')
+    .order('created_at', { ascending: true })
+    .limit(1);
+  const { data: oldestData, error: oldestErr } = await applyLeadsFilter(oldestBase, category || 'all');
+  if (oldestErr) throw oldestErr;
+
+  const oldestDate = oldestData?.[0]?.created_at ? new Date(oldestData[0].created_at) : null;
+  let daysRemaining = null;
+  let deleteDate = null;
+
+  if (oldestDate) {
+    const daysElapsed = (Date.now() - oldestDate.getTime()) / (1000 * 60 * 60 * 24);
+    daysRemaining = Math.max(0, Math.ceil(AUTO_DELETE_DAYS - daysElapsed));
+    deleteDate = new Date(oldestDate.getTime() + AUTO_DELETE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  return {
+    total: count || 0,
+    daysRemaining,
+    deleteDate,
+    oldestImportedAt: oldestDate?.toISOString() ?? null,
+    autoDeleteDays: AUTO_DELETE_DAYS
+  };
+}
+
+async function deleteLeadsOlderThan30Days() {
+  if (!supabase) throw new Error('Supabase not configured');
+  const cutoff = new Date(Date.now() - AUTO_DELETE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { error, count } = await supabase
+    .from('unique_leads')
+    .delete({ count: 'exact' })
+    .lt('created_at', cutoff);
+  if (error) throw error;
+  return { deleted: count || 0, cutoff };
 }
 
 const SOURCE_SHORT = { 'Paid': 'P', 'YouTube': 'Y', 'Free': 'F', 'Direct Walk-In': 'D' };
@@ -338,11 +404,21 @@ async function bulkDeleteDuplicates(ids) {
   return { deleted: ids.length };
 }
 
+async function bulkDeleteLeads(ids) {
+  if (!supabase) throw new Error('Supabase not configured');
+  const { error } = await supabase.from('unique_leads').delete().in('id', ids);
+  if (error) throw error;
+  return { deleted: ids.length };
+}
+
 module.exports = {
   importLeads,
   getLeads,
   getDuplicates,
   deleteDuplicate,
   bulkDeleteDuplicates,
+  bulkDeleteLeads,
+  getLeadsAutoDeleteInfo,
+  deleteLeadsOlderThan30Days,
   SOURCE_LABELS
 };

@@ -118,10 +118,14 @@ export default function UniqueLeads() {
   const [showDupModal, setShowDupModal] = useState(false);
   const [selectedDupIds, setSelectedDupIds] = useState(new Set());
   const [deletingDupIds, setDeletingDupIds] = useState(new Set());
+  const [selectedLeadIds, setSelectedLeadIds] = useState(new Set());
+  const [deletingLeadIds, setDeletingLeadIds] = useState(new Set());
   const [userIdSearch, setUserIdSearch] = useState('');
+  const [autoDeleteInfo, setAutoDeleteInfo] = useState(null);
   const fileInputRef = useRef(null);
 
   const isDuplicatesView = tableViewFilter === 'duplicates';
+  const isSelectableView = tableViewFilter !== 'last_import';
 
   const redirectToLogin = useCallback(() => {
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* noop */ }
@@ -162,6 +166,7 @@ export default function UniqueLeads() {
         if (!cancelled) {
           setDbLeads(data);
           if (tableViewFilter === 'duplicates') setSelectedDupIds(new Set());
+          else setSelectedLeadIds(new Set());
         }
       } catch (e) {
         if (!cancelled) setDbLeads([]);
@@ -172,6 +177,30 @@ export default function UniqueLeads() {
     load();
     return () => { cancelled = true; };
   }, [tableViewFilter, authHeaders, redirectToLogin]);
+
+  // Fetch auto-delete countdown info for the current category
+  useEffect(() => {
+    if (tableViewFilter === 'last_import' || tableViewFilter === 'duplicates') {
+      setAutoDeleteInfo(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchInfo = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/unique-leads/auto-delete-info?category=${tableViewFilter}`,
+          { headers: authHeaders() }
+        );
+        if (!res.ok || res.status === 401) return;
+        const data = await res.json();
+        if (!cancelled) setAutoDeleteInfo(data);
+      } catch (e) {
+        // silently ignore — non-critical
+      }
+    };
+    fetchInfo();
+    return () => { cancelled = true; };
+  }, [tableViewFilter, authHeaders]);
 
   const reloadDuplicates = useCallback(async () => {
     if (tableViewFilter !== 'duplicates') return;
@@ -229,6 +258,55 @@ export default function UniqueLeads() {
       setError(e.message || 'Bulk delete failed');
     } finally {
       setDeletingDupIds((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
+  };
+
+  const toggleLeadSelection = (id) => {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllLeads = () => {
+    if (!dbLeads.length) return;
+    if (selectedLeadIds.size === dbLeads.length) {
+      setSelectedLeadIds(new Set());
+    } else {
+      setSelectedLeadIds(new Set(dbLeads.map((r) => r.id).filter(Boolean)));
+    }
+  };
+
+  const handleBulkDeleteLeads = async () => {
+    if (selectedLeadIds.size === 0) return;
+    const ids = [...selectedLeadIds];
+    setDeletingLeadIds((prev) => new Set([...prev, ...ids]));
+    try {
+      const res = await fetch(`${API_BASE}/api/unique-leads/bulk`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ ids })
+      });
+      if (res.status === 401) { redirectToLogin(); return; }
+      if (!res.ok) throw new Error('Bulk delete failed');
+      // Reload current tab
+      const url = `${API_BASE}/api/unique-leads/export?category=${tableViewFilter}`;
+      const dataRes = await fetch(url, { headers: authHeaders() });
+      if (dataRes.ok) {
+        const data = await dataRes.json();
+        setDbLeads(data || []);
+      }
+      setSelectedLeadIds(new Set());
+    } catch (e) {
+      setError(e.message || 'Bulk delete failed');
+    } finally {
+      setDeletingLeadIds((prev) => {
         const next = new Set(prev);
         ids.forEach((id) => next.delete(id));
         return next;
@@ -465,18 +543,22 @@ export default function UniqueLeads() {
         msg += ` ${importResult.errors} row(s) skipped (phone < 10 digits).`;
       return msg;
     }
-    const base = loadingDb ? ' Loading…' : '';
+    const loading = loadingDb ? ' Loading…' : '';
+    // Use the authoritative total from auto-delete info when available (bypasses the 1000-row display limit)
+    const realTotal = autoDeleteInfo?.total ?? displayCount;
+    if (tableViewFilter === 'duplicates') {
+      return `Showing leads with multiple sources (${displayCount} total).${loading}`;
+    }
+    const autoDeleteNote = ' Leads will be automatically deleted after 30 days.';
     if (userIdSearchTrimmed) {
-      return `Showing ${filteredByUserId.length} of ${displayCount} lead(s) matching User ID.${base}`;
+      return `Showing ${filteredByUserId.length} of ${realTotal.toLocaleString()} lead(s) matching User ID.${autoDeleteNote}${loading}`;
     }
     if (tableViewFilter === 'all')
-      return `Showing all imported leads (${displayCount} total).${base}`;
-    if (tableViewFilter === 'duplicates')
-      return `Showing leads with multiple sources (${displayCount} total).${base}`;
-    return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} lead(s) (${displayCount} total).${base}`;
+      return `Showing all imported leads (Total: ${realTotal.toLocaleString()}).${autoDeleteNote}${loading}`;
+    return `Showing ${FILTER_LABELS[tableViewFilter] || tableViewFilter} leads (Total: ${realTotal.toLocaleString()}).${autoDeleteNote}${loading}`;
   };
 
-  const colSpan = isDuplicatesView ? 10 : 8;
+  const colSpan = isDuplicatesView ? 10 : isSelectableView ? 9 : 8;
 
   return (
     <div className="unique-leads-container">
@@ -602,6 +684,22 @@ export default function UniqueLeads() {
             </div>
           </div>
 
+          {autoDeleteInfo && !isDuplicatesView && tableViewFilter !== 'last_import' && (
+            <div className={`unique-leads-auto-delete-banner${autoDeleteInfo.daysRemaining === 0 ? ' unique-leads-auto-delete-banner--urgent' : autoDeleteInfo.daysRemaining <= 7 ? ' unique-leads-auto-delete-banner--warning' : ''}`}>
+              <span className="unique-leads-auto-delete-icon">
+                {autoDeleteInfo.daysRemaining === 0 ? '🗑️' : autoDeleteInfo.daysRemaining <= 7 ? '⚠️' : '⏳'}
+              </span>
+              {autoDeleteInfo.daysRemaining === 0
+                ? 'Oldest leads have expired and will be removed shortly.'
+                : `${autoDeleteInfo.daysRemaining} day${autoDeleteInfo.daysRemaining === 1 ? '' : 's'} left before auto-deletion`}
+              {autoDeleteInfo.deleteDate && autoDeleteInfo.daysRemaining > 0 && (
+                <span className="unique-leads-auto-delete-date">
+                  {' — expires '}{new Date(autoDeleteInfo.deleteDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                </span>
+              )}
+            </div>
+          )}
+
           <div className="unique-leads-meta-row">
             <p className="unique-leads-meta">{buildMeta()}</p>
             <div className="unique-leads-userid-search-wrap">
@@ -628,6 +726,16 @@ export default function UniqueLeads() {
                 {deletingDupIds.size > 0 ? 'Deleting…' : `Delete Selected${selectedDupIds.size > 0 ? ` (${selectedDupIds.size})` : ''}`}
               </button>
             )}
+            {isSelectableView && !isDuplicatesView && dbLeads.length > 0 && (
+              <button
+                type="button"
+                className="unique-leads-btn-delete-bulk"
+                onClick={handleBulkDeleteLeads}
+                disabled={selectedLeadIds.size === 0 || deletingLeadIds.size > 0}
+              >
+                {deletingLeadIds.size > 0 ? 'Deleting…' : `Delete Selected${selectedLeadIds.size > 0 ? ` (${selectedLeadIds.size})` : ''}`}
+              </button>
+            )}
           </div>
 
           <div className="unique-leads-table-responsive">
@@ -642,6 +750,17 @@ export default function UniqueLeads() {
                         onChange={toggleSelectAllDuplicates}
                         title="Select all"
                         aria-label="Select all duplicate leads"
+                      />
+                    </th>
+                  )}
+                  {isSelectableView && !isDuplicatesView && (
+                    <th style={{ width: 44 }}>
+                      <input
+                        type="checkbox"
+                        checked={dbLeads.length > 0 && selectedLeadIds.size === dbLeads.length}
+                        onChange={toggleSelectAllLeads}
+                        title="Select all"
+                        aria-label="Select all leads"
                       />
                     </th>
                   )}
@@ -700,8 +819,21 @@ export default function UniqueLeads() {
                 ) : (
                   filteredByUserId.map((row, idx) => {
                     const userId = row.userId || extractLast10(row.phoneNumber ?? row.phone ?? '');
+                    const id = row.id;
+                    const isDeleting = id != null && deletingLeadIds.has(id);
                     return (
-                      <tr key={idx}>
+                      <tr key={id ?? idx} className={id != null && selectedLeadIds.has(id) ? 'unique-leads-row-selected' : ''}>
+                        {isSelectableView && (
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={id != null && selectedLeadIds.has(id)}
+                              onChange={() => id != null && toggleLeadSelection(id)}
+                              disabled={isDeleting}
+                              aria-label={`Select row ${idx + 1}`}
+                            />
+                          </td>
+                        )}
                         <td>{idx + 1}</td>
                         <td>{row.dateTime ?? row.date_time ?? ''}</td>
                         <td>{row.batchCode ?? row.batch_code ?? ''}</td>

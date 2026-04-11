@@ -719,3 +719,40 @@
   padding: 16px 24px 24px;
   justify-content: flex-end;
 }
+
+/* ── Auto-Delete Countdown Banner ────────────────────────── */
+.unique-leads-auto-delete-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.unique-leads-auto-delete-banner--warning {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fcd34d;
+}
+
+.unique-leads-auto-delete-banner--urgent {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.unique-leads-auto-delete-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.unique-leads-auto-delete-date {
+  font-weight: 400;
+  opacity: 0.85;
+}
