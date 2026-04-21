@@ -8,7 +8,8 @@
     "claude": "node ./claude.js"
   },
   "devDependencies": {
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "docx": "^9.6.1"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",

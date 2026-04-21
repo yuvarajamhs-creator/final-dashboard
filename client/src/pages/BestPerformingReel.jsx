@@ -156,6 +156,22 @@ const fetchFacebookMediaInsights = async (pageId) => {
     return res.json();
 };
 
+const fetchReelDailyFollows = async (mediaId, pageId, from, to) => {
+    const token = getAuthToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const params = new URLSearchParams();
+    if (pageId) params.append('pageId', pageId);
+    if (from) params.append('from', from);
+    if (to) params.append('to', to);
+    const res = await fetch(`${API_BASE}/api/meta/instagram/media/${encodeURIComponent(mediaId)}/daily-follows?${params.toString()}`, { headers });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || err.details || res.statusText);
+    }
+    return res.json();
+};
+
 // Media insights fetched without date filter so Top Content by Views is populated (all media, ranked by views).
 
 const getContentDefaultDates = () => {
@@ -216,6 +232,13 @@ export default function BestPerformingReel() {
     const [fbAudienceData, setFbAudienceData] = useState(null);
     const [fbAudienceLoading, setFbAudienceLoading] = useState(false);
     const [fbAudienceError, setFbAudienceError] = useState(null);
+
+    // Per-reel daily insights detail modal
+    const [selectedReelForFollows, setSelectedReelForFollows] = useState(null);
+    const [reelDailyFollows, setReelDailyFollows] = useState([]);
+    const [reelTotalFollows, setReelTotalFollows] = useState(0);
+    const [reelDailyFollowsLoading, setReelDailyFollowsLoading] = useState(false);
+    const [reelDailyFollowsError, setReelDailyFollowsError] = useState(null);
 
     useEffect(() => {
         const loadPages = async () => {
@@ -436,6 +459,33 @@ export default function BestPerformingReel() {
             this_week: 'This week', last_week: 'Last week', this_month: 'This month', last_month: 'Last month'
         };
         return presetLabels[contentDateRange] || 'Last 7 days';
+    };
+
+    const openReelDailyFollows = async (item) => {
+        setSelectedReelForFollows(item);
+        setReelDailyFollows([]);
+        setReelTotalFollows(0);
+        setReelDailyFollowsError(null);
+        if (!item?.id) { setReelDailyFollowsError('No media ID for this reel.'); return; }
+        setReelDailyFollowsLoading(true);
+        try {
+            const result = await fetchReelDailyFollows(item.id, reelPage, contentFilters.startDate, contentFilters.endDate);
+            setReelDailyFollows(result?.data || []);
+            // Fallback to the card-level follows count if API returns 0
+            const apiFollows = result?.totalFollows ?? 0;
+            setReelTotalFollows(apiFollows > 0 ? apiFollows : (item?.follows ?? 0));
+        } catch (err) {
+            setReelDailyFollowsError(err?.message || 'Failed to load reel insights');
+        } finally {
+            setReelDailyFollowsLoading(false);
+        }
+    };
+
+    const closeReelDailyFollows = () => {
+        setSelectedReelForFollows(null);
+        setReelDailyFollows([]);
+        setReelTotalFollows(0);
+        setReelDailyFollowsError(null);
     };
 
     // --- DERIVED METRICS FROM LIVE META DATA ---
@@ -1428,7 +1478,7 @@ export default function BestPerformingReel() {
                                                 : 'No content for this period. Try a different time range or tab.'}
                                 </div>
                             ) : contentListForTopContent.map((item, idx) => (
-                                <article key={item.id || idx} className={`top-content-card ${activeTab === 'stories' ? 'top-content-card--story' : ''}`} role="listitem">
+                                <article key={item.id || idx} className={`top-content-card ${activeTab === 'stories' ? 'top-content-card--story' : ''} ${(activeTab === 'reels' || activeTab === 'all') && !isFacebookSelected ? 'top-content-card--clickable' : ''}`} role="listitem" onClick={() => { if ((activeTab === 'reels' || activeTab === 'all') && !isFacebookSelected) openReelDailyFollows(item); }}>
                                     <div className="top-content-card-thumb" style={(item.thumbnail_url || item.media_url) ? undefined : { backgroundColor: item.imgColor || COLORS[idx % COLORS.length] }}>
                                         {(item.thumbnail_url || item.media_url) ? (
                                             <img src={item.thumbnail_url || item.media_url || ''} alt="" className="top-content-card-thumb-img" />
@@ -1518,6 +1568,129 @@ export default function BestPerformingReel() {
                     compare: { enabled: false }
                 }}
             />
+
+            {/* --- REEL DAILY FOLLOWS MODAL --- */}
+            {selectedReelForFollows && (
+                <div className="reel-follows-overlay" onClick={closeReelDailyFollows}>
+                    <div className="reel-follows-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="reel-follows-modal-header">
+                            <div className="reel-follows-modal-title-row">
+                                <div className="reel-follows-thumb-wrap">
+                                    {selectedReelForFollows.thumbnail_url ? (
+                                        <img src={selectedReelForFollows.thumbnail_url} alt="" className="reel-follows-thumb" />
+                                    ) : (
+                                        <div className="reel-follows-thumb reel-follows-thumb--placeholder">
+                                            <i className="fab fa-instagram" aria-hidden></i>
+                                        </div>
+                                    )}
+                                </div>
+                                <div>
+                                    <h3 className="reel-follows-modal-title">Daily Follows Breakdown</h3>
+                                    <p className="reel-follows-modal-subtitle" title={selectedReelForFollows.title}>
+                                        {(selectedReelForFollows.title || 'Reel').slice(0, 60)}{(selectedReelForFollows.title || '').length > 60 ? '…' : ''}
+                                    </p>
+                                </div>
+                            </div>
+                            <button className="reel-follows-close-btn" onClick={closeReelDailyFollows} aria-label="Close">
+                                <i className="fas fa-times"></i>
+                            </button>
+                        </div>
+
+                        <div className="reel-follows-stats-row">
+                            <div className="reel-follows-stat">
+                                <span className="reel-follows-stat-value">{formatCount(selectedReelForFollows.views ?? 0)}</span>
+                                <span className="reel-follows-stat-label">Views</span>
+                            </div>
+                            <div className="reel-follows-stat">
+                                <span className="reel-follows-stat-value">{formatCount(selectedReelForFollows.likes ?? 0)}</span>
+                                <span className="reel-follows-stat-label">Likes</span>
+                            </div>
+                            <div className="reel-follows-stat">
+                                <span className="reel-follows-stat-value">{formatCount(selectedReelForFollows.shares ?? 0)}</span>
+                                <span className="reel-follows-stat-label">Shares</span>
+                            </div>
+                            <div className="reel-follows-stat reel-follows-stat--highlight">
+                                <span className="reel-follows-stat-value">
+                                    {reelDailyFollowsLoading ? '…' : formatCount(reelTotalFollows)}
+                                </span>
+                                <span className="reel-follows-stat-label">Total Follows</span>
+                            </div>
+                        </div>
+
+                        <div className="reel-follows-chart-section">
+                            <h4 className="reel-follows-chart-title">
+                                <i className="fas fa-user-plus" aria-hidden></i> Daily Follows, Views &amp; Reach
+                            </h4>
+                            {reelDailyFollowsLoading ? (
+                                <div className="reel-follows-loading">
+                                    <div className="reel-follows-spinner"></div>
+                                    <span>Loading daily data…</span>
+                                </div>
+                            ) : reelDailyFollowsError ? (
+                                <div className="reel-follows-error">
+                                    <i className="fas fa-exclamation-triangle" aria-hidden></i>
+                                    <span>{reelDailyFollowsError}</span>
+                                </div>
+                            ) : reelDailyFollows.length === 0 ? (
+                                <div className="reel-follows-empty">
+                                    <i className="fas fa-chart-bar" aria-hidden></i>
+                                    <p>No daily data available for this reel in the selected period.</p>
+                                    <p className="reel-follows-empty-hint">Try a wider date range or refresh after the reel has more recent impressions.</p>
+                                </div>
+                            ) : (
+                                <ResponsiveContainer width="100%" height={220}>
+                                    <BarChart data={reelDailyFollows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--reel-follows-grid, #e2e8f0)" />
+                                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--reel-follows-axis, #64748b)' }} axisLine={false} tickLine={false} />
+                                        <YAxis tick={{ fontSize: 11, fill: 'var(--reel-follows-axis, #64748b)' }} axisLine={false} tickLine={false} allowDecimals={false} />
+                                        <Tooltip
+                                            contentStyle={{ background: 'var(--reel-follows-tooltip-bg, #fff)', border: '1px solid var(--reel-follows-tooltip-border, #e2e8f0)', borderRadius: 8 }}
+                                            labelStyle={{ color: 'var(--reel-follows-tooltip-label, #334155)', fontWeight: 600 }}
+                                            formatter={(val, name) => [val.toLocaleString(), name === 'follows' ? 'Follows' : name === 'views' ? 'Views' : 'Reach']}
+                                        />
+                                        <Bar dataKey="follows" fill="var(--reel-follows-bar3, #a855f7)" radius={[4, 4, 0, 0]} name="follows">
+                                            <LabelList dataKey="follows" position="top" style={{ fontSize: 10, fill: 'var(--reel-follows-label, #64748b)' }} formatter={(v) => v > 0 ? v : ''} />
+                                        </Bar>
+                                        <Bar dataKey="views" fill="var(--reel-follows-bar, #0ea5e9)" radius={[4, 4, 0, 0]} name="views" />
+                                        <Bar dataKey="reach" fill="var(--reel-follows-bar2, #34d399)" radius={[4, 4, 0, 0]} name="reach" />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            )}
+                        </div>
+
+                        {!reelDailyFollowsLoading && reelDailyFollows.length > 0 && (
+                            <div className="reel-follows-table-section">
+                                <table className="reel-follows-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th style={{ textAlign: 'right' }}>Follows</th>
+                                            <th style={{ textAlign: 'right' }}>Views</th>
+                                            <th style={{ textAlign: 'right' }}>Reach</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {reelDailyFollows.map((row, i) => (
+                                            <tr key={i}>
+                                                <td>{row.label || row.date}</td>
+                                                <td className="reel-follows-table-val">
+                                                    <span className="reel-follows-table-badge reel-follows-table-badge--follows">{(row.follows || 0).toLocaleString()}</span>
+                                                </td>
+                                                <td className="reel-follows-table-val">
+                                                    <span className="reel-follows-table-badge">{(row.views || 0).toLocaleString()}</span>
+                                                </td>
+                                                <td className="reel-follows-table-val">
+                                                    <span className="reel-follows-table-badge reel-follows-table-badge--reach">{(row.reach || 0).toLocaleString()}</span>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

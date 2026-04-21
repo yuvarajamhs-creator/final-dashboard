@@ -601,7 +601,9 @@ router.get("/insights", optionalAuthMiddleware, async (req, res) => {
     _log({ location: 'meta.jsx:GET/insights', message: 'db result', data: { source: 'db', rowCount: data.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' });
     // #endregion
 
-    if (useLive || data.length === 0) {
+    // Auto-refresh from Meta if DB rows are missing video fields (data stored before video metrics were added to the API request)
+    const dbLacksVideoFields = data.length > 0 && !Array.isArray(data[0].video_play_actions);
+    if (useLive || data.length === 0 || dbLacksVideoFields) {
       try {
         const liveResults = await Promise.allSettled(
           adAccountIds.map(async (adAccountId) => {
@@ -5771,12 +5773,125 @@ router.post("/ads/filtered", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// REEL DAILY INSIGHTS — per-reel day-by-day views + lifetime follows
+//    GET /api/meta/instagram/media/:mediaId/daily-follows?pageId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+//    NOTE: Meta's ig_reels_video_follow_count only supports period=lifetime (not day).
+//    This endpoint returns:
+//      - totalFollows: lifetime follow count from this reel
+//      - data: [{ date, label, views, reach }] — daily views (period=day, supported)
+// ---------------------------------------------------------------------
+router.get("/instagram/media/:mediaId/daily-follows", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { mediaId } = req.params;
+    const { pageId, from, to } = req.query;
+    if (!mediaId) return res.status(400).json({ error: "mediaId is required" });
+
+    let accessToken;
+    if (pageId) {
+      accessToken = await getPageAccessToken(pageId);
+    } else {
+      accessToken = getSystemToken();
+    }
+    if (!accessToken) return res.status(400).json({ error: "No access token available" });
+
+    const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}/insights`;
+
+    const formatLabel = (isoDate) => {
+      const d = new Date(isoDate + "T00:00:00Z");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+      return `${day} ${mon}`;
+    };
+
+    // 1. Lifetime follows — "follows" is the current metric name (ig_reels_video_follow_count renamed in v22.0+)
+    let totalFollows = 0;
+    try {
+      const followRes = await axios.get(baseUrl, {
+        params: { metric: "follows", period: "lifetime", access_token: accessToken },
+        timeout: 20000,
+      });
+      const entry = Array.isArray(followRes.data?.data)
+        ? followRes.data.data.find(m => m.name === "follows")
+        : null;
+      if (entry) {
+        // lifetime returns a single value (number) or values array with one entry
+        if (typeof entry.values?.[0]?.value === "number") {
+          totalFollows = entry.values[0].value;
+        } else if (typeof entry.value === "number") {
+          totalFollows = entry.value;
+        }
+      }
+    } catch (e) {
+      console.warn(`[ReelDailyInsights] lifetime follows failed for ${mediaId}:`, e?.response?.data?.error?.message || e.message);
+    }
+
+    // 2. Daily breakdown — views + reach only (follows only supports period=lifetime, not day)
+    let dailyData = [];
+    try {
+      const dailyParams = {
+        metric: "views,reach",
+        period: "day",
+        access_token: accessToken,
+      };
+      if (from) dailyParams.since = Math.floor(new Date(from + "T00:00:00Z").getTime() / 1000);
+      if (to) dailyParams.until = Math.floor(new Date(to + "T23:59:59Z").getTime() / 1000) + 86400;
+
+      const dailyRes = await axios.get(baseUrl, { params: dailyParams, timeout: 20000 });
+      const metrics = {};
+      if (Array.isArray(dailyRes.data?.data)) {
+        for (const m of dailyRes.data.data) {
+          metrics[m.name] = m.values || [];
+        }
+      }
+
+      // Build by-date map merging views, reach, follows
+      const byDate = {};
+      const ensureDate = (date) => {
+        if (!byDate[date]) byDate[date] = { date, label: formatLabel(date), views: 0, reach: 0, follows: 0 };
+      };
+      for (const v of (metrics.views || [])) {
+        const date = typeof v.end_time === "string" ? v.end_time.slice(0, 10) : null;
+        if (!date) continue;
+        ensureDate(date);
+        byDate[date].views = Number(v.value) || 0;
+      }
+      for (const v of (metrics.reach || [])) {
+        const date = typeof v.end_time === "string" ? v.end_time.slice(0, 10) : null;
+        if (!date) continue;
+        ensureDate(date);
+        byDate[date].reach = Number(v.value) || 0;
+      }
+      for (const v of (metrics.follows || [])) {
+        const date = typeof v.end_time === "string" ? v.end_time.slice(0, 10) : null;
+        if (!date) continue;
+        ensureDate(date);
+        byDate[date].follows = Number(v.value) || 0;
+      }
+      dailyData = Object.keys(byDate).sort().map(k => byDate[k]);
+    } catch (e) {
+      const code = e?.response?.data?.error?.code;
+      const msg = e?.response?.data?.error?.message || e.message;
+      console.warn(`[ReelDailyInsights] daily views failed for ${mediaId}:`, msg);
+      if (code === 190) return res.status(401).json({ error: "Meta token expired", details: msg, isAuthError: true });
+      // Non-fatal: return what we have
+    }
+
+    return res.json({ totalFollows, data: dailyData });
+  } catch (err) {
+    console.error("[ReelDailyInsights] Error:", err?.response?.data || err?.message);
+    return res.status(500).json({ error: "Failed to fetch reel insights", details: err?.response?.data || err?.message });
+  }
+});
+
+// ---------------------------------------------------------------------
 // 7) CLEAR CACHE API (for testing/debugging)
 //    POST /api/meta/cache/clear
 // ---------------------------------------------------------------------
 router.post("/cache/clear", optionalAuthMiddleware, (req, res) => {
-  campaignsCache = { data: [], lastFetched: null, ttl: 5 * 60 * 1000 };
-  adsCache = { data: [], lastFetched: null, ttl: 5 * 60 * 1000 };
+  campaignsCache.data = [];
+  campaignsCache.lastFetched = null;
+  insightsCache.clear();
   res.json({ success: true, message: "Cache cleared" });
 });
 

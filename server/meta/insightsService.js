@@ -139,7 +139,7 @@ function enrichInsightsRow(row) {
   const aggs = transformActions(row.actions || []);
   const values = transformActions(row.action_values || []);
   const videoViews = aggs.video_view || aggs.video_views || 0;
-  // Meta often returns 3s watches as top-level video_3_sec_watched_actions; not always in actions[].
+  // video_view in Meta's actions array IS the 3-second view count — the primary denominator for Hold Rate
   const video3sViews =
     getActionCountForKey(row, aggs, values, 'video_3_sec_watched_actions') ||
     aggs.video_view_3s ||
@@ -147,8 +147,15 @@ function enrichInsightsRow(row) {
     aggs.video_view_3s_autoplayed ||
     aggs.video_views_3s_autoplayed ||
     aggs.video_3_sec_watched_actions ||
+    aggs.video_view ||  // Meta's actual action_type for 3-second video views
     0;
-  const videoThruPlays = aggs.video_thruplay_watched_actions || aggs.video_thruplay || aggs.video_views_thruplay || 0;
+  // video_thruplay_watched_actions is now requested as a top-level field too
+  const videoThruPlays =
+    getTopLevelActionValue(row, 'video_thruplay_watched_actions') ||
+    aggs.video_thruplay_watched_actions ||
+    aggs.video_thruplay ||
+    aggs.video_views_thruplay ||
+    0;
 
   const plays =
     getTopLevelActionValue(row, 'video_play_actions') ||
@@ -172,7 +179,7 @@ function enrichInsightsRow(row) {
     hold_rate = Math.round((videoThruPlays / plays) * 10000) / 100;
   } else if (videoViews > 0 && videoThruPlays > 0) {
     hold_rate = Math.round((videoThruPlays / videoViews) * 10000) / 100;
-  } else if (video3sViews > 0 && videoThruPlays >= 0) {
+  } else if (video3sViews > 0 && videoThruPlays > 0) {
     hold_rate = Math.round((videoThruPlays / video3sViews) * 10000) / 100;
   } else if (video3sViews > 0 && videoViews > 0) {
     hold_rate = Math.min(100, Math.round((videoViews / video3sViews) * 10000) / 100);
@@ -249,7 +256,7 @@ async function fetchInsightsFromMetaLive(opts) {
       level: 'ad',
       time_increment: 1,
       time_range: timeRange,
-      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions',
+      fields: 'ad_id,ad_name,campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start,date_stop,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,video_thruplay_watched_actions',
       limit: 1000,
       filtering: JSON.stringify(filtering),
     };

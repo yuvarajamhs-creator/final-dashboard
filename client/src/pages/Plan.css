@@ -935,3 +935,1060 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================================================
+   DARK MODE OVERRIDES — Plan
+   ============================================================ */
+[data-theme='dark'] .plan-page,
+[data-theme='classic-dark'] .plan-page {
+    background: var(--bg);
+}
+
+/* Header */
+[data-theme='dark'] .plan-header,
+[data-theme='classic-dark'] .plan-header {
+    background: var(--card);
+    border-bottom-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-header-title-card,
+[data-theme='classic-dark'] .plan-header-title-card {
+    background: var(--card);
+    border-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-page-title,
+[data-theme='classic-dark'] .plan-page-title {
+    color: var(--text);
+}
+[data-theme='dark'] .plan-page-subtitle,
+[data-theme='dark'] .plan-subsection-title,
+[data-theme='classic-dark'] .plan-page-subtitle,
+[data-theme='classic-dark'] .plan-subsection-title {
+    color: #94a3b8;
+}
+
+/* Date picker trigger */
+[data-theme='dark'] .plan-date-trigger,
+[data-theme='classic-dark'] .plan-date-trigger {
+    background: #2a2a2a;
+    border-color: rgba(255,255,255,0.12);
+}
+[data-theme='dark'] .plan-date-label,
+[data-theme='classic-dark'] .plan-date-label {
+    color: var(--text);
+}
+[data-theme='dark'] .plan-date-icon,
+[data-theme='dark'] .plan-date-chevron,
+[data-theme='classic-dark'] .plan-date-icon,
+[data-theme='classic-dark'] .plan-date-chevron {
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-date-dropdown .dropdown-menu,
+[data-theme='classic-dark'] .plan-date-dropdown .dropdown-menu {
+    background: #1e1e1e;
+    border-color: rgba(255,255,255,0.12);
+}
+[data-theme='dark'] .plan-date-preset-btn,
+[data-theme='classic-dark'] .plan-date-preset-btn {
+    background: #2a2a2a;
+    border-color: rgba(255,255,255,0.12);
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-date-preset-btn:hover,
+[data-theme='classic-dark'] .plan-date-preset-btn:hover {
+    background: #333;
+    color: var(--text);
+}
+[data-theme='dark'] .plan-date-divider,
+[data-theme='classic-dark'] .plan-date-divider {
+    background: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-date-presets-title,
+[data-theme='dark'] .plan-date-field-label,
+[data-theme='classic-dark'] .plan-date-presets-title,
+[data-theme='classic-dark'] .plan-date-field-label {
+    color: #94a3b8;
+}
+
+/* Cards */
+[data-theme='dark'] .plan-card,
+[data-theme='classic-dark'] .plan-card {
+    background: var(--card);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+}
+
+/* Hero section */
+[data-theme='dark'] .plan-hero-title,
+[data-theme='dark'] .plan-team-section-title,
+[data-theme='classic-dark'] .plan-hero-title,
+[data-theme='classic-dark'] .plan-team-section-title {
+    color: var(--text);
+}
+[data-theme='dark'] .plan-hero-tagline,
+[data-theme='dark'] .plan-hero-stat,
+[data-theme='dark'] .plan-hero-goal-text,
+[data-theme='dark'] .plan-footer-text,
+[data-theme='classic-dark'] .plan-hero-tagline,
+[data-theme='classic-dark'] .plan-hero-stat,
+[data-theme='classic-dark'] .plan-hero-goal-text,
+[data-theme='classic-dark'] .plan-footer-text {
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-hero-stat-done,
+[data-theme='classic-dark'] .plan-hero-stat-done {
+    color: var(--text);
+}
+[data-theme='dark'] .plan-hero-stat-time,
+[data-theme='classic-dark'] .plan-hero-stat-time {
+    background: #2a2a2a;
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-hero-progress-track,
+[data-theme='classic-dark'] .plan-hero-progress-track {
+    background: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-hero-marker-dot,
+[data-theme='classic-dark'] .plan-hero-marker-dot {
+    background: #94a3b8;
+    border-color: #1e1e1e;
+}
+[data-theme='dark'] .plan-hero-marker-label,
+[data-theme='classic-dark'] .plan-hero-marker-label {
+    color: #94a3b8;
+}
+
+/* Metric rows */
+[data-theme='dark'] .plan-hero-metric-row,
+[data-theme='dark'] .plan-weekly-trend-chart,
+[data-theme='classic-dark'] .plan-hero-metric-row,
+[data-theme='classic-dark'] .plan-weekly-trend-chart {
+    background: #252525;
+    border-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-hero-metric-label,
+[data-theme='classic-dark'] .plan-hero-metric-label {
+    color: var(--text);
+}
+[data-theme='dark'] .plan-hero-metric-field-label,
+[data-theme='dark'] .plan-hero-metric-stat,
+[data-theme='classic-dark'] .plan-hero-metric-field-label,
+[data-theme='classic-dark'] .plan-hero-metric-stat {
+    color: #94a3b8;
+}
+
+/* Setup message */
+[data-theme='dark'] .plan-setup-message,
+[data-theme='classic-dark'] .plan-setup-message {
+    background: #252525;
+    border-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-setup-message-text,
+[data-theme='classic-dark'] .plan-setup-message-text {
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-setup-message-text code,
+[data-theme='classic-dark'] .plan-setup-message-text code {
+    background: #2a2a2a;
+    color: #a5b4fc;
+}
+
+/* Tables */
+[data-theme='dark'] .plan-team-list-table-wrap,
+[data-theme='dark'] .plan-performance-table-wrap,
+[data-theme='classic-dark'] .plan-team-list-table-wrap,
+[data-theme='classic-dark'] .plan-performance-table-wrap {
+    background: var(--card);
+    border-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-team-list-table thead th,
+[data-theme='dark'] .plan-performance-table thead th,
+[data-theme='classic-dark'] .plan-team-list-table thead th,
+[data-theme='classic-dark'] .plan-performance-table thead th {
+    background: #252525;
+    color: #94a3b8;
+    border-bottom-color: rgba(255,255,255,0.1);
+}
+[data-theme='dark'] .plan-team-list-table td,
+[data-theme='dark'] .plan-performance-table td,
+[data-theme='dark'] .plan-team-list-table th,
+[data-theme='dark'] .plan-performance-table th,
+[data-theme='classic-dark'] .plan-team-list-table td,
+[data-theme='classic-dark'] .plan-performance-table td,
+[data-theme='classic-dark'] .plan-team-list-table th,
+[data-theme='classic-dark'] .plan-performance-table th {
+    border-bottom-color: rgba(255,255,255,0.07);
+    color: var(--text);
+}
+[data-theme='dark'] .plan-team-list-table tbody tr:hover,
+[data-theme='dark'] .plan-performance-table tbody tr:hover,
+[data-theme='classic-dark'] .plan-team-list-table tbody tr:hover,
+[data-theme='classic-dark'] .plan-performance-table tbody tr:hover {
+    background: #2a2a2a;
+}
+
+/* Loading state */
+[data-theme='dark'] .plan-loading-text,
+[data-theme='classic-dark'] .plan-loading-text {
+    color: #94a3b8;
+}
+[data-theme='dark'] .plan-loading-inline,
+[data-theme='classic-dark'] .plan-loading-inline {
+    background: rgba(99,102,241,0.1);
+    border-color: rgba(99,102,241,0.25);
+}
+
+/* Modal */
+[data-theme='dark'] .plan-modal-backdrop .modal-content,
+[data-theme='classic-dark'] .plan-modal-backdrop .modal-content {
+    background: var(--card);
+    color: var(--text);
+}
+
+/* ============================================================
+   TEAM PERFORMANCE DASHBOARD – Reference Image Redesign
+   ============================================================ */
+
+/* Row layout for the 3-column and 2-column rows */
+.plan-perf-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.25rem;
+}
+.plan-perf-row-2 {
+    grid-template-columns: 1fr 1.6fr;
+}
+
+/* Individual dashboard card */
+.plan-perf-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    padding: 1.25rem 1.25rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-height: 240px;
+}
+
+.plan-perf-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #f1f5f9;
+    padding-bottom: 0.6rem;
+}
+
+.plan-perf-card-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #0f172a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+/* ── Performance Score donut ── */
+.plan-perf-donut-outer {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.plan-perf-donut-center-label {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.plan-perf-donut-pct {
+    font-size: 1.45rem;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1;
+}
+
+.plan-perf-donut-sub {
+    font-size: 0.7rem;
+    color: #64748b;
+    margin-top: 2px;
+}
+
+/* NPS legend rows */
+.plan-perf-nps-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.25rem;
+}
+
+.plan-perf-nps-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 8px;
+    padding: 0.4rem 0.6rem;
+}
+
+.plan-perf-nps-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.plan-perf-nps-pct {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #0f172a;
+    min-width: 36px;
+}
+
+.plan-perf-nps-name {
+    font-size: 0.78rem;
+    color: #475569;
+}
+
+/* ── Radial bar (achievement / budget) ── */
+.plan-perf-radial-outer {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.plan-perf-radial-center-label {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.plan-perf-radial-pct {
+    font-size: 1.3rem;
+    font-weight: 800;
+    color: #3b82f6;
+    line-height: 1;
+}
+
+/* ── Metric progress bars ── */
+.plan-perf-metric-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+}
+
+.plan-perf-metric-bar-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.plan-perf-metric-bar-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.plan-perf-metric-bar-label {
+    font-size: 0.76rem;
+    color: #475569;
+    font-weight: 500;
+}
+
+.plan-perf-metric-bar-pct {
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.plan-perf-metric-bar-track {
+    height: 7px;
+    background: #f1f5f9;
+    border-radius: 99px;
+    overflow: hidden;
+}
+
+.plan-perf-metric-bar-fill {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 0.5s ease;
+    min-width: 4px;
+}
+
+/* ── Top Performing Teams list ── */
+.plan-perf-teams-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    flex: 1;
+}
+
+.plan-perf-team-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: 10px;
+    background: #f8fafc;
+    transition: background 0.15s;
+}
+
+.plan-perf-team-row:hover {
+    background: #f1f5f9;
+}
+
+.plan-perf-team-row--dim {
+    opacity: 0.65;
+}
+
+.plan-perf-team-ring-wrap {
+    position: relative;
+    width: 46px;
+    height: 46px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.plan-perf-team-ring-pct {
+    position: absolute;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: #334155;
+    text-align: center;
+    pointer-events: none;
+    line-height: 1;
+}
+
+.plan-perf-team-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.plan-perf-team-name {
+    font-size: 0.85rem;
+    color: #0f172a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.plan-perf-team-detail {
+    font-size: 0.72rem;
+    color: #64748b;
+}
+
+.plan-perf-team-detail--dim {
+    font-style: italic;
+}
+
+.plan-perf-team-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+}
+
+.plan-perf-team-star {
+    color: #f59e0b;
+    font-size: 1rem;
+}
+
+.plan-perf-icon-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    color: #64748b;
+    font-size: 0.72rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s;
+    padding: 0;
+}
+
+.plan-perf-icon-btn:hover {
+    background: #eff6ff;
+    border-color: #3b82f6;
+    color: #3b82f6;
+}
+
+.plan-perf-icon-btn--del:hover {
+    background: #fef2f2;
+    border-color: #ef4444;
+    color: #ef4444;
+}
+
+/* ── Budget utilization card ── */
+.plan-perf-budget-card {
+    min-height: auto;
+}
+
+.plan-perf-budget-range {
+    font-size: 0.73rem;
+    color: #64748b;
+    text-align: center;
+    margin: 0;
+}
+
+.plan-forecast-compact {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem 0.75rem;
+    margin-top: 0.25rem;
+}
+
+.plan-forecast-compact .plan-forecast-item {
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    background: #f8fafc;
+    border: 1px solid #f1f5f9;
+}
+
+.plan-forecast-compact .plan-forecast-label {
+    font-size: 0.67rem;
+    color: #64748b;
+}
+
+.plan-forecast-compact .plan-forecast-value {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #0f172a;
+    margin-top: 1px;
+}
+
+/* ── Stats grid (2x2) ── */
+.plan-perf-stats-card {
+    min-height: auto;
+}
+
+.plan-perf-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.plan-perf-stat-box {
+    padding: 0.75rem 0.9rem;
+    border-radius: 10px;
+    border-left: 3px solid var(--stat-color, #3b82f6);
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.plan-perf-stat-val {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--stat-color, #3b82f6);
+    line-height: 1;
+}
+
+.plan-perf-stat-lbl {
+    font-size: 0.72rem;
+    color: #64748b;
+    font-weight: 500;
+}
+
+/* Subsection title variants */
+.plan-subsection-title--sm {
+    font-size: 0.78rem !important;
+    margin-top: 0.5rem !important;
+    margin-bottom: 0.35rem !important;
+}
+
+.plan-subsection-title--table {
+    margin-top: 1.5rem !important;
+}
+
+/* ── Dark mode for new cards ── */
+[data-theme='dark'] .plan-perf-card,
+[data-theme='classic-dark'] .plan-perf-card {
+    background: var(--card, #1e1e1e);
+    border-color: rgba(255,255,255,0.08);
+}
+
+[data-theme='dark'] .plan-perf-card-title,
+[data-theme='classic-dark'] .plan-perf-card-title {
+    color: #f1f5f9;
+}
+
+[data-theme='dark'] .plan-perf-card-header,
+[data-theme='classic-dark'] .plan-perf-card-header {
+    border-color: rgba(255,255,255,0.07);
+}
+
+[data-theme='dark'] .plan-perf-team-row,
+[data-theme='classic-dark'] .plan-perf-team-row {
+    background: #252525;
+}
+
+[data-theme='dark'] .plan-perf-team-row:hover,
+[data-theme='classic-dark'] .plan-perf-team-row:hover {
+    background: #2d2d2d;
+}
+
+[data-theme='dark'] .plan-perf-team-name,
+[data-theme='classic-dark'] .plan-perf-team-name {
+    color: #f1f5f9;
+}
+
+[data-theme='dark'] .plan-perf-donut-pct,
+[data-theme='dark'] .plan-perf-nps-pct,
+[data-theme='dark'] .plan-perf-stat-val,
+[data-theme='classic-dark'] .plan-perf-donut-pct,
+[data-theme='classic-dark'] .plan-perf-nps-pct,
+[data-theme='classic-dark'] .plan-perf-stat-val {
+    color: inherit;
+}
+
+[data-theme='dark'] .plan-perf-metric-bar-track,
+[data-theme='classic-dark'] .plan-perf-metric-bar-track {
+    background: #2d2d2d;
+}
+
+[data-theme='dark'] .plan-perf-stat-box,
+[data-theme='dark'] .plan-forecast-compact .plan-forecast-item,
+[data-theme='classic-dark'] .plan-perf-stat-box,
+[data-theme='classic-dark'] .plan-forecast-compact .plan-forecast-item {
+    background: #252525;
+    border-color: rgba(255,255,255,0.07);
+}
+
+[data-theme='dark'] .plan-perf-icon-btn,
+[data-theme='classic-dark'] .plan-perf-icon-btn {
+    background: #2a2a2a;
+    border-color: rgba(255,255,255,0.1);
+    color: #94a3b8;
+}
+
+/* Responsive */
+@media (max-width: 1100px) {
+    .plan-perf-row {
+        grid-template-columns: 1fr 1fr;
+    }
+    .plan-perf-row-2 {
+        grid-template-columns: 1fr;
+    }
+    .plan-perf-top-teams {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 700px) {
+    .plan-perf-row,
+    .plan-perf-row-2 {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ============================================================
+   WEBINER BUDGET CARDS – 2x2 Column Grid
+   ============================================================ */
+
+.plan-webiner-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.85rem;
+    margin-bottom: 1rem;
+}
+
+/* Each webiner card */
+.plan-wc-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    transition: box-shadow 0.25s ease;
+}
+
+/* Card header accent strip */
+.plan-wc-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+}
+
+.plan-wc-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+}
+
+.plan-wc-header-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.plan-wc-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #0f172a;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.plan-wc-tagline {
+    font-size: 0.69rem;
+    color: #64748b;
+    margin: 1px 0 0;
+}
+
+.plan-wc-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-shrink: 0;
+}
+
+.plan-wc-avg-badge {
+    font-size: 0.72rem;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: 99px;
+    color: #fff;
+    letter-spacing: 0.02em;
+}
+
+/* Edit-all button in card header */
+.plan-wc-edit-all-btn {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 99px;
+    border: 1.5px solid;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+}
+.plan-wc-edit-all-btn:hover { opacity: 0.82; }
+
+/* Metrics column */
+.plan-wc-metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0.5rem 1rem 0.85rem;
+    flex: 1;
+}
+
+.plan-wc-metric {
+    padding: 0.55rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.plan-wc-metric:last-child {
+    border-bottom: none;
+}
+
+.plan-wc-metric-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.plan-wc-metric-label {
+    font-size: 0.73rem;
+    font-weight: 600;
+    color: #334155;
+    cursor: default;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 60%;
+}
+
+.plan-wc-metric-stat {
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+/* Saved / collapsed state */
+.plan-wc-saved-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 5px;
+    overflow: hidden;
+}
+
+.plan-wc-saved-value {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 5px 10px;
+    border-radius: 7px;
+    border: 1.5px solid;
+    font-size: 0.78rem;
+}
+
+.plan-wc-saved-label {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    font-style: italic;
+}
+
+/* Edit button per metric */
+.plan-wc-edit-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: 1.5px solid;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: opacity 0.15s;
+}
+
+/* Save / Set checkmark button */
+.plan-wc-set-btn {
+    width: 30px;
+    height: 28px;
+    border-radius: 7px;
+    border: none;
+    color: #fff;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.plan-wc-metric-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 5px;
+    overflow: hidden;
+}
+
+.plan-wc-input {
+    flex: 1;
+    height: 28px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 7px;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    color: #0f172a;
+    background: #f8fafc;
+    outline: none;
+    transition: border-color 0.18s, box-shadow 0.18s;
+    min-width: 0;
+}
+.plan-wc-input:focus {
+    border-color: var(--wc-focus-color, #1877f2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--wc-focus-color, #1877f2) 12%, transparent);
+    background: #fff;
+}
+.plan-wc-input::placeholder {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+/* Hide number input spinners */
+.plan-wc-input::-webkit-outer-spin-button,
+.plan-wc-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.plan-wc-input[type=number] { -moz-appearance: textfield; }
+
+.plan-wc-pct-badge {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 99px;
+    flex-shrink: 0;
+    min-width: 36px;
+    text-align: center;
+}
+
+.plan-wc-bar-track {
+    height: 5px;
+    background: #f1f5f9;
+    border-radius: 99px;
+    overflow: hidden;
+}
+
+.plan-wc-bar-fill {
+    height: 100%;
+    border-radius: 99px;
+    min-width: 4px;
+}
+
+/* ============================================================
+   WEBINER CHARTS – Colorful AreaChart cards
+   ============================================================ */
+
+.plan-webiner-graphs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.plan-wg-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 1rem 1rem 0.75rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    transition: box-shadow 0.25s ease;
+    overflow: hidden;
+    position: relative;
+}
+
+.plan-wg-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--wg-color, #1877f2), transparent);
+    border-radius: 16px 16px 0 0;
+}
+
+.plan-wg-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.45rem;
+}
+
+.plan-wg-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    flex-shrink: 0;
+}
+
+.plan-wg-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #0f172a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+}
+
+.plan-wg-legend {
+    display: flex;
+    gap: 0.9rem;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.plan-wg-legend span {
+    font-size: 0.69rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+}
+
+/* ── Dark mode ── */
+[data-theme='dark'] .plan-wc-card,
+[data-theme='classic-dark'] .plan-wc-card {
+    background: var(--card, #1e1e1e);
+    border-color: rgba(255,255,255,0.08);
+}
+
+[data-theme='dark'] .plan-wc-title,
+[data-theme='classic-dark'] .plan-wc-title {
+    color: #f1f5f9;
+}
+
+[data-theme='dark'] .plan-wc-metric-label,
+[data-theme='classic-dark'] .plan-wc-metric-label {
+    color: #cbd5e1;
+}
+
+[data-theme='dark'] .plan-wc-metric,
+[data-theme='classic-dark'] .plan-wc-metric {
+    border-color: rgba(255,255,255,0.07);
+}
+
+[data-theme='dark'] .plan-wc-input,
+[data-theme='classic-dark'] .plan-wc-input {
+    background: #2a2a2a;
+    border-color: rgba(255,255,255,0.1);
+    color: #f1f5f9;
+}
+
+[data-theme='dark'] .plan-wc-bar-track,
+[data-theme='classic-dark'] .plan-wc-bar-track {
+    background: #2d2d2d;
+}
+
+[data-theme='dark'] .plan-wg-card,
+[data-theme='classic-dark'] .plan-wg-card {
+    background: var(--card, #1e1e1e);
+    border-color: rgba(255,255,255,0.08);
+}
+
+[data-theme='dark'] .plan-wg-title,
+[data-theme='classic-dark'] .plan-wg-title {
+    color: #f1f5f9;
+}
+
+/* ── Responsive ── */
+@media (max-width: 1200px) {
+    .plan-webiner-cards-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+@media (max-width: 860px) {
+    .plan-webiner-cards-grid,
+    .plan-webiner-graphs-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .plan-wc-title {
+        font-size: 0.75rem;
+    }
+}

@@ -18,6 +18,24 @@ const { enrichInsightsRow } = require('../meta/insightsService');
 const { resolveAudiencePoolForCampaign } = require('./saturationService');
 const { supabase } = require('../supabase');
 
+// Module-level audience cache shared across runs (5-min TTL)
+const _audienceCache = new Map(); // key → { size, ts }
+const AUDIENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Run N async tasks with max concurrency
+async function pConcurrent(tasks, concurrency = 5) {
+  const results = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
+  return results;
+}
+
 const META_API_VERSION = process.env.META_API_VERSION || 'v21.0';
 const METHODOLOGY_VERSION = 'Creative_State_MHS_v1.0';
 const TARGET_FREQUENCY = 3;
@@ -428,26 +446,28 @@ async function runFatigueAnalysis(opts = {}) {
   }
 
   const accessToken = credentials.accessToken;
-  const allCreatives = [];
 
-  for (const acc of accounts) {
+  async function processAccount(acc) {
     const accId = acc.account_id || acc.id;
-    if (!accId) continue;
+    if (!accId) return [];
     const accDisplayName = (acc.account_name || acc.name || '').toString().trim() || null;
 
     let currentRows = [];
     let previousRows = [];
     try {
-      currentRows = await fetchAdInsights(accId, accessToken, fromDate, toDate);
-      previousRows = await fetchAdInsights(accId, accessToken, prevFrom, prevTo);
+      // Fetch current + previous windows in parallel
+      [currentRows, previousRows] = await Promise.all([
+        fetchAdInsights(accId, accessToken, fromDate, toDate),
+        fetchAdInsights(accId, accessToken, prevFrom, prevTo),
+      ]);
     } catch (err) {
       console.error('[creativeFatigueService] Meta API error for account', accId, err.message);
-      continue;
+      return [];
     }
 
     const currentAgg = aggregateByAd(currentRows);
     const previousAgg = new Map(aggregateByAd(previousRows).map((c) => [c.ad_id, c]));
-    if (currentAgg.length === 0) continue;
+    if (currentAgg.length === 0) return [];
 
     const createdMap = await batchFetchAdCreatedTimes(
       currentAgg.map((c) => c.ad_id),
@@ -472,15 +492,21 @@ async function runFatigueAnalysis(opts = {}) {
       }
     }
 
-    const audienceCache = new Map();
+    // Pre-fetch all unique campaign audiences in parallel (concurrency 5) using module-level TTL cache
     async function getAudience(campaignId) {
       if (!campaignId) return null;
-      if (audienceCache.has(campaignId)) return audienceCache.get(campaignId);
+      const cacheKey = `${accId}:${campaignId}`;
+      const cached = _audienceCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < AUDIENCE_CACHE_TTL_MS) return cached.size;
       const r = await resolveAudiencePoolForCampaign(campaignId, accId, accessToken);
-      audienceCache.set(campaignId, r.audience_size);
+      _audienceCache.set(cacheKey, { size: r.audience_size, ts: Date.now() });
       return r.audience_size;
     }
 
+    const uniqueCampaignIds = [...new Set(currentAgg.map((c) => c.campaign_id).filter(Boolean))];
+    await pConcurrent(uniqueCampaignIds.map((cid) => () => getAudience(cid)), 5);
+
+    const accountCreatives = [];
     for (const cur of currentAgg) {
       const prev = previousAgg.get(cur.ad_id) || {};
       const reach = cur.reach || 0;
@@ -510,6 +536,7 @@ async function runFatigueAnalysis(opts = {}) {
         }
       }
 
+      // Use pre-fetched audience from cache (synchronous)
       const audienceSize = await getAudience(cur.campaign_id);
       const dailyReach = reach > 0 ? reach / daysInCurrent : 0;
       let adjustedLifespan = null;
@@ -568,9 +595,14 @@ async function runFatigueAnalysis(opts = {}) {
         period_to: toDate,
         methodology: METHODOLOGY_VERSION,
       };
-      allCreatives.push(row);
+      accountCreatives.push(row);
     }
+    return accountCreatives;
   }
+
+  // Process all accounts in parallel (concurrency 5)
+  const accountResults = await pConcurrent(accounts.map((acc) => () => processAccount(acc)), 5);
+  const allCreatives = accountResults.flat();
 
   if (supabase) {
     const toInsert = allCreatives.map((r) => ({

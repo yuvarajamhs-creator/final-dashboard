@@ -235,12 +235,13 @@ async function fetchMediaInsights(media, accessToken) {
     const comments = metrics.comments ?? 0;
     const saved = metrics.saved ?? 0;
     const shares = metrics.shares ?? 0;
-
-    // Fetch follow count in an isolated call — failure here must not affect main metrics above
+    // "follows" is the current valid metric name (ig_reels_video_follow_count renamed in v22.0+).
+    // Fetched in a SEPARATE call so a failure here cannot zero-out the main metrics above.
     let follows = 0;
     const followData = await rateLimiter.schedule(() =>
       graphApiGet(baseUrl, {
-        metric: "ig_reels_video_follow_count",
+        metric: "follows",
+        period: "lifetime",
         access_token: accessToken,
       })
     );

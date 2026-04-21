@@ -2632,7 +2632,7 @@ export default function AIInsights() {
                             <tbody>
                                 {sortedSatCampaigns.map((c, i) => {
                                     const statusLower = String(c.status || '').toLowerCase();
-                                    const badgeClass = statusLower.includes('saturat') ? 'ai2-badge-danger' : statusLower.includes('warn') ? 'ai2-badge-warn' : 'ai2-badge-success';
+                                    const badgeClass = statusLower.includes('warn') ? 'ai2-badge-danger' : statusLower.includes('saturat') ? 'ai2-badge-warn' : 'ai2-badge-success';
                                     const idx = c.saturation_index != null ? Number(c.saturation_index) : (c.score != null ? Number(c.score) : null);
                                     const chipClass = idx == null ? '' : idx >= 70 ? 'ai2-chip-danger' : idx >= 40 ? 'ai2-chip-warn' : 'ai2-chip-success';
                                     return (
@@ -2712,7 +2712,7 @@ export default function AIInsights() {
                                 {sortedFatCreatives.map((c, i) => {
                                     const auditKeys = c.weekly_audit ? Object.entries(c.weekly_audit).filter(([, v]) => v).map(([k]) => k).join(', ') : '';
                                     const rawScore = c.fatigue_score != null ? Number(c.fatigue_score) : (c.score != null ? Number(c.score) : null);
-                                    const chipClass = rawScore == null ? '' : rawScore >= 100 ? 'ai2-chip-danger' : rawScore >= 70 ? 'ai2-chip-warn' : rawScore >= 40 ? 'ai2-chip-warn' : 'ai2-chip-success';
+                                    const chipClass = rawScore == null ? '' : rawScore >= 100 ? 'ai2-chip-danger' : rawScore >= 70 ? 'ai2-chip-warn' : rawScore >= 40 ? 'ai2-chip-yellow' : 'ai2-chip-success';
                                     const statusLower = String(c.status || '').toLowerCase();
                                     const badgeClass = statusLower.includes('severe') ? 'ai2-badge-danger' : statusLower.includes('fatigue') ? 'ai2-badge-warn' : statusLower.includes('aging') ? 'ai2-badge-yellow' : 'ai2-badge-success';
                                     return (

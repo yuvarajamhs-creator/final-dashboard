@@ -485,9 +485,9 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
       
       // Video metrics for Hook Rate and Hold Rate (p50/p75 work for ALL campaign types; ThruPlay only for Video Views)
       const videoViews = aggs['video_view'] || aggs['video_views'] || 0;
-      // Prefer server-enriched / top-level Meta field — 3s views are often video_3_sec_watched_actions, not in actions[].
+      // Use server-enriched value only when > 0; fall back to client-side lookup including aggs['video_view'] (Meta's action_type for 3s views)
       const video3sViews =
-        (d.video3sViews != null && d.video3sViews !== '')
+        (d.video3sViews != null && d.video3sViews !== '' && num(d.video3sViews) > 0)
           ? num(d.video3sViews)
           : getTopLevelActionValue(d, 'video_3_sec_watched_actions') ||
             getActionCountForKey(d, aggs, values, 'video_3_sec_watched_actions') ||
@@ -498,15 +498,24 @@ const fetchDashboardData = async ({ days = 30, from = null, to = null, campaignI
             aggs['video_3_sec_watched_actions'] ||
             aggs['video_continuous_2_sec_watched_actions'] ||
             aggs['video_15_sec_watched_actions'] ||
+            aggs['video_view'] ||  // Meta's action_type for 3-second video views in the actions array
             0;
-      const videoThruPlays = aggs['video_thruplay_watched_actions'] || aggs['video_thruplay'] || aggs['video_views_thruplay'] || 0;
+      const videoThruPlays =
+        getTopLevelActionValue(d, 'video_thruplay_watched_actions') ||
+        aggs['video_thruplay_watched_actions'] ||
+        aggs['video_thruplay'] ||
+        aggs['video_views_thruplay'] ||
+        0;
       const videoP50Watched = getActionCountForKey(d, aggs, values, 'video_p50_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p50_watched');
       const videoP75Watched = getActionCountForKey(d, aggs, values, 'video_p75_watched_actions') || getActionCountForKey(d, aggs, values, 'video_p75_watched');
 
-      // Prefer server-enriched values when present (from insightsService.enrichInsightsRow), else compute client-side with same fallbacks as server
+      // Prefer server-enriched values when present; use > 0 check so server's 0 doesn't suppress client-side recomputation
       const plays = (d.videoPlays != null && d.videoPlays !== '') ? num(d.videoPlays) : (getTopLevelActionValue(d, 'video_play_actions') || getTopLevelActionValue(d, 'video_play') || getTopLevelActionValue(d, 'video_view') || getActionValue(d, 'video_play_actions') || getActionValue(d, 'video_play') || getActionValue(d, 'video_view') || 0);
       const fullViews = (d.videoP100Watched != null && d.videoP100Watched !== '') ? num(d.videoP100Watched) : getVideoCompletionCount(d, aggs, values);
-      const serverHoldRate = (d.hold_rate != null && d.hold_rate !== '') || (d.holdRate != null && d.holdRate !== '') ? num(d.hold_rate ?? d.holdRate) : null;
+      // Treat server hold_rate=0 as "no data" so we still attempt client-side computation from available fields
+      const serverHoldRate = (d.hold_rate != null && d.hold_rate !== '' && num(d.hold_rate ?? d.holdRate) > 0)
+        ? num(d.hold_rate ?? d.holdRate)
+        : (d.holdRate != null && d.holdRate !== '' && num(d.holdRate) > 0) ? num(d.holdRate) : null;
       let holdRate = serverHoldRate;
       if (holdRate == null || (typeof holdRate === 'number' && Number.isNaN(holdRate))) {
         holdRate = 0;
@@ -1300,6 +1309,8 @@ export default function AdsDashboardBootstrap() {
   const [filteredLeadsForm, setFilteredLeadsForm] = useState(null);
   const [filteredLeadsForms, setFilteredLeadsForms] = useState([]);
   const [filteredLeadsFormsLoading, setFilteredLeadsFormsLoading] = useState(false);
+  const [formDropdownOpen, setFormDropdownOpen] = useState(false);
+  const formDropdownRef = React.useRef(null);
   const [filteredLeadsTimeRange, setFilteredLeadsTimeRange] = useState(() => {
     const today = new Date();
     const endDate = new Date(today);
@@ -3229,6 +3240,7 @@ export default function AdsDashboardBootstrap() {
   const formatMoney = (v) => `₹${(v || 0).toFixed(2)}`;
   const formatNum = (v) => (v || 0).toLocaleString();
   const formatPerc = (v) => `${((v || 0)).toFixed(2)}%`;
+  const formatHoldRate = (v) => (v != null && v > 0) ? `${Number(v).toFixed(2)}%` : '—';
   const formatChange = (v) => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
     const arrow = v >= 0 ? '↑' : '↓';
@@ -4809,7 +4821,7 @@ export default function AdsDashboardBootstrap() {
             <div className="kpi-card-body">
               <div className="kpi-icon">⏸️</div>
               <small className="kpi-label">Hold Rate</small>
-              <div className="kpi-value">{formatPerc(totals.holdRate)}</div>
+              <div className="kpi-value">{formatHoldRate(totals.holdRate)}</div>
               <small className="kpi-subtitle">100% Watched / Video Play</small>
             </div>
           </div>
@@ -5391,36 +5403,128 @@ export default function AdsDashboardBootstrap() {
                   </select>
                 </div>
 
-                {/* Form Filter */}
-                <div className="col-12 col-md-auto">
+                {/* Form Filter — custom dropdown with Active/Inactive status badges */}
+                <div className="col-12 col-md-auto" ref={formDropdownRef} style={{ position: 'relative' }}>
                   <label className="form-label small fw-bold text-uppercase text-muted mb-1" style={{ fontSize: '0.7rem', letterSpacing: '0.5px' }}>
                     <i className="fas fa-edit me-1"></i> FORM
                   </label>
-                  <select
-                    className="form-select form-select-sm"
-                    value={filteredLeadsForm || ''}
-                    onChange={(e) => {
-                      const formId = e.target.value || null;
-                      setFilteredLeadsForm(formId);
-                    }}
+                  {/* Trigger button */}
+                  <button
+                    type="button"
                     disabled={!filteredLeadsPage || filteredLeadsFormsLoading}
+                    onClick={() => setFormDropdownOpen(o => !o)}
                     style={{
-                      fontSize: '0.8rem',
-                      minWidth: '200px',
-                      backgroundColor: 'var(--card, #ffffff)',
-                      color: 'var(--text, #1e293b)',
-                      borderColor: 'var(--border-color, #cbd5e1)'
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      gap: '8px', minWidth: '230px', padding: '6px 10px',
+                      fontSize: '0.8rem', fontWeight: 500,
+                      backgroundColor: 'var(--card, #ffffff)', color: 'var(--text, #1e293b)',
+                      border: '1px solid var(--border-color, #cbd5e1)', borderRadius: '6px',
+                      cursor: (!filteredLeadsPage || filteredLeadsFormsLoading) ? 'not-allowed' : 'pointer',
+                      opacity: (!filteredLeadsPage || filteredLeadsFormsLoading) ? 0.6 : 1,
+                      transition: 'border-color 0.15s',
                     }}
                   >
-                    <option value="">
-                      {filteredLeadsFormsLoading ? 'Loading forms...' : filteredLeadsPage ? 'Select a Form' : 'Select a Page first'}
-                    </option>
-                    {filteredLeadsForms.map((form) => (
-                      <option key={form.id} value={form.id}>
-                        {form.name}
-                      </option>
-                    ))}
-                  </select>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0 }}>
+                      {/* Status dot for selected form */}
+                      {filteredLeadsForm && (() => {
+                        const sel = filteredLeadsForms.find(f => f.id === filteredLeadsForm);
+                        const isActive = sel && String(sel.status || '').toUpperCase() === 'ACTIVE';
+                        return sel ? (
+                          <span style={{
+                            width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0,
+                            backgroundColor: isActive ? '#22c55e' : '#94a3b8',
+                          }} />
+                        ) : null;
+                      })()}
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {filteredLeadsFormsLoading
+                          ? 'Loading forms…'
+                          : filteredLeadsForm
+                            ? (filteredLeadsForms.find(f => f.id === filteredLeadsForm)?.name || 'Select a Form')
+                            : filteredLeadsPage ? 'Select a Form' : 'Select a Page first'}
+                      </span>
+                    </span>
+                    <i className={`fas fa-chevron-${formDropdownOpen ? 'up' : 'down'}`}
+                      style={{ fontSize: '0.65rem', color: '#94a3b8', flexShrink: 0 }} />
+                  </button>
+
+                  {/* Dropdown list */}
+                  {formDropdownOpen && !filteredLeadsFormsLoading && filteredLeadsPage && (
+                    <div
+                      style={{
+                        position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 1050,
+                        minWidth: '280px', maxHeight: '260px', overflowY: 'auto',
+                        backgroundColor: 'var(--card, #ffffff)', color: 'var(--text, #1e293b)',
+                        border: '1px solid var(--border-color, #cbd5e1)',
+                        borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+                        padding: '4px 0',
+                      }}
+                      onMouseLeave={() => {}}
+                    >
+                      {/* Click-outside handler */}
+                      {formDropdownOpen && (
+                        <div
+                          style={{ position: 'fixed', inset: 0, zIndex: 1049 }}
+                          onClick={() => setFormDropdownOpen(false)}
+                        />
+                      )}
+                      <div style={{ position: 'relative', zIndex: 1050 }}>
+                        {/* "All Forms" option */}
+                        <div
+                          onClick={() => { setFilteredLeadsForm(null); setFormDropdownOpen(false); }}
+                          style={{
+                            padding: '7px 12px', cursor: 'pointer', fontSize: '0.8rem',
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                            backgroundColor: !filteredLeadsForm ? 'rgba(99,102,241,0.08)' : 'transparent',
+                            fontWeight: !filteredLeadsForm ? 600 : 400,
+                            borderBottom: '1px solid var(--border-color, #e2e8f0)',
+                          }}
+                        >
+                          <span style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: '#94a3b8', flexShrink: 0 }} />
+                          <span style={{ flex: 1 }}>Select a Form</span>
+                        </div>
+                        {filteredLeadsForms.map((form) => {
+                          const isActive = String(form.status || '').toUpperCase() === 'ACTIVE';
+                          const isSelected = filteredLeadsForm === form.id;
+                          return (
+                            <div
+                              key={form.id}
+                              onClick={() => { setFilteredLeadsForm(form.id); setFormDropdownOpen(false); }}
+                              style={{
+                                padding: '7px 12px', cursor: 'pointer', fontSize: '0.8rem',
+                                display: 'flex', alignItems: 'center', gap: '8px',
+                                backgroundColor: isSelected ? 'rgba(99,102,241,0.1)' : 'transparent',
+                                fontWeight: isSelected ? 600 : 400,
+                                transition: 'background-color 0.1s',
+                              }}
+                              onMouseEnter={e => { if (!isSelected) e.currentTarget.style.backgroundColor = 'rgba(0,0,0,0.04)'; }}
+                              onMouseLeave={e => { if (!isSelected) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                            >
+                              {/* Status dot */}
+                              <span style={{
+                                width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0,
+                                backgroundColor: isActive ? '#22c55e' : '#94a3b8',
+                              }} />
+                              {/* Form name */}
+                              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {form.name}
+                              </span>
+                              {/* Status badge */}
+                              <span style={{
+                                fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.05em',
+                                padding: '2px 6px', borderRadius: '20px', flexShrink: 0,
+                                backgroundColor: isActive ? '#dcfce7' : '#f1f5f9',
+                                color: isActive ? '#166534' : '#64748b',
+                                border: `1px solid ${isActive ? '#86efac' : '#cbd5e1'}`,
+                              }}>
+                                {isActive ? 'ACTIVE' : 'INACTIVE'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Time Range Filter */}
@@ -5893,7 +5997,7 @@ export default function AdsDashboardBootstrap() {
                           <td className="text-end fw-medium">{formatMoney(ad.cpl)}</td>
                           <td className="text-end">{formatNum(ad.conversions)}</td>
                           <td className="text-end">{formatPerc(ad.hookRate)}</td>
-                          <td className="text-end">{formatPerc(ad.holdRate ?? 0)}</td>
+                          <td className="text-end">{formatHoldRate(ad.holdRate)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -5909,7 +6013,7 @@ export default function AdsDashboardBootstrap() {
                         <td className="text-end">{formatMoney(totals.cpl)}</td>
                         <td className="text-end">{formatNum(sortedAdBreakdown.reduce((sum, ad) => sum + ad.conversions, 0))}</td>
                         <td className="text-end">{formatPerc(totals.hookRate)}</td>
-                        <td className="text-end">{formatPerc(totals.holdRate ?? 0)}</td>
+                        <td className="text-end">{formatHoldRate(totals.holdRate)}</td>
                       </tr>
                     </tfoot>
                   </table>

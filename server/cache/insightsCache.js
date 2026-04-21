@@ -42,9 +42,14 @@ function buildInsightsKey(opts) {
   return `insights:${accounts}:${from}:${to}:${campaign}:${ad}:${live}`;
 }
 
+function clear() {
+  store.clear();
+}
+
 module.exports = {
   get,
   set,
+  clear,
   buildMediaInsightsKey,
   buildInsightsKey,
   DEFAULT_TTL_SECONDS,

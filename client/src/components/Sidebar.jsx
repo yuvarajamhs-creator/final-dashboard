@@ -173,20 +173,6 @@ export default function Layout({ children }) {
             </NavLink>
           </li>
 
-          {/* 8. Collaboration */}
-          <li className="nav-item mb-2">
-            <NavLink
-              to="/collaboration"
-              className="nav-link sidebar-link d-flex align-items-center"
-              onClick={() => {
-                if (window.innerWidth < 992) setSidebarOpen(false);
-              }}
-            >
-              <span className="icon-wrapper me-3">🤝</span>
-              <span>Collaboration</span>
-            </NavLink>
-          </li>
-
           {/* 9. Settings Dropdown */}
           <li className="nav-item mb-2" ref={settingsMenuRef}>
             <button
