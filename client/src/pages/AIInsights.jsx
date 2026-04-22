@@ -1141,6 +1141,8 @@ export default function AIInsights() {
     const [reelsData, setReelsData] = useState(defaultReelsData);
     const [insights, setInsights] = useState([]);
     const [recommendations, setRecommendations] = useState([]);
+    // Rich campaign summary for the user's selected date range — used by Ask AI for filter-aware answers
+    const [filteredAdsSummary, setFilteredAdsSummary] = useState(null);
     /** When AI returns 429 quota exceeded: show last result + this message and countdown */
     const [quotaRetrySeconds, setQuotaRetrySeconds] = useState(null);
     const [lastAnalysedAt, setLastAnalysedAt] = useState(null);
@@ -1228,6 +1230,7 @@ export default function AIInsights() {
         setLoadingPhase('data');
         setError(null);
         setQuotaRetrySeconds(null);
+        setFilteredAdsSummary(null); // clear stale summary while new data loads
         try {
             const { from: heroFrom, to: heroTo } = resolvedInsightsRange;
             const dateRange = { from: heroFrom, to: heroTo };
@@ -1258,6 +1261,44 @@ export default function AIInsights() {
                     });
                 }
             }
+
+            // --- Build rich summary for the user's SELECTED date range (used by Ask AI) ---
+            const filteredRows = filterInsightsRowsByPeriod(insightsRows, { from: heroFrom, to: heroTo });
+            if (filteredRows.length > 0) {
+                // Aggregate totals
+                const totals = filteredRows.reduce((acc, r) => {
+                    acc.spend += num(r.spend); acc.leads += num(r.leads); acc.impressions += num(r.impressions);
+                    acc.clicks += num(r.clicks); acc.conversions += num(r.conversions || 0);
+                    return acc;
+                }, { spend: 0, leads: 0, impressions: 0, clicks: 0, conversions: 0 });
+                totals.cpl = totals.leads > 0 ? totals.spend / totals.leads : 0;
+                totals.ctr = totals.impressions > 0 ? (totals.clicks / totals.impressions) * 100 : 0;
+
+                // Group by ad_id: sum metrics per ad
+                const adMap = {};
+                for (const r of filteredRows) {
+                    const key = r.ad_id || r.ad_name || 'unknown';
+                    if (!adMap[key]) adMap[key] = { name: r.ad_name, campaign: r.campaign_name, spend: 0, leads: 0, impressions: 0, clicks: 0 };
+                    adMap[key].spend += num(r.spend);
+                    adMap[key].leads += num(r.leads);
+                    adMap[key].impressions += num(r.impressions);
+                    adMap[key].clicks += num(r.clicks);
+                }
+                const adList = Object.values(adMap).map(a => ({ ...a, cpl: a.leads > 0 ? a.spend / a.leads : 0, ctr: a.impressions > 0 ? (a.clicks / a.impressions) * 100 : 0 }));
+                const topByLeads = [...adList].sort((a, b) => b.leads - a.leads).slice(0, 5).map(a => ({ name: a.name, campaign: a.campaign, leads: Math.round(a.leads), spend: +a.spend.toFixed(2), cpl: +a.cpl.toFixed(2), ctr: +a.ctr.toFixed(2) }));
+                const topByCpl = [...adList].filter(a => a.leads > 0).sort((a, b) => a.cpl - b.cpl).slice(0, 5).map(a => ({ name: a.name, campaign: a.campaign, leads: Math.round(a.leads), cpl: +a.cpl.toFixed(2) }));
+                const worstByCpl = [...adList].filter(a => a.leads > 0).sort((a, b) => b.cpl - a.cpl).slice(0, 3).map(a => ({ name: a.name, campaign: a.campaign, leads: Math.round(a.leads), cpl: +a.cpl.toFixed(2) }));
+
+                if (!isStale()) setFilteredAdsSummary({
+                    dateRange: { from: heroFrom, to: heroTo },
+                    totalAds: adList.length,
+                    totals: { spend: +totals.spend.toFixed(2), leads: Math.round(totals.leads), cpl: +totals.cpl.toFixed(2), ctr: +totals.ctr.toFixed(2), impressions: Math.round(totals.impressions), clicks: Math.round(totals.clicks) },
+                    topAdsByLeads: topByLeads,
+                    topAdsByCpl: topByCpl,
+                    worstAdsByCpl: worstByCpl,
+                });
+            }
+            // ---
 
             const calendarPeriods = getPeriodRanges();
             const snapPeriods = getSnapshotPeriodRanges();
@@ -1823,6 +1864,8 @@ export default function AIInsights() {
         return {
             dateRange: resolvedInsightsRange,
             activePeriod: periodLabel,
+            // Rich campaign data for the selected date range — drives filter-aware Ask AI answers
+            campaignSummary: filteredAdsSummary ?? null,
             bestAd: {
                 name: currentAd?.name,
                 spend: currentAd?.spend,
@@ -1880,6 +1923,7 @@ export default function AIInsights() {
     }, [
         resolvedInsightsRange,
         periodLabel,
+        filteredAdsSummary,
         currentAd,
         reelForCard,
         reelPerfSummary,
