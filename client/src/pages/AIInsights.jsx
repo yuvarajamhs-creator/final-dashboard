@@ -1413,7 +1413,7 @@ export default function AIInsights() {
             const headers = {};
             if (token) headers['Authorization'] = `Bearer ${token}`;
             const { from, to } = resolvedInsightsRange;
-            const res = await fetch(`${API_BASE}/api/ai/lead-quality/scores?dateFrom=${encodeURIComponent(from)}&dateTo=${encodeURIComponent(to)}&limit=100`, { headers });
+            const res = await fetch(`${API_BASE}/api/ai/lead-quality/scores?dateFrom=${encodeURIComponent(from)}&dateTo=${encodeURIComponent(to)}&limit=10000`, { headers });
             const json = await res.json().catch(() => ({}));
             if (json.success && Array.isArray(json.data)) setQualityScores(json.data);
         } catch (e) { /* ignore */ }
@@ -1996,11 +1996,13 @@ export default function AIInsights() {
     const leadScoringRows    = sortedLeadRows.slice(0, 50);
 
     const downloadLeadsCSV = () => {
-        const headers = ['Lead', 'Phone Number', 'Sugar Segment', 'Score', 'Tier', 'Category', 'Next Action'];
+        const headers = ['Date & Time', 'Lead', 'Phone Number', 'Sugar Segment', 'Sugar Poll', 'Score', 'Tier', 'Category', 'Next Action'];
         const rows = allLeadScoringRows.map(r => [
+            r.date_time ?? r.score_breakdown?.date_time ?? r.created_at ?? '—',
             r.name || '—',
             r.phone || '—',
             r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—',
+            r.sugar_poll ?? r.score_breakdown?.sugar_poll ?? '—',
             r.score ?? '—',
             inferLeadTierFromRow(r),
             r.category || '—',
@@ -2020,9 +2022,11 @@ export default function AIInsights() {
         const wb = new ExcelJS.Workbook();
         const ws = wb.addWorksheet('Lead Scoring');
         ws.columns = [
+            { header: 'Date & Time', key: 'date_time', width: 20 },
             { header: 'Lead', key: 'name', width: 24 },
             { header: 'Phone Number', key: 'phone', width: 18 },
             { header: 'Sugar Segment', key: 'sugar_segment', width: 16 },
+            { header: 'Sugar Poll', key: 'sugar_poll', width: 12 },
             { header: 'Score', key: 'score', width: 8 },
             { header: 'Tier', key: 'tier', width: 10 },
             { header: 'Category', key: 'category', width: 12 },
@@ -2030,9 +2034,11 @@ export default function AIInsights() {
         ];
         ws.getRow(1).font = { bold: true };
         allLeadScoringRows.forEach(r => ws.addRow({
+            date_time: r.date_time ?? r.score_breakdown?.date_time ?? r.created_at ?? '—',
             name: r.name || '—',
             phone: r.phone || '—',
             sugar_segment: r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—',
+            sugar_poll: r.sugar_poll ?? r.score_breakdown?.sugar_poll ?? '—',
             score: r.score ?? '—',
             tier: inferLeadTierFromRow(r),
             category: r.category || '—',
@@ -2799,9 +2805,11 @@ export default function AIInsights() {
                         <table className="table table-hover align-middle mb-0" style={{ width: '100%', tableLayout: 'auto' }}>
                             <thead className="table-light">
                                 <tr>
+                                    <SortTh label="Date & Time"   field="date_time"     sort={leadSort} setSort={setLeadSort} />
                                     <SortTh label="Lead"          field="name"          sort={leadSort} setSort={setLeadSort} />
                                     <SortTh label="Phone Number"  field="phone"         sort={leadSort} setSort={setLeadSort} />
                                     <SortTh label="Sugar Segment" field="sugar_segment" sort={leadSort} setSort={setLeadSort} />
+                                    <SortTh label="Sugar Poll"    field="sugar_level"   sort={leadSort} setSort={setLeadSort} />
                                     <SortTh label="Score"         field="score"         sort={leadSort} setSort={setLeadSort} align="right" />
                                     <SortTh label="Tier"          field="tier"          sort={leadSort} setSort={setLeadSort} />
                                     <SortTh label="Category"      field="category"      sort={leadSort} setSort={setLeadSort} />
@@ -2817,9 +2825,17 @@ export default function AIInsights() {
                                     const chipClass = score == null ? '' : score >= 70 ? 'ai2-chip-success' : score >= 40 ? 'ai2-chip-warn' : 'ai2-chip-muted';
                                     return (
                                         <tr key={r.lead_id || r.phone || i} style={{ cursor: 'default' }}>
+                                            <td className="text-muted small" style={{ whiteSpace: 'nowrap' }}>{(() => {
+                                                const raw = r.date_time ?? r.score_breakdown?.date_time ?? r.created_at;
+                                                if (!raw) return '—';
+                                                const d = new Date(raw);
+                                                if (isNaN(d)) return String(raw).slice(0, 16);
+                                                return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+                                            })()}</td>
                                             <td className="fw-medium">{r.name || '—'}</td>
                                             <td className="text-muted small">{r.phone || '—'}</td>
                                             <td>{r.sugar_segment ?? r.score_breakdown?.sugar_segment ?? '—'}</td>
+                                            <td className="text-muted small">{r.sugar_poll ?? r.score_breakdown?.sugar_poll ?? '—'}</td>
                                             <td className="text-end">
                                                 {score != null ? <span className={`ai2-chip ${chipClass}`}>{score}</span> : '—'}
                                             </td>

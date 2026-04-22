@@ -183,6 +183,8 @@ function scoreOneLead(lead) {
     lead.SugarPoll ??
     lead.sugarPoll ??
     null;
+  // Preserve the original raw string (e.g. "above_250_sugar_level") for display
+  const sugarPollRaw = typeof sugarRaw === 'string' ? sugarRaw : (lead.sugar_poll ?? lead.SugarPoll ?? lead.sugarPoll ?? null);
   const mgDl = typeof sugarRaw === 'number' ? sugarRaw : parseSugarMgDl(sugarRaw);
   const { segment: sugarSegment, points: sugarPts } = sugarBand(mgDl);
 
@@ -196,6 +198,7 @@ function scoreOneLead(lead) {
   const breakdown = {
     sugar_mg_dl: mgDl,
     sugar_segment: sugarSegment,
+    sugar_poll: sugarPollRaw,
     sugar_points: sugarPts,
     behavioral_points: behPts,
     behavioral: behBreakdown,
@@ -208,6 +211,7 @@ function scoreOneLead(lead) {
     category,
     sugar_segment: sugarSegment,
     sugar_mg_dl: mgDl,
+    sugar_poll: sugarPollRaw,
     action_timing: actionTimingForTier(tier),
     breakdown,
   };
@@ -244,7 +248,48 @@ function computeBatchSummary(results) {
 }
 
 /**
+ * Normalise a phone number to its last 10 digits for deduplication.
+ */
+function last10Digits(phone) {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : (digits || null);
+}
+
+/**
+ * Fetch leads from unique_leads table for a date range.
+ * Maps rows to the same shape expected by scoreOneLead so the two sources can be merged.
+ */
+async function getUniqueLeadsForScoring(dateFrom, dateTo) {
+  if (!supabase) return [];
+  try {
+    let q = supabase
+      .from('unique_leads')
+      .select('phone, user_id, sugar_poll, lead_source_type, date_time, batch_code');
+    if (dateFrom) q = q.gte('date_time', dateFrom);
+    if (dateTo)   q = q.lte('date_time', dateTo + 'T23:59:59');
+    const { data, error } = await q;
+    if (error) {
+      console.warn('[leadQualityScoring] unique_leads fetch error:', error.message);
+      return [];
+    }
+    return (data || []).map(r => ({
+      lead_id: null,
+      name: r.phone || '',
+      phone: r.phone || '',
+      campaign_id: null,
+      sugar_poll: r.sugar_poll || null,
+      lead_source_type: r.lead_source_type || null,
+    }));
+  } catch (e) {
+    console.warn('[leadQualityScoring] unique_leads fetch failed:', e.message);
+    return [];
+  }
+}
+
+/**
  * Run scoring for leads in date range. Persist to lead_scores.
+ * Merges leads from the Leads table AND unique_leads table, deduplicating by phone.
  */
 async function runLeadScoring(opts = {}) {
   const { dateFrom, dateTo, campaignIds } = opts || {};
@@ -252,33 +297,65 @@ async function runLeadScoring(opts = {}) {
     return { success: false, error: 'dateFrom and dateTo are required', scored: 0, samples: [], summary: null };
   }
 
-  let leads = [];
+  // --- Source 1: Leads table (has name, campaign_id, sugar_poll from form submissions) ---
+  let leadsTableRows = [];
   try {
     if (campaignIds && campaignIds.length > 0) {
-      leads = await getLeadsByCampaignAndAd(campaignIds, null, dateFrom, dateTo);
+      leadsTableRows = await getLeadsByCampaignAndAd(campaignIds, null, dateFrom, dateTo);
     } else {
-      leads = await getLeadsByDateRange(dateFrom, dateTo);
+      leadsTableRows = await getLeadsByDateRange(dateFrom, dateTo);
     }
   } catch (e) {
-    return { success: false, error: e.message, scored: 0, samples: [], summary: null };
+    console.warn('[leadQualityScoring] Leads table fetch error:', e.message);
   }
 
-  console.log(`[leadQualityScoring] ${dateFrom}…${dateTo}: loaded ${leads.length} row(s) from Leads for scoring`);
+  // --- Source 2: unique_leads table (broader pool: Paid, Free, YouTube, Walk-In) ---
+  const uniqueLeadsRows = campaignIds && campaignIds.length > 0
+    ? []
+    : await getUniqueLeadsForScoring(dateFrom, dateTo);
+
+  // --- Merge: prefer Leads table records, fill in from unique_leads where phone not seen ---
+  const seenPhones = new Set();
+  const leads = [];
+
+  for (const lead of leadsTableRows) {
+    const key = last10Digits(lead.Phone ?? lead.phone ?? '');
+    if (key) seenPhones.add(key);
+    leads.push(lead);
+  }
+  for (const lead of uniqueLeadsRows) {
+    const key = last10Digits(lead.phone);
+    if (key && seenPhones.has(key)) continue; // already scored from Leads table
+    if (key) seenPhones.add(key);
+    leads.push(lead);
+  }
+
+  console.log(
+    `[leadQualityScoring] ${dateFrom}…${dateTo}: Leads=${leadsTableRows.length}, unique_leads=${uniqueLeadsRows.length}, merged=${leads.length}`
+  );
 
   const results = [];
   for (const lead of leads) {
     const scored = scoreOneLead(lead);
     const rawId = lead.lead_id ?? lead.id ?? lead.Id;
+    const leadDateTime =
+      lead.date_time ??
+      lead.TimeUtc ?? lead.time_utc ??
+      lead.created_time ??
+      lead.DateChar ?? lead.date_char ??
+      null;
     results.push({
       lead_id: rawId != null && rawId !== '' ? String(rawId) : null,
       name: lead.Name ?? lead.name,
       phone: lead.Phone ?? lead.phone,
       campaign_id: lead.campaign_id,
+      date_time: leadDateTime,
       score: scored.score,
       tier: scored.tier,
       category: scored.category,
       sugar_segment: scored.sugar_segment,
       sugar_mg_dl: scored.sugar_mg_dl,
+      sugar_poll: scored.sugar_poll,
       action_timing: scored.action_timing,
       breakdown: scored.breakdown,
     });
@@ -300,7 +377,7 @@ async function runLeadScoring(opts = {}) {
         category: r.category,
         sugar_segment: r.sugar_segment,
         tier: r.tier,
-        score_breakdown: r.breakdown,
+        score_breakdown: { ...r.breakdown, date_time: r.date_time ?? null },
         methodology: METHODOLOGY_VERSION,
         updated_at: new Date().toISOString(),
       }));
@@ -352,7 +429,7 @@ async function runLeadScoring(opts = {}) {
  * Get stored lead scores with optional filters.
  */
 async function getLeadScores(opts = {}) {
-  const { dateFrom, dateTo, campaignId, limit = 200 } = opts || {};
+  const { dateFrom, dateTo, campaignId, limit = 10000 } = opts || {};
   if (!supabase) return { success: true, data: [] };
 
   const baseSelect =

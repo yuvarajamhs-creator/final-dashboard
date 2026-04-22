@@ -677,7 +677,7 @@ router.get('/lead-quality/scores', async (req, res) => {
     const dateFrom = req.query.dateFrom || null;
     const dateTo = req.query.dateTo || null;
     const campaignId = req.query.campaignId || null;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10000, 10000);
     const result = await getLeadScores({ dateFrom, dateTo, campaignId, limit });
     return res.json(result);
   } catch (err) {
