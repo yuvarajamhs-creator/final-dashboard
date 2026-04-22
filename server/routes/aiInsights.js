@@ -16,10 +16,11 @@ const AI_INSIGHTS_CACHE_TTL_SEC = 15 * 60;
 const aiInsightsCache = new Map(); // key -> { data, expires }
 
 function buildAIInsightsCacheKey(body) {
-  const { dateRange, bestAds, bestReels, context } = body || {};
+  const { dateRange, bestAds, bestReels, context, selectedPeriod } = body || {};
   const payload = JSON.stringify({
     from: dateRange?.from,
     to: dateRange?.to,
+    selectedPeriod: selectedPeriod || null,
     platform: context?.platform,
     location: context?.location,
     age: context?.age,
@@ -74,9 +75,16 @@ Required JSON shape (use these exact keys):
 
 Rules: Include exactly 6 items in "insights" and 4 in "recommendations". ids 1-based. Actions in adsData/reelsData must be one of the allowed values. Generate diverse, actionable content.`;
 
-const PROMPT_WITH_REAL_DATA = (bestAd, bestReel, dateRange) => `You are a marketing analytics AI. Below is REAL performance data from the user's Best Performing Ad and Best Performing Reel (from Meta/Instagram). Generate insights and recommendations based ONLY on this data. Return ONLY valid JSON, no markdown or explanation.
+const PROMPT_WITH_REAL_DATA = (bestAd, bestReel, dateRange, selectedPeriod) => {
+  const periodLabel = selectedPeriod === 'today' ? 'Today'
+    : selectedPeriod === 'last_7_days' ? 'last 7 days'
+    : selectedPeriod === 'last_14_days' ? 'last 14 days'
+    : selectedPeriod === 'last_30_days' ? 'last 30 days'
+    : (dateRange ? `${dateRange.from} to ${dateRange.to}` : 'last 30 days');
+  return `You are a marketing analytics AI. Below is REAL performance data from the user's Best Performing Ad and Best Performing Reel (from Meta/Instagram) for the selected period: ${periodLabel}. Generate insights and recommendations based ONLY on this data. Return ONLY valid JSON, no markdown or explanation.
 
 Real data:
+- Selected period: ${periodLabel}
 - Best Performing Ad: ${JSON.stringify(bestAd || 'none')}
 - Best Performing Reel: ${JSON.stringify(bestReel || 'none')}
 - Date range: ${dateRange ? `${dateRange.from} to ${dateRange.to}` : 'not specified'}
@@ -84,14 +92,15 @@ Real data:
 Return a single JSON object with exactly these keys:
 {
   "insights": [
-    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "Today or last 7 days or last 14 days or last 30 days", "category": "success" or "warning" or "info", "text": "1-2 sentence insight based on the real data above", "action": "→ Short action phrase" }
+    { "id": 1, "type": "string e.g. AD PERFORMANCE", "timeWindow": "${periodLabel}", "category": "success" or "warning" or "info", "text": "1-2 sentence insight based on the real data above", "action": "→ Short action phrase" }
   ],
   "recommendations": [
     { "id": 1, "title": "string", "icon": "single emoji", "color": "green" or "red" or "blue" or "purple", "justification": "1-2 sentence data-driven reason using the real metrics" }
   ]
 }
 
-Rules: Include exactly 6 items in "insights" and 4 in "recommendations". ids 1-based. Base every insight and recommendation on the actual campaign names, spend, leads, CPL, reach, engagements, and saves provided. Be specific (mention numbers or names where relevant).`;
+Rules: Include exactly 6 items in "insights" and 4 in "recommendations". ids 1-based. All insights must use timeWindow: "${periodLabel}". Base every insight and recommendation on the actual campaign names, spend, leads, CPL, reach, engagements, and saves provided. Be specific (mention numbers or names where relevant).`;
+};
 
 /**
  * POST /api/ai/insights
@@ -109,7 +118,7 @@ router.post('/insights', async (req, res) => {
   }
 
   const body = req.body || {};
-  const { bestAd, bestReel, bestAds, bestReels, dateRange } = body;
+  const { bestAd, bestReel, bestAds, bestReels, dateRange, selectedPeriod } = body;
   const skipCache = body.skipCache === true || body.refresh === true;
   const cacheKey = buildAIInsightsCacheKey(body);
   if (!skipCache) {
@@ -126,13 +135,16 @@ router.post('/insights', async (req, res) => {
   try {
     let prompt = PROMPT;
     if (useRealData) {
+      const periodOrder = selectedPeriod
+        ? [selectedPeriod, 'last_30_days', 'last_14_days', 'last_7_days', 'today']
+        : ['last_30_days', 'last_14_days', 'last_7_days', 'today'];
       const adForPrompt = hasPerPeriod
-        ? bestAds.last_30_days || bestAds.last_14_days || bestAds.last_7_days || bestAds.today
+        ? periodOrder.map((k) => bestAds[k]).find(Boolean)
         : bestAd;
       const reelForPrompt = hasPerPeriod
-        ? bestReels.last_30_days || bestReels.last_14_days || bestReels.last_7_days || bestReels.today
+        ? periodOrder.map((k) => bestReels[k]).find(Boolean)
         : bestReel;
-      prompt = PROMPT_WITH_REAL_DATA(adForPrompt, reelForPrompt, dateRange);
+      prompt = PROMPT_WITH_REAL_DATA(adForPrompt, reelForPrompt, dateRange, selectedPeriod);
     }
 
     const response = await axios.post(

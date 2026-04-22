@@ -1346,6 +1346,7 @@ export default function AIInsights() {
                     bestAds,
                     bestReels,
                     dateRange,
+                    selectedPeriod: insightsDatePreset !== 'custom' ? insightsDatePreset : null,
                     context: { platform: 'all', location: 'all', age: 'all' }
                 })
             }, 20000);
@@ -1383,7 +1384,7 @@ export default function AIInsights() {
                 setLoading(false);
             }
         }
-    }, [resolvedInsightsRange]);
+    }, [resolvedInsightsRange, insightsDatePreset]);
 
     /* Countdown for quota retry: decrement every second, clear when 0 */
     useEffect(() => {
@@ -2148,6 +2149,9 @@ export default function AIInsights() {
                                         className={`ai2-date-preset-option${insightsDatePreset === opt.id ? ' ai2-date-preset-option--active' : ''}`}
                                         onClick={() => {
                                             setInsightsDatePreset(opt.id);
+                                            if (SNAPSHOT_TIME_WINDOW_KEYS.includes(opt.id)) {
+                                                setActiveTimeWindow(opt.id);
+                                            }
                                             if (opt.id === 'custom') {
                                                 const m = getDateRangeForPreset('last_30_days');
                                                 setCustomDraftFrom(m.from);
@@ -2528,7 +2532,10 @@ export default function AIInsights() {
                             key={k}
                             type="button"
                             className={`ai2-time-tab ${activeTimeWindow === k ? 'active' : ''}`}
-                            onClick={() => setActiveTimeWindow(k)}
+                            onClick={() => {
+                                                setActiveTimeWindow(k);
+                                                setInsightsDatePreset(k);
+                                            }}
                         >
                             {periodLabels[k]}
                         </button>
