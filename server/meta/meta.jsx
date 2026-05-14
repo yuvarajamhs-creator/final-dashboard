@@ -245,6 +245,26 @@ async function getPageAccessToken(pageId) {
       // ignore
     }
 
+    // Fallback 3: call me/accounts with META_ACCESS_TOKEN (user token) to get all page tokens at once
+    const userTokenFallback = (process.env.META_ACCESS_TOKEN || '').trim();
+    if (userTokenFallback) {
+      try {
+        const mePages = await fetchPagesFromMeAccounts(userTokenFallback);
+        const now3 = Date.now();
+        for (const p of mePages) {
+          if (p.id && p.access_token) {
+            pageTokenCache.tokens[p.id] = { token: p.access_token, expiresAt: now3 + pageTokenCache.ttl };
+          }
+        }
+        const cached3 = pageTokenCache.tokens[pageId];
+        if (cached3 && cached3.expiresAt > Date.now()) {
+          return cached3.token;
+        }
+      } catch (meErr) {
+        // ignore
+      }
+    }
+
     // Handle specific error codes
     if (errorCode === 190) {
       throw new Error(`Page Access Token expired/invalid for page ${pageId}: ${errorMsg}. Please check your System User Token.`);
@@ -1633,7 +1653,28 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
       }
     }
 
-    // 3) If still empty, try ALL IDs from META_PAGE_IDS (comma-separated, covers all 4 pages)
+    // 3) If still empty and META_PAGE_NAMES is set, build pages directly from env — no API call needed
+    //    This is the most reliable fallback: works regardless of token permissions
+    if (rawPages.length === 0) {
+      const nameMapEnv = (process.env.META_PAGE_NAMES || '').trim();
+      if (nameMapEnv) {
+        const envPages = [];
+        nameMapEnv.split(',').forEach(entry => {
+          const sep = entry.indexOf(':');
+          if (sep > 0) {
+            const id = entry.slice(0, sep).trim();
+            const name = entry.slice(sep + 1).trim();
+            if (id && name) envPages.push({ id, name, instagram_business_account: null });
+          }
+        });
+        if (envPages.length > 0) {
+          console.log(`[Pages] Using META_PAGE_NAMES env fallback: ${envPages.length} pages`);
+          rawPages = envPages;
+        }
+      }
+    }
+
+    // 4) If still empty, try ALL IDs from META_PAGE_IDS (comma-separated, covers all 4 pages)
     if (rawPages.length === 0) {
       const pageIdsEnv = (process.env.META_PAGE_IDS || '').trim();
       if (pageIdsEnv) {
