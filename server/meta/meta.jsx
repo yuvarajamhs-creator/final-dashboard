@@ -2601,67 +2601,63 @@ router.get("/instagram/online-followers", optionalAuthMiddleware, async (req, re
 //    Uses Page Access Token (required by Meta's leadgen_forms API)
 // ---------------------------------------------------------------------
 router.get("/pages/:pageId/forms", optionalAuthMiddleware, async (req, res) => {
-  try {
-    const { pageId } = req.params;
-    
-    // Meta's leadgen_forms API requires a Page Access Token, not a System User Token
-    const pageAccessToken = await getPageAccessToken(pageId);
-    const formsUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`;
-    
-    const params = {
-      access_token: pageAccessToken,
-      fields: "id,name,locale,status",
-      limit: 1000,
-    };
+  const { pageId } = req.params;
+  const formsUrl = `https://graph.facebook.com/${META_API_VERSION}/${pageId}/leadgen_forms`;
+  const formFields = "id,name,locale,status";
 
-    const { data } = await axios.get(formsUrl, { params });
-    
-    const forms = data.data || [];
-
-    res.json({ data: forms });
-  } catch (err) {
-    console.error("Error fetching forms:", err.response?.data || err.message);
-    
-    const errorData = err.response?.data?.error;
-    const errorCode = errorData?.code;
-    const errorMsg = errorData?.message || err.message;
-
-    // Handle token expiration (190)
-    if (errorCode === 190) {
-      // Clear cache for this page
-      if (pageTokenCache.tokens[req.params.pageId]) {
-        delete pageTokenCache.tokens[req.params.pageId];
-      }
-      return res.status(401).json({
-        error: "Meta Access Token expired or invalid",
-        details: errorMsg,
-        isAuthError: true,
-        instruction: "Please update META_SYSTEM_ACCESS_TOKEN in server/.env"
-      });
-    }
-
-    // Handle permission errors (200, 10)
-    if (errorCode === 200) {
-      return res.status(403).json({
-        error: "Permission error",
-        details: errorMsg,
-        instruction: "Ensure your System User Token has 'leads_retrieval' and 'pages_read_engagement' permissions"
-      });
-    }
-
-    if (errorCode === 10) {
-      return res.status(403).json({
-        error: "Permission denied",
-        details: errorMsg,
-        instruction: "Check that your System User Token has access to this page and required permissions"
-      });
-    }
-
-    res.status(500).json({
-      error: "Failed to fetch forms",
-      details: err.response?.data || err.message,
+  // Build ordered list of tokens to try: page token first, then user token, then system token
+  async function tryFetchForms(token) {
+    const { data } = await axios.get(formsUrl, {
+      params: { access_token: token, fields: formFields, limit: 1000 },
+      timeout: 30000,
     });
+    return data.data || [];
   }
+
+  // Collect tokens to attempt in priority order
+  const tokensToTry = [];
+
+  // 1. Page-specific access token (best, but may not be available for all pages)
+  try {
+    const pageToken = await getPageAccessToken(pageId);
+    if (pageToken) tokensToTry.push({ label: "page_token", token: pageToken });
+  } catch (_) {
+    // getPageAccessToken failed — continue with fallback tokens
+  }
+
+  // 2. User access token (META_ACCESS_TOKEN) — Meta allows leads_retrieval scope users to call leadgen_forms
+  const userToken = (process.env.META_ACCESS_TOKEN || '').trim();
+  if (userToken) tokensToTry.push({ label: "user_token", token: userToken });
+
+  // 3. System user token
+  try {
+    const sysToken = getSystemToken();
+    if (sysToken) tokensToTry.push({ label: "system_token", token: sysToken });
+  } catch (_) {}
+
+  for (const { label, token } of tokensToTry) {
+    try {
+      const forms = await tryFetchForms(token);
+      console.log(`[Forms] page=${pageId} succeeded with ${label}, count=${forms.length}`);
+      return res.json({ data: forms });
+    } catch (err) {
+      const code = err.response?.data?.error?.code;
+      console.warn(`[Forms] page=${pageId} ${label} failed (code=${code}):`, err.response?.data?.error?.message || err.message);
+      // If token is expired, clear it from cache so next call re-fetches
+      if (code === 190 && label === "page_token") {
+        delete pageTokenCache.tokens[pageId];
+      }
+      // Continue to next token
+    }
+  }
+
+  // All tokens exhausted
+  console.error(`[Forms] page=${pageId} all token attempts failed`);
+  res.status(403).json({
+    error: "Failed to fetch forms",
+    details: `Could not obtain a valid access token for page ${pageId}. Tried page token, user token, and system token.`,
+    instruction: "Ensure META_ACCESS_TOKEN is a valid user token with leads_retrieval permission, or the page is assigned to the System User.",
+  });
 });
 
 // ---------------------------------------------------------------------
