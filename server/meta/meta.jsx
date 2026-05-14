@@ -1633,16 +1633,7 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
       }
     }
 
-    // 3) If still empty and META_PAGE_ID is set, fetch that specific page
-    if (rawPages.length === 0 && pageIdEnv) {
-      try {
-        rawPages = await fetchPageById(pageIdEnv, accessToken);
-      } catch (e) {
-        console.warn("[Pages] META_PAGE_ID fallback failed:", e.response?.data?.error?.message || e.message);
-      }
-    }
-
-    // 4) If still empty, try each ID in META_PAGE_IDS (comma-separated list)
+    // 3) If still empty, try ALL IDs from META_PAGE_IDS (comma-separated, covers all 4 pages)
     if (rawPages.length === 0) {
       const pageIdsEnv = (process.env.META_PAGE_IDS || '').trim();
       if (pageIdsEnv) {
@@ -1656,7 +1647,16 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
             console.warn(`[Pages] META_PAGE_IDS fallback failed for ${id}:`, e.response?.data?.error?.message || e.message);
           }
         }
-        rawPages = fetched;
+        if (fetched.length > 0) rawPages = fetched;
+      }
+    }
+
+    // 4) If still empty and META_PAGE_ID is set, fetch that single page as last Meta API resort
+    if (rawPages.length === 0 && pageIdEnv) {
+      try {
+        rawPages = await fetchPageById(pageIdEnv, accessToken);
+      } catch (e) {
+        console.warn("[Pages] META_PAGE_ID fallback failed:", e.response?.data?.error?.message || e.message);
       }
     }
 
