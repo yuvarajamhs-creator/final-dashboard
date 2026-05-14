@@ -7,7 +7,14 @@ const { supabase, verifyTableExists } = require('./supabase');
 const { signToken, hashPassword, comparePassword, authMiddleware } = require('./auth');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'https://final-dashboard-gxau.vercel.app',
+    /https:\/\/.*\.vercel\.app$/
+  ],
+  credentials: true
+}));
 app.use(express.json({ limit: '20mb' }));
 
 // Import Meta routes
@@ -1169,4 +1176,7 @@ function startServer(retries = 3) {
   });
 }
 
-startServer();
+if (require.main === module) {
+  startServer();
+}
+module.exports = app;
