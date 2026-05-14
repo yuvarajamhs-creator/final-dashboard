@@ -44,11 +44,32 @@ app.get("/", (req, res) => {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ 
-    status: "ok", 
+  res.json({
+    status: "ok",
     timestamp: new Date().toISOString(),
     port: process.env.PORT || 4000
   });
+});
+
+// Manual trigger for DW leads → Google Sheet sync
+app.post("/api/dw-sync/trigger", async (req, res) => {
+  res.json({ status: "started", message: "DW sync triggered — check server logs." });
+  runDwLeadsSync().catch(e => console.error("[DWSync] Manual trigger error:", e.message));
+});
+
+// Reset syncedIds and re-push everything from Meta
+app.post("/api/dw-sync/reset-and-repush", async (req, res) => {
+  const fs   = require('fs');
+  const path = require('path');
+  const STATE_FILE = path.resolve(__dirname, 'data/dwSheetSyncState.json');
+  try {
+    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ syncedIds: [], campaignIds: existing.campaignIds, campaignIdsFetchedAt: existing.campaignIdsFetchedAt }), 'utf8');
+    res.json({ status: "started", message: "State reset. Full re-sync in progress — check server logs." });
+    runDwLeadsSync().catch(e => console.error("[DWSync] Repush error:", e.message));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // //const PORT = process.env.PORT || 5000;
@@ -1117,6 +1138,10 @@ let storySnapshotsIntervalId = null;
 const { startAutoDeleteScheduler } = require('./jobs/autoDeleteLeads');
 let autoDeleteLeadsIntervalId = null;
 
+// DW Leads → Google Sheet sync (every 5 min, runs on startup to push historical leads)
+const { startDwLeadsGSheetSyncScheduler, runDwLeadsSync } = require('./jobs/dwLeadsGSheetSync');
+let dwLeadsGSheetSyncIntervalId = null;
+
 const PORT = process.env.PORT || 4000;
 
 function startSchedulers() {
@@ -1125,6 +1150,7 @@ function startSchedulers() {
   try { tokenRefreshIntervalId = startTokenRefreshScheduler(); } catch (e) { console.error('Error starting token refresh scheduler:', e.message); }
   try { storySnapshotsIntervalId = startStorySnapshotsScheduler(); } catch (e) { console.error('Error starting story snapshots scheduler:', e.message); }
   try { autoDeleteLeadsIntervalId = startAutoDeleteScheduler(); } catch (e) { console.error('Error starting auto-delete leads scheduler:', e.message); }
+  try { dwLeadsGSheetSyncIntervalId = startDwLeadsGSheetSyncScheduler(); } catch (e) { console.error('Error starting DW leads Google Sheet sync:', e.message); }
 }
 
 function startServer(retries = 3) {

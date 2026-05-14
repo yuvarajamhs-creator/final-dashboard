@@ -8,6 +8,9 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const router = express.Router();
 const { authMiddleware, optionalAuthMiddleware } = require("../auth");
 const { saveLeads, getLeadsByCampaignAndAd } = require("../repositories/leadsRepository");
+const metaCampaignsRepository = require("../repositories/metaCampaignsRepository");
+const metaAdsRepository = require("../repositories/metaAdsRepository");
+const { supabase: leadsSupabase } = require("../supabase");
 const { getInsights, upsertInsights } = require("../repositories/insightsRepository");
 const { fetchLeadsFromMeta } = require("../jobs/leadsSync");
 const { fetchAllAdAccountIds, runInsightsSyncForRange } = require("../jobs/insightsSync");
@@ -1515,16 +1518,28 @@ async function fetchPagesFromBusinesses(accessToken) {
 }
 
 async function fetchPageById(pageId, accessToken) {
+  // First try with access_token field (requires page admin or pages_show_list)
+  try {
+    const response = await axios.get(
+      `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
+      {
+        params: { fields: "id,name,access_token,instagram_business_account{id}" },
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    if (response.data?.id) return [response.data];
+  } catch (e) {
+    console.warn(`[Pages] fetchPageById with access_token failed for ${pageId}, retrying without it:`, e.response?.data?.error?.message || e.message);
+  }
+  // Fallback: basic fields only (works with most valid tokens)
   const response = await axios.get(
     `https://graph.facebook.com/${META_API_VERSION}/${pageId}`,
     {
-      params: {
-        fields: "id,name,access_token,instagram_business_account{id}",
-      },
+      params: { fields: "id,name,instagram_business_account{id}" },
       headers: { Authorization: `Bearer ${accessToken}` },
     }
   );
-  return response.data ? [response.data] : [];
+  return response.data?.id ? [response.data] : [];
 }
 
 /** Load all page tokens into cache (me/accounts + businesses). Used as fallback when getPageAccessToken fails. */
@@ -1551,6 +1566,17 @@ async function loadPageTokensIntoCache() {
   }
   if (rawPages.length === 0 && pageIdEnv) {
     try { rawPages = await fetchPageById(pageIdEnv, accessToken); } catch (e) { /* ignore */ }
+  }
+  if (rawPages.length === 0) {
+    const pageIdsEnv = (process.env.META_PAGE_IDS || '').trim();
+    if (pageIdsEnv) {
+      const ids = pageIdsEnv.split(',').map(id => id.trim()).filter(Boolean);
+      const fetched = [];
+      for (const id of ids) {
+        try { fetched.push(...await fetchPageById(id, accessToken)); } catch (e) { /* ignore */ }
+      }
+      rawPages = fetched;
+    }
   }
   const now = Date.now();
   const ttl = pageTokenCache.ttl || 60 * 60 * 1000;
@@ -1616,12 +1642,76 @@ router.get("/pages", optionalAuthMiddleware, async (req, res) => {
       }
     }
 
+    // 4) If still empty, try each ID in META_PAGE_IDS (comma-separated list)
+    if (rawPages.length === 0) {
+      const pageIdsEnv = (process.env.META_PAGE_IDS || '').trim();
+      if (pageIdsEnv) {
+        const ids = pageIdsEnv.split(',').map(id => id.trim()).filter(Boolean);
+        const fetched = [];
+        for (const id of ids) {
+          try {
+            const result = await fetchPageById(id, accessToken);
+            fetched.push(...result);
+          } catch (e) {
+            console.warn(`[Pages] META_PAGE_IDS fallback failed for ${id}:`, e.response?.data?.error?.message || e.message);
+          }
+        }
+        rawPages = fetched;
+      }
+    }
+
+    // 5) Last resort: build pages from env IDs + DB leads (works even with expired tokens)
+    if (rawPages.length === 0) {
+      console.warn("[Pages] All Meta API methods failed — using env/DB fallback (token may be expired).");
+      // Build name map from META_PAGE_NAMES env: "id1:Name One,id2:Name Two"
+      const nameMapEnv = (process.env.META_PAGE_NAMES || '').trim();
+      const nameMap = {};
+      if (nameMapEnv) {
+        nameMapEnv.split(',').forEach(entry => {
+          const sep = entry.indexOf(':');
+          if (sep > 0) {
+            const id = entry.slice(0, sep).trim();
+            const name = entry.slice(sep + 1).trim();
+            if (id && name) nameMap[id] = name;
+          }
+        });
+      }
+
+      // Collect page IDs from META_PAGE_IDS env
+      const envIds = new Set(
+        (process.env.META_PAGE_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+      );
+      if (pageIdEnv) envIds.add(pageIdEnv);
+
+      // Also collect distinct page_ids from Supabase leads table
+      try {
+        // Try mixed-case "Leads" table first, then snake_case "leads"
+        let dbPageIds = [];
+        const tryTable = async (tbl, col) => {
+          const { data } = await leadsSupabase.from(tbl).select(col).not(col, 'is', null).limit(5000);
+          if (data?.length) return [...new Set(data.map(r => r[col]).filter(Boolean))];
+          return [];
+        };
+        dbPageIds = await tryTable('Leads', 'page_id').catch(() => []);
+        if (dbPageIds.length === 0) dbPageIds = await tryTable('leads', 'page_id').catch(() => []);
+        dbPageIds.forEach(id => envIds.add(id));
+      } catch (e) {
+        console.warn("[Pages] DB fallback query failed:", e.message);
+      }
+
+      rawPages = [...envIds].map(id => ({
+        id,
+        name: nameMap[id] || `Page ${id}`,
+        instagram_business_account: null,
+      }));
+    }
+
     if (rawPages.length === 0) {
       console.warn(
         "[Pages] No pages returned. PAGE dropdown will be empty. " +
-        "Fix: (1) Use a User token with pages_show_list for me/accounts, or " +
-        "(2) Link pages to a Business and use a token with business_management, or " +
-        "(3) Set META_PAGE_ID in server/.env to a Facebook Page ID."
+        "Fix: (1) Refresh your Meta Access Token (current token may be expired), or " +
+        "(2) Set META_PAGE_IDS in server/.env to your Facebook Page IDs, or " +
+        "(3) Optionally set META_PAGE_NAMES=id1:Page Name 1,id2:Page Name 2 for display names."
       );
     } else {
       console.log(`[Pages] Returning ${rawPages.length} page(s) for PAGE filter.`);
@@ -4403,6 +4493,218 @@ router.get("/leads/db", optionalAuthMiddleware, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// 5.2.5b) LEADS DB (POST) - same as GET but accepts campaignIds array in body
+//    POST /api/meta/leads/db
+//    Body: { campaignIds: string[], adIds?: string[], startDate?, endDate? }
+//    Used by the Ads Analytics Leads table to avoid URL-length limits when
+//    passing hundreds of campaign IDs.
+// ---------------------------------------------------------------------
+router.post("/leads/db", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { campaignIds: bodyCampaignIds, adIds: bodyAdIds, adAccountIds: bodyAdAccountIds, startDate, endDate, formId, pageId } = req.body || {};
+
+    const parseIds = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val.map(String).filter(Boolean);
+      return String(val).split(',').map(v => v.trim()).filter(Boolean);
+    };
+
+    let campaignIds = parseIds(bodyCampaignIds);
+    const adIds       = parseIds(bodyAdIds);
+    const adAccountIds = parseIds(bodyAdAccountIds).map(id => String(id).replace(/^act_/i, ''));
+
+    // If ad accounts are provided, resolve their form_ids via Meta API
+    // (ads → creative → leadgen form), then filter leads by form_id.
+    // This works even when leads have NULL campaign_id/ad_id (organic or
+    // unattributed leads), since form_id is reliably populated by the sync.
+    let leads;
+    if (adAccountIds.length > 0) {
+      const META_API_VERSION_LOCAL = process.env.META_API_VERSION || 'v21.0';
+      // Prefer META_ACCESS_TOKEN (used by dashboard insights endpoint that works).
+      // Fall back to system token if regular not available.
+      let accessToken = (process.env.META_ACCESS_TOKEN || '').trim();
+      if (!accessToken) {
+        try { accessToken = getSystemToken(); } catch (e) {}
+      }
+      console.log('[leads/db POST] using token (first 20 chars):', accessToken ? accessToken.slice(0, 20) + '...' : 'NONE');
+
+      const allowedFormIds = new Set();
+      // Also build campaign/ad sets as a secondary match path
+      const [accountCampaigns, accountAds] = await Promise.all([
+        metaCampaignsRepository.list(adAccountIds).catch(() => []),
+        metaAdsRepository.list(adAccountIds).catch(() => [])
+      ]);
+      const allowedCampaignIds = new Set(accountCampaigns.map(c => String(c.campaign_id)).filter(Boolean));
+      accountAds.forEach(a => { if (a.campaign_id) allowedCampaignIds.add(String(a.campaign_id)); });
+      const allowedAdIds = new Set(accountAds.map(a => String(a.ad_id)).filter(Boolean));
+
+      // Fetch form_ids from Meta API for each ad account
+      for (const acctId of adAccountIds) {
+        try {
+          // Get ads with their creative leadgen form info
+          let nextUrl = `https://graph.facebook.com/${META_API_VERSION_LOCAL}/act_${acctId}/ads?fields=creative{effective_object_story_id,object_story_spec},id&limit=200&access_token=${accessToken}`;
+          let pages = 0;
+          while (nextUrl && pages < 20) {
+            const r = await axios.get(nextUrl, { timeout: 30000 });
+            const adsList = r.data?.data || [];
+            for (const ad of adsList) {
+              const spec = ad?.creative?.object_story_spec;
+              // Direct lead_gen form on link_data or video_data
+              const linkFormId = spec?.link_data?.call_to_action?.value?.lead_gen_form_id || spec?.link_data?.lead_gen_form_id;
+              const videoFormId = spec?.video_data?.call_to_action?.value?.lead_gen_form_id || spec?.video_data?.lead_gen_form_id;
+              if (linkFormId) allowedFormIds.add(String(linkFormId));
+              if (videoFormId) allowedFormIds.add(String(videoFormId));
+            }
+            nextUrl = r.data?.paging?.next || null;
+            pages++;
+          }
+        } catch (e) {
+          console.warn('[leads/db POST] failed to fetch ads for', acctId, ':', e.response?.data?.error?.message || e.message);
+        }
+      }
+
+      console.log('[leads/db POST] adAccountIds:', adAccountIds,
+        '→ allowed:', allowedCampaignIds.size, 'campaigns,', allowedAdIds.size, 'ads,', allowedFormIds.size, 'forms');
+
+      // Fetch all leads in date range
+      const allLeads = await getLeadsByCampaignAndAd([], [], startDate, endDate, formId, pageId);
+      console.log('[leads/db POST] fetched', allLeads.length, 'total leads in date range, filtering by account...');
+
+      // ENRICH leads with missing attribution: call Meta /lead_id?fields=campaign_id,ad_id
+      // Test the token with the first lead - if that fails, skip enrichment entirely.
+      const leadsMissingAttribution = allLeads.filter(l => !l.campaign_id && !l.ad_id && l.lead_id);
+      let enrichmentSucceeded = false;
+      if (leadsMissingAttribution.length > 0 && accessToken) {
+        // Probe with first lead to check if token works
+        try {
+          const probe = await axios.get(
+            `https://graph.facebook.com/${META_API_VERSION_LOCAL}/${leadsMissingAttribution[0].lead_id}`,
+            { params: { access_token: accessToken, fields: 'ad_id,campaign_id,ad_name,campaign_name' }, timeout: 8000 }
+          );
+          if (probe.data && (probe.data.ad_id || probe.data.campaign_id)) {
+            enrichmentSucceeded = true;
+            // Apply first probe result
+            const firstLead = leadsMissingAttribution[0];
+            if (probe.data.ad_id) firstLead.ad_id = String(probe.data.ad_id);
+            if (probe.data.campaign_id) firstLead.campaign_id = String(probe.data.campaign_id);
+            if (probe.data.ad_name) firstLead.ad_name = probe.data.ad_name;
+            if (probe.data.campaign_name) firstLead.campaign_name = probe.data.campaign_name;
+          }
+        } catch (e) {
+          console.warn('[leads/db POST] Token probe failed, skipping enrichment:', e.response?.data?.error?.message || e.message);
+        }
+
+        if (enrichmentSucceeded) {
+          console.log('[leads/db POST] Enriching attribution for', leadsMissingAttribution.length - 1, 'more leads...');
+          const batchSize = 25;
+          let enrichedCount = 1;
+          for (let i = 1; i < leadsMissingAttribution.length; i += batchSize) {
+            const batch = leadsMissingAttribution.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (lead) => {
+              try {
+                const r = await axios.get(
+                  `https://graph.facebook.com/${META_API_VERSION_LOCAL}/${lead.lead_id}`,
+                  { params: { access_token: accessToken, fields: 'ad_id,campaign_id,ad_name,campaign_name' }, timeout: 8000 }
+                );
+                if (r.data?.ad_id) lead.ad_id = String(r.data.ad_id);
+                if (r.data?.campaign_id) lead.campaign_id = String(r.data.campaign_id);
+                if (r.data?.ad_name) lead.ad_name = r.data.ad_name;
+                if (r.data?.campaign_name) lead.campaign_name = r.data.campaign_name;
+                enrichedCount++;
+              } catch (e) {}
+            }));
+          }
+          console.log('[leads/db POST] Enriched', enrichedCount, '/', leadsMissingAttribution.length, 'leads');
+        }
+      }
+
+      // Filter leads by matching campaign_id/ad_id/form_id against allowed sets
+      const filtered = allLeads.filter(lead => {
+        const cid = lead.campaign_id ? String(lead.campaign_id) : null;
+        const aid = lead.ad_id ? String(lead.ad_id) : null;
+        const fid = lead.form_id ? String(lead.form_id) : null;
+        return (cid && allowedCampaignIds.has(cid))
+          || (aid && allowedAdIds.has(aid))
+          || (fid && allowedFormIds.has(fid));
+      });
+      console.log('[leads/db POST] after account filter:', filtered.length, 'leads remain (from', allLeads.length, 'total)');
+
+      // If filter returned 0 because enrichment failed (Meta token has no permission),
+      // fall back to returning ALL leads in date range. User will see data but it
+      // won't be strictly filtered to selected accounts.
+      if (filtered.length === 0 && allLeads.length > 0 && !enrichmentSucceeded) {
+        console.warn('[leads/db POST] Filter matched 0 leads and Meta token has no permission to enrich. Returning ALL leads in date range as fallback. To enable proper filtering, grant ads_management or ads_read permission to the Meta access token.');
+        leads = allLeads;
+      } else {
+        leads = filtered;
+      }
+    } else {
+      leads = await getLeadsByCampaignAndAd(campaignIds, adIds, startDate, endDate, formId, pageId);
+      console.log('[leads/db POST] no account filter, returned', leads.length, 'leads');
+    }
+
+    // Enrich ad names (legacy data may be missing ad_name)
+    const adNameCache  = {};
+    const uniqueAdIds  = [...new Set(leads.filter(l => l.ad_id && !l.ad_name).map(l => l.ad_id))];
+    if (uniqueAdIds.length > 0) {
+      const accessToken = getSystemToken();
+      const batchSize = 10;
+      for (let i = 0; i < uniqueAdIds.length; i += batchSize) {
+        await Promise.all(uniqueAdIds.slice(i, i + batchSize).map(async (adIdVal) => {
+          try {
+            const r = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${adIdVal}`, {
+              params: { access_token: accessToken, fields: 'name' }, timeout: 5000
+            });
+            adNameCache[adIdVal] = r.data.name || 'N/A';
+          } catch { adNameCache[adIdVal] = 'N/A'; }
+        }));
+        if (i + batchSize < uniqueAdIds.length) await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
+    // Enrich form names
+    const formNameCache  = {};
+    const uniqueFormIds  = [...new Set(leads.filter(l => l.form_id).map(l => l.form_id))];
+    if (uniqueFormIds.length > 0) {
+      const accessToken = getSystemToken();
+      const batchSize = 10;
+      for (let i = 0; i < uniqueFormIds.length; i += batchSize) {
+        await Promise.all(uniqueFormIds.slice(i, i + batchSize).map(async (fid) => {
+          try {
+            const r = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${fid}`, {
+              params: { access_token: accessToken, fields: 'name' }, timeout: 5000
+            });
+            formNameCache[fid] = r.data.name || 'N/A';
+          } catch { formNameCache[fid] = 'N/A'; }
+        }));
+        if (i + batchSize < uniqueFormIds.length) await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
+    const formattedLeads = leads.map(lead => ({
+      Id: lead.Id, Name: lead.Name, Phone: lead.Phone,
+      Time: lead.Time, TimeUtc: lead.TimeUtc, Date: lead.Date, DateChar: lead.DateChar,
+      Campaign: lead.Campaign, campaign: lead.campaign,
+      ad_id: lead.ad_id, campaign_id: lead.campaign_id, lead_id: lead.lead_id,
+      form_id: lead.form_id, page_id: lead.page_id, created_time: lead.created_time,
+      name: lead.name, phone: lead.phone, date: lead.date, time: lead.time,
+      Street: 'N/A', City: 'N/A', page_name: 'N/A',
+      campaign_name: lead.Campaign || 'N/A',
+      ad_name: lead.ad_name || adNameCache[lead.ad_id] || 'N/A',
+      form_name: (lead.form_id && formNameCache[lead.form_id]) ? formNameCache[lead.form_id] : 'N/A'
+    }));
+
+    res.json({
+      data: formattedLeads,
+      meta: { total: formattedLeads.length, filters: { campaignIds, adIds, startDate, endDate } }
+    });
+  } catch (err) {
+    console.error('[Leads DB POST] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch leads from database', details: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------
 // 5.2.6) LEADS BACKFILL API - Manually backfill historical leads data
 //    POST /api/meta/leads/backfill?pageId=xxx&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&days=30
 //    GET  /api/meta/leads/backfill?pageId=xxx&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&days=30
@@ -4557,6 +4859,76 @@ async function handleBackfillRequest(req, res) {
     });
   }
 }
+
+// ---------------------------------------------------------------------
+// 5.2.7) SYNC ALL PAGES LEADS - Fetch & store leads for all accessible pages
+//    POST /api/meta/leads/sync-all-pages
+//    Body: { pageIds?: string[], startDate: YYYY-MM-DD, endDate: YYYY-MM-DD }
+//    Fetches from Meta for each page, saves to DB, returns total count.
+//    Used by Ads Analytics Leads table to populate DB with all leads.
+// ---------------------------------------------------------------------
+router.post("/leads/sync-all-pages", optionalAuthMiddleware, async (req, res) => {
+  try {
+    const { pageIds, startDate, endDate } = req.body;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "startDate and endDate are required (YYYY-MM-DD)" });
+    }
+
+    const startDateObj = new Date(`${startDate}T00:00:00`);
+    const endDateObj   = new Date(`${endDate}T23:59:59`);
+
+    // Resolve page IDs: use supplied list or discover from Meta
+    let resolvedPageIds = Array.isArray(pageIds) && pageIds.length > 0 ? pageIds : [];
+    if (resolvedPageIds.length === 0) {
+      try {
+        const accessToken = getSystemToken();
+        const discovered = await fetchPagesFromMeAccounts(accessToken);
+        resolvedPageIds = discovered.map(p => p.id).filter(Boolean);
+      } catch (e) {
+        console.warn("[SyncAllPages] Could not auto-discover pages:", e.message);
+      }
+    }
+    if (resolvedPageIds.length === 0) {
+      return res.status(400).json({ error: "No pages found. Provide pageIds or ensure META_ACCESS_TOKEN has page access." });
+    }
+
+    console.log(`[SyncAllPages] Syncing ${resolvedPageIds.length} page(s) for ${startDate} → ${endDate}`);
+
+    let totalFetched = 0;
+    let totalSaved   = 0;
+    const pageResults = [];
+
+    for (const pageId of resolvedPageIds) {
+      try {
+        console.log(`[SyncAllPages] Fetching page ${pageId}…`);
+        const leads = await fetchLeadsFromMeta(pageId, startDateObj, endDateObj);
+        totalFetched += leads.length;
+        if (leads.length > 0) {
+          const saved = await saveLeads(leads);
+          totalSaved += leads.length;
+          console.log(`[SyncAllPages] Page ${pageId}: fetched ${leads.length}, saved ${totalSaved} total so far`);
+        }
+        pageResults.push({ pageId, fetched: leads.length });
+      } catch (e) {
+        console.error(`[SyncAllPages] Page ${pageId} error:`, e.message);
+        pageResults.push({ pageId, fetched: 0, error: e.message });
+      }
+    }
+
+    console.log(`[SyncAllPages] Done. Total fetched: ${totalFetched}, saved: ${totalSaved}`);
+    res.json({
+      success: true,
+      totalFetched,
+      totalSaved,
+      pages: pageResults,
+      dateRange: { startDate, endDate }
+    });
+  } catch (err) {
+    console.error("[SyncAllPages] Error:", err.message);
+    res.status(500).json({ error: "Failed to sync all pages", details: err.message });
+  }
+});
 
 // ---------------------------------------------------------------------
 // 5.3) LEADS API - Fetch actual lead data from Meta Lead Ads

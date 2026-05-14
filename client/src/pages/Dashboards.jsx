@@ -1332,6 +1332,28 @@ export default function AdsDashboardBootstrap() {
   const [downloadingFilteredLeads, setDownloadingFilteredLeads] = useState(false);
   const [downloadingFollowsExcel, setDownloadingFollowsExcel] = useState(false);
 
+  // Ads Analytics Leads table (synced with main dashboard filters)
+  const [adsAnalyticsLeads, setAdsAnalyticsLeads] = useState([]);
+  const [adsAnalyticsLeadsLoading, setAdsAnalyticsLeadsLoading] = useState(false);
+  const [adsAnalyticsLeadsError, setAdsAnalyticsLeadsError] = useState(null);
+  const [adsAnalyticsLeadsPage, setAdsAnalyticsLeadsPage] = useState(1);
+  const [downloadingAdsAnalyticsLeads, setDownloadingAdsAnalyticsLeads] = useState(false);
+  const ADS_ANALYTICS_LEADS_PER_PAGE = 10;
+  // Maps campaignId (string) → accountId (string); populated during campaign fetch
+  const [campaignAccountMap, setCampaignAccountMap] = useState({});
+  // Sync-all-pages state
+  const [syncingAllLeads, setSyncingAllLeads] = useState(false);
+  const [syncAllLeadsResult, setSyncAllLeadsResult] = useState(null);
+  // Table-level Ad Account filter (independent of the main dashboard filter)
+  const [adsLeadsAccountFilter, setAdsLeadsAccountFilter] = useState([]);
+
+  // NEW: Leads by Ad Account table - driven directly by the main Ad Account filter
+  const [accountLeads, setAccountLeads] = useState([]);
+  const [accountLeadsLoading, setAccountLeadsLoading] = useState(false);
+  const [accountLeadsError, setAccountLeadsError] = useState(null);
+  const [accountLeadsPage, setAccountLeadsPage] = useState(1);
+  const ACCOUNT_LEADS_PER_PAGE = 10;
+
   // Pre-load state for leads optimization
   const [preloadedLeads, setPreloadedLeads] = useState([]);
   const [preloadedForms, setPreloadedForms] = useState([]);
@@ -1516,7 +1538,9 @@ export default function AdsDashboardBootstrap() {
       // First, fetch campaigns (selected accounts, project accounts, or all)
       let campData;
       if (selectedAdAccounts.length > 0) {
-        const campaignPromises = selectedAdAccounts.map((id) => fetchCampaigns(id));
+        const campaignPromises = selectedAdAccounts.map((id) =>
+          fetchCampaigns(id).then(cs => cs.map(c => ({ ...c, account_id: String(id) })))
+        );
         const results = await Promise.all(campaignPromises);
         const byId = new Map();
         results.flat().forEach((c) => {
@@ -1525,9 +1549,10 @@ export default function AdsDashboardBootstrap() {
         });
         campData = Array.from(byId.values());
       } else if (selectedProject && accountsForProject.length > 0) {
-        const campaignPromises = accountsForProject.map((acc) =>
-          fetchCampaigns(acc.account_id || acc.id)
-        );
+        const campaignPromises = accountsForProject.map((acc) => {
+          const accId = String(acc.account_id || acc.id || '');
+          return fetchCampaigns(accId).then(cs => cs.map(c => ({ ...c, account_id: accId })));
+        });
         const results = await Promise.all(campaignPromises);
         const byId = new Map();
         results.flat().forEach((c) => {
@@ -1536,9 +1561,10 @@ export default function AdsDashboardBootstrap() {
         });
         campData = Array.from(byId.values());
       } else if (specifiedAdAccounts.length > 0) {
-        const campaignPromises = specifiedAdAccounts.map((acc) =>
-          fetchCampaigns(acc.account_id || acc.id)
-        );
+        const campaignPromises = specifiedAdAccounts.map((acc) => {
+          const accId = String(acc.account_id || acc.id || '');
+          return fetchCampaigns(accId).then(cs => cs.map(c => ({ ...c, account_id: accId })));
+        });
         const results = await Promise.all(campaignPromises);
         const byId = new Map();
         results.flat().forEach((c) => {
@@ -1565,6 +1591,14 @@ export default function AdsDashboardBootstrap() {
       } else {
         setCampaigns([]);
       }
+
+      // Build campaign → account mapping for ads analytics leads table
+      const newCampaignAccountMap = {};
+      activeCampaignsList.forEach(c => {
+        const cid = c.id || c.campaign_id;
+        if (cid && c.account_id) newCampaignAccountMap[String(cid)] = String(c.account_id);
+      });
+      setCampaignAccountMap(newCampaignAccountMap);
 
       // Reset selected campaigns if they don't exist in the new list
       // This handles the case when ad account changes and old campaign selections are invalid
@@ -2153,10 +2187,10 @@ export default function AdsDashboardBootstrap() {
   useEffect(() => {
     // Check if we have valid date range from main dashboard filters
     const hasValidDateRange = dateFilters.startDate && dateFilters.endDate;
-    
+
     // Trigger loadLeads if date range is set
     const shouldLoadLeads = hasValidDateRange;
-    
+
     if (shouldLoadLeads) {
       loadLeads();
     } else if (!hasValidDateRange) {
@@ -2165,10 +2199,189 @@ export default function AdsDashboardBootstrap() {
     }
   }, [dateFilters.startDate, dateFilters.endDate, selectedCampaigns, selectedAds, loadLeads]);
 
+  // Load leads synced with main Ads Analytics Dashboard filters (ad accounts, campaigns, ads, date range)
+  const loadAdsAnalyticsLeads = useCallback(async () => {
+    if (!dateFilters.startDate || !dateFilters.endDate) {
+      setAdsAnalyticsLeads([]);
+      return;
+    }
+
+    setAdsAnalyticsLeadsLoading(true);
+    setAdsAnalyticsLeadsError(null);
+    try {
+      // Send the selected ad accounts directly to the backend, which will resolve
+      // ALL campaigns (active + inactive) for those accounts from meta_campaigns cache.
+      // If specific campaigns are also selected, backend intersects them with the account's campaigns.
+      const campaignIds = selectedCampaigns.length > 0 ? selectedCampaigns.map(String) : [];
+      const adIds = selectedAds.length > 0 ? selectedAds.map(String) : [];
+      const adAccountIds = selectedAdAccounts.length > 0
+        ? selectedAdAccounts.map(id => String(id).replace(/^act_/i, ''))
+        : [];
+
+      const token = getAuthToken();
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const response = await fetch(`${API_BASE}/api/meta/leads/db`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          campaignIds,
+          adIds,
+          adAccountIds,
+          startDate: dateFilters.startDate,
+          endDate: dateFilters.endDate
+        })
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${response.status}`);
+      }
+      const json = await response.json();
+      const leadsData = json.data || [];
+
+      // Build campaign_id → name lookup from campaigns state
+      const campaignIdToName = {};
+      campaigns.forEach(c => {
+        const cid = String(c.id || c.campaign_id || '');
+        if (cid) campaignIdToName[cid] = c.name || c.campaign_name || '';
+      });
+
+      // Build accountId → display name lookup
+      const accountIdToName = {};
+      adAccounts.forEach(acc => {
+        const id = String(acc.account_id || acc.id || '').replace(/^act_/i, '');
+        if (id) accountIdToName[id] = acc.account_name || acc.name || id;
+      });
+
+      const enriched = leadsData.map(lead => {
+        const cid = String(lead.campaign_id || '');
+        const campaignName =
+          (lead.campaign_name && lead.campaign_name !== 'N/A' ? lead.campaign_name : null) ||
+          (lead.Campaign && lead.Campaign !== 'N/A' ? lead.Campaign : null) ||
+          campaignIdToName[cid] ||
+          'N/A';
+        const accId = campaignAccountMap[cid] || '';
+        const accountName = accountIdToName[accId] || (accId ? accId : 'N/A');
+        return { ...lead, campaign_name: campaignName, account_name: accountName, _account_id: accId };
+      });
+
+      setAdsAnalyticsLeads(enriched);
+      setAdsAnalyticsLeadsPage(1);
+    } catch (e) {
+      setAdsAnalyticsLeadsError({ message: e.message || 'Failed to fetch leads' });
+      setAdsAnalyticsLeads([]);
+    } finally {
+      setAdsAnalyticsLeadsLoading(false);
+    }
+  }, [data, campaigns, selectedCampaigns, selectedAds, selectedAdAccounts, dateFilters.startDate, dateFilters.endDate, campaignAccountMap, adAccounts]);
+
+  // Auto-reload whenever filters or analytics data (data) change
+  useEffect(() => {
+    if (dateFilters.startDate && dateFilters.endDate) {
+      loadAdsAnalyticsLeads();
+    }
+  }, [data, campaigns, selectedCampaigns, selectedAds, selectedAdAccounts, dateFilters.startDate, dateFilters.endDate, loadAdsAnalyticsLeads]);
+
+  // Table-level account filter applied client-side (no re-fetch needed).
+  // The API call already scopes leads to selectedAdAccounts via campaign IDs,
+  // so this is a secondary safety filter. Only EXCLUDE a lead if it has a known
+  // _account_id that does NOT match the selected accounts. If _account_id is unknown
+  // (campaign not in campaignAccountMap), keep the lead - API filter already handled it.
+  const filteredAdsAnalyticsLeads = useMemo(() => {
+    const normalize = (v) => String(v || '').replace(/^act_/i, '');
+    const tableSelectedIds = adsLeadsAccountFilter.length > 0
+      ? new Set(adsLeadsAccountFilter.map(normalize))
+      : null;
+    if (!tableSelectedIds) return adsAnalyticsLeads;
+    return adsAnalyticsLeads.filter(lead => {
+      const accId = normalize(lead._account_id);
+      if (!accId) return true;
+      return tableSelectedIds.has(accId);
+    });
+  }, [adsAnalyticsLeads, adsLeadsAccountFilter]);
+
   // Clear ads when ad account selection changes (avoid showing stale ads).
   useEffect(() => {
     setAds([]);
   }, [selectedAdAccounts]);
+
+  // NEW: Load leads filtered strictly by main Ad Account selection.
+  // Backend handles all filtering: resolves campaigns/ads/forms for selected accounts
+  // and matches each lead's campaign_id, ad_id, or form_id.
+  const loadAccountLeads = useCallback(async () => {
+    if (!dateFilters.startDate || !dateFilters.endDate) {
+      setAccountLeads([]);
+      return;
+    }
+    if (selectedAdAccounts.length === 0) {
+      setAccountLeads([]);
+      return;
+    }
+
+    setAccountLeadsLoading(true);
+    setAccountLeadsError(null);
+    try {
+      const adAccountIds = selectedAdAccounts.map(id => String(id).replace(/^act_/i, ''));
+      const token = getAuthToken();
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const response = await fetch(`${API_BASE}/api/meta/leads/db`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          adAccountIds,
+          startDate: dateFilters.startDate,
+          endDate: dateFilters.endDate
+        })
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${response.status}`);
+      }
+      const json = await response.json();
+      const leadsData = json.data || [];
+
+      console.log('[loadAccountLeads] backend returned', leadsData.length, 'leads');
+
+      const campaignIdToName = {};
+      campaigns.forEach(c => {
+        const cid = String(c.id || c.campaign_id || '');
+        if (cid) campaignIdToName[cid] = c.name || c.campaign_name || '';
+      });
+
+      const accountIdToName = {};
+      adAccounts.forEach(acc => {
+        const id = String(acc.account_id || acc.id || '').replace(/^act_/i, '');
+        if (id) accountIdToName[id] = acc.account_name || acc.name || id;
+      });
+
+      const enriched = leadsData.map(lead => {
+        const cid = String(lead.campaign_id || '');
+        const campaignName =
+          (lead.campaign_name && lead.campaign_name !== 'N/A' ? lead.campaign_name : null) ||
+          (lead.Campaign && lead.Campaign !== 'N/A' ? lead.Campaign : null) ||
+          campaignIdToName[cid] ||
+          'N/A';
+        const accId = campaignAccountMap[cid] || '';
+        const accountName = accountIdToName[accId] || (accId ? accId : 'N/A');
+        return { ...lead, campaign_name: campaignName, account_name: accountName, _account_id: accId };
+      });
+
+      setAccountLeads(enriched);
+      setAccountLeadsPage(1);
+    } catch (e) {
+      setAccountLeadsError({ message: e.message || 'Failed to fetch leads' });
+      setAccountLeads([]);
+    } finally {
+      setAccountLeadsLoading(false);
+    }
+  }, [selectedAdAccounts, dateFilters.startDate, dateFilters.endDate, campaigns, adAccounts, campaignAccountMap]);
+
+  useEffect(() => {
+    loadAccountLeads();
+  }, [loadAccountLeads]);
 
   // Load Ad Name options from DB via server-filtered campaign_id (comma-separated). Re-runs when campaigns or accounts change.
   const loadAdsForCampaigns = useCallback(
@@ -3671,6 +3884,95 @@ export default function AdsDashboardBootstrap() {
       });
     } finally {
       setDownloadingFilteredLeads(false);
+    }
+  };
+
+  // Sync ALL leads from Meta for all accessible pages into the DB, then refresh the table
+  const syncAllLeads = async () => {
+    if (!dateFilters.startDate || !dateFilters.endDate) {
+      setToast({ type: 'warning', title: 'Warning', message: 'Please select a date range first.' });
+      return;
+    }
+    setSyncingAllLeads(true);
+    setSyncAllLeadsResult(null);
+    try {
+      const token = getAuthToken();
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      // Pass all known page IDs so the server doesn't need to re-discover them
+      const pageIdsToSync = pages.map(p => p.id).filter(Boolean);
+
+      const response = await fetch(`${API_BASE}/api/meta/leads/sync-all-pages`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          pageIds: pageIdsToSync,
+          startDate: dateFilters.startDate,
+          endDate: dateFilters.endDate
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+
+      setSyncAllLeadsResult({ fetched: result.totalFetched, saved: result.totalSaved });
+      setToast({
+        type: 'success',
+        title: 'Sync Complete',
+        message: `Fetched ${result.totalFetched} leads from ${result.pages?.length || 0} page(s). Refreshing table…`
+      });
+      // Refresh the table from DB now that it's populated
+      await loadAdsAnalyticsLeads();
+    } catch (e) {
+      console.error('[SyncAllLeads]', e);
+      setToast({ type: 'error', title: 'Sync Failed', message: e.message });
+    } finally {
+      setSyncingAllLeads(false);
+    }
+  };
+
+  // Download handlers for Ads Analytics Leads table — use filtered list so download matches the visible table
+  const handleDownloadAdsAnalyticsLeadsCSV = () => {
+    if (filteredAdsAnalyticsLeads.length === 0) return;
+    const headers = ['Lead Name', 'Phone Number', 'Campaign Name', 'Ad Name', 'Form Name', 'Created Time', 'Ad Account'];
+    const rows = filteredAdsAnalyticsLeads.map(lead => [
+      lead.Name || lead.name || 'N/A',
+      lead.Phone || lead.phone || 'N/A',
+      lead.campaign_name || lead.Campaign || 'N/A',
+      lead.ad_name || 'N/A',
+      lead.form_name || 'N/A',
+      formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time),
+      lead.account_name || 'N/A',
+    ]);
+    const csvContent = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ads_analytics_leads_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadAdsAnalyticsLeadsExcel = async () => {
+    if (filteredAdsAnalyticsLeads.length === 0) return;
+    setDownloadingAdsAnalyticsLeads(true);
+    try {
+      const headers = ['Lead Name', 'Phone Number', 'Campaign Name', 'Ad Name', 'Form Name', 'Created Time', 'Ad Account'];
+      const rows = filteredAdsAnalyticsLeads.map(lead => [
+        lead.Name || lead.name || 'N/A',
+        lead.Phone || lead.phone || 'N/A',
+        lead.campaign_name || lead.Campaign || 'N/A',
+        lead.ad_name || 'N/A',
+        lead.form_name || 'N/A',
+        formatDateTime(lead.Date || lead.date || lead.DateChar, lead.Time || lead.time || lead.TimeUtc || lead.created_time),
+        lead.account_name || 'N/A',
+      ]);
+      await downloadExcelFromRows(headers, rows, 'Ads Analytics Leads', `ads_analytics_leads_${new Date().toISOString().slice(0, 10)}.xlsx`, [25, 15, 35, 35, 30, 20, 30]);
+    } catch (e) {
+      console.error('Error downloading Excel:', e);
+    } finally {
+      setDownloadingAdsAnalyticsLeads(false);
     }
   };
 
@@ -5355,6 +5657,113 @@ export default function AdsDashboardBootstrap() {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+
+      {/* NEW: Leads by Ad Account — driven directly by the main Ad Account dropdown */}
+      <div className="row g-4 mb-4">
+        <div className="col-12">
+          <div className="chart-card">
+            <div className="chart-card-body">
+              <div className="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                <strong className="chart-title">
+                  <span className="chart-emoji">🎯</span> Leads by Selected Ad Account
+                  {accountLeads.length > 0 && (
+                    <span className="badge bg-primary ms-2" style={{ fontSize: '0.85rem' }}>
+                      {accountLeads.length} leads
+                    </span>
+                  )}
+                </strong>
+                <div className="text-muted small">
+                  {selectedAdAccounts.length === 0
+                    ? 'Select an Ad Account above to view leads'
+                    : `Showing leads for ${selectedAdAccounts.length} selected ad account${selectedAdAccounts.length > 1 ? 's' : ''}`}
+                </div>
+              </div>
+
+              {accountLeadsLoading && (
+                <div className="text-center py-4">
+                  <div className="spinner-border text-primary" role="status">
+                    <span className="visually-hidden">Loading...</span>
+                  </div>
+                </div>
+              )}
+
+              {accountLeadsError && !accountLeadsLoading && (
+                <div className="alert alert-danger mb-3" style={{ fontSize: '0.875rem' }}>
+                  <i className="fas fa-exclamation-circle me-2"></i>
+                  {accountLeadsError.message}
+                </div>
+              )}
+
+              {!accountLeadsLoading && !accountLeadsError && selectedAdAccounts.length > 0 && accountLeads.length === 0 && (
+                <div className="alert alert-warning mb-3" style={{ fontSize: '0.875rem' }}>
+                  <i className="fas fa-info-circle me-2"></i>
+                  No leads found for the selected ad account(s) in this date range. If you expect leads here, click "Sync from Meta" in the section above to populate the database.
+                </div>
+              )}
+
+              {!accountLeadsLoading && accountLeads.length > 0 && (
+                <>
+                  <div className="table-responsive">
+                    <table className="table table-hover table-sm align-middle">
+                      <thead>
+                        <tr style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          <th>Lead Name</th>
+                          <th>Phone Number</th>
+                          <th>Campaign Name</th>
+                          <th>Ad Name</th>
+                          <th>Form Name</th>
+                          <th>Created Time</th>
+                          <th>Ad Account</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {accountLeads
+                          .slice((accountLeadsPage - 1) * ACCOUNT_LEADS_PER_PAGE, accountLeadsPage * ACCOUNT_LEADS_PER_PAGE)
+                          .map((lead, idx) => (
+                            <tr key={lead.lead_id || lead.Id || idx}>
+                              <td>{lead.Name || lead.name || 'N/A'}</td>
+                              <td>{lead.Phone || lead.phone || 'N/A'}</td>
+                              <td>{lead.campaign_name || 'N/A'}</td>
+                              <td>{lead.ad_name || 'N/A'}</td>
+                              <td>{lead.form_name || 'N/A'}</td>
+                              <td>{lead.created_time || lead.TimeUtc || lead.Time || 'N/A'}</td>
+                              <td>{lead.account_name || 'N/A'}</td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {accountLeads.length > ACCOUNT_LEADS_PER_PAGE && (
+                    <div className="d-flex justify-content-between align-items-center mt-3">
+                      <div className="text-muted small">
+                        Page {accountLeadsPage} of {Math.ceil(accountLeads.length / ACCOUNT_LEADS_PER_PAGE)} ({accountLeads.length} total)
+                      </div>
+                      <div className="d-flex gap-2">
+                        <button
+                          className="btn btn-sm btn-outline-secondary"
+                          onClick={() => setAccountLeadsPage(p => Math.max(1, p - 1))}
+                          disabled={accountLeadsPage === 1}
+                        >
+                          Previous
+                        </button>
+                        <button
+                          className="btn btn-sm btn-outline-secondary"
+                          onClick={() => setAccountLeadsPage(p => Math.min(Math.ceil(accountLeads.length / ACCOUNT_LEADS_PER_PAGE), p + 1))}
+                          disabled={accountLeadsPage >= Math.ceil(accountLeads.length / ACCOUNT_LEADS_PER_PAGE)}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>

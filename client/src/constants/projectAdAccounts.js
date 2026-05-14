@@ -30,7 +30,8 @@ export const PROJECT_AD_ACCOUNT_IDS = {
     '1512093733230882'  // Integfarms 02
   ],
   'Direct Walk-in': [
-    '384231607347196'   // MHS Ad Account 2024
+    '384231607347196',  // MHS Ad Account 2024
+    '1795178471390515'  // MHS Direct Walk-in
   ],
   'Dental': [
     '327236376911765'   // MHS Dental Care
@@ -57,6 +58,7 @@ const ID_DISPLAY_NAME_FALLBACK = {
   '1398296668512853': 'Integfarm MHS 02',
   '332450076623103': 'MHS S-2',
   '1512093733230882': 'Integfarms 02',
+  '1795178471390515': 'MHS Direct Walk-in',
   '327236376911765': 'MHS Dental Care',
   '705155253819861': 'Integfarms'
 };

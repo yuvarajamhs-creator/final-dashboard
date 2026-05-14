@@ -1,15 +1,15 @@
 /**
- * AI Insights API – uses Google Gemini 2.x to generate marketing insights and recommendations.
- * Requires GOOGLE_GEMINI_API_KEY in server .env.
- * Optional: GEMINI_MODEL (default gemini-2.5-flash; e.g. gemini-2.5-pro for higher quality).
+ * AI Insights API – uses Anthropic Claude to generate marketing insights and recommendations.
+ * Requires ANTHROPIC_API_KEY in server .env.
  */
 
 const express = require('express');
-const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk');
 const crypto = require('crypto');
 
 const router = express.Router();
-const GEMINI_API_KEY = process.env.GOOGLE_GEMINI_API_KEY;
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 /** In-memory cache for Gemini AI insights to reduce quota usage. TTL 15 min. */
 const AI_INSIGHTS_CACHE_TTL_SEC = 15 * 60;
@@ -45,8 +45,6 @@ function setCachedAIInsights(key, data) {
     expires: Date.now() + AI_INSIGHTS_CACHE_TTL_SEC * 1000
   });
 }
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const PROMPT = `You are a marketing analytics AI. Generate a single JSON object for a marketing dashboard "AI Insights" page. Use realistic but varied numbers and campaign names. Return ONLY valid JSON, no markdown or explanation.
 
@@ -109,11 +107,11 @@ Rules: Include exactly 6 items in "insights" and 4 in "recommendations". ids 1-b
  * Otherwise falls back to single bestAd/bestReel or full AI-generated data.
  */
 router.post('/insights', async (req, res) => {
-  if (!GEMINI_API_KEY || GEMINI_API_KEY.trim() === '') {
+  if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({
       success: false,
       error: 'AI insights not configured',
-      details: 'Add GOOGLE_GEMINI_API_KEY to server .env'
+      details: 'Add ANTHROPIC_API_KEY to server .env'
     });
   }
 
@@ -147,34 +145,24 @@ router.post('/insights', async (req, res) => {
       prompt = PROMPT_WITH_REAL_DATA(adForPrompt, reelForPrompt, dateRange, selectedPeriod);
     }
 
-    const response = await axios.post(
-      `${GEMINI_URL}?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.6,
-          maxOutputTokens: 8192
-        }
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 60000
-      }
-    );
+    const message = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 8192,
+      temperature: 0.6,
+      messages: [{ role: 'user', content: prompt }]
+    });
 
-    let text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    let text = message.content?.[0]?.text;
     if (!text) {
-      const reason = response.data?.candidates?.[0]?.finishReason || 'No content';
       return res.status(502).json({
         success: false,
         error: 'AI returned no content',
-        details: reason
+        details: message.stop_reason || 'No content'
       });
     }
 
     text = text.trim();
-    const jsonMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    const jsonMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/) || text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (jsonMatch) text = jsonMatch[1].trim();
     const parsed = JSON.parse(text);
 
@@ -214,9 +202,9 @@ router.post('/insights', async (req, res) => {
     setCachedAIInsights(cacheKey, responsePayload);
     return res.json(responsePayload);
   } catch (err) {
-    const status = err.response?.status === 400 ? 400 : err.response?.status === 429 ? 429 : 500;
-    const message = err.response?.data?.error?.message || err.message || 'AI request failed';
-    console.error('[AI Insights] Gemini error:', message);
+    const status = err.status === 429 ? 429 : err.status === 400 ? 400 : 500;
+    const message = err.message || 'AI request failed';
+    console.error('[AI Insights] Claude error:', message);
     const payload = {
       success: false,
       error: 'AI insights request failed',
@@ -234,14 +222,14 @@ const ASK_SYSTEM = `You are a helpful marketing analytics assistant for a Meta/I
 
 /**
  * POST /api/ai/ask
- * Body: { question: string, context?: object } — answers user questions with Gemini using optional dashboard snapshot.
+ * Body: { question: string, context?: object } — answers user questions with Claude using optional dashboard snapshot.
  */
 router.post('/ask', async (req, res) => {
-  if (!GEMINI_API_KEY || GEMINI_API_KEY.trim() === '') {
+  if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({
       success: false,
       error: 'AI not configured',
-      details: 'Add GOOGLE_GEMINI_API_KEY to server .env'
+      details: 'Add ANTHROPIC_API_KEY to server .env'
     });
   }
 
@@ -265,33 +253,25 @@ router.post('/ask', async (req, res) => {
     }
   }
 
-  const userBlob = contextBlock
-    ? `${ASK_SYSTEM}\n\nDashboard context (JSON):\n${contextBlock}\n\nUser question:\n${question}`
-    : `${ASK_SYSTEM}\n\nUser question:\n${question}`;
+  const userContent = contextBlock
+    ? `Dashboard context (JSON):\n${contextBlock}\n\nUser question:\n${question}`
+    : question;
 
   try {
-    const response = await axios.post(
-      `${GEMINI_URL}?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      {
-        contents: [{ role: 'user', parts: [{ text: userBlob }] }],
-        generationConfig: {
-          temperature: 0.45,
-          maxOutputTokens: 2048
-        }
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 110000
-      }
-    );
+    const message = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 2048,
+      temperature: 0.45,
+      system: ASK_SYSTEM,
+      messages: [{ role: 'user', content: userContent }]
+    });
 
-    let text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    let text = message.content?.[0]?.text;
     if (!text || !String(text).trim()) {
-      const reason = response.data?.candidates?.[0]?.finishReason || 'No content';
       return res.status(502).json({
         success: false,
         error: 'AI returned no answer',
-        details: reason
+        details: message.stop_reason || 'No content'
       });
     }
 
@@ -301,18 +281,9 @@ router.post('/ask', async (req, res) => {
 
     return res.json({ success: true, answer: text });
   } catch (err) {
-    const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
-    if (isTimeout) {
-      console.error('[AI Ask] Gemini timeout');
-      return res.status(504).json({
-        success: false,
-        error: 'AI request timed out',
-        details: 'Gemini did not respond in time. Try again in a moment.'
-      });
-    }
-    const status = err.response?.status === 400 ? 400 : err.response?.status === 429 ? 429 : 500;
-    const message = err.response?.data?.error?.message || err.message || 'AI request failed';
-    console.error('[AI Ask] Gemini error:', message);
+    const status = err.status === 429 ? 429 : err.status === 400 ? 400 : 500;
+    const message = err.message || 'AI request failed';
+    console.error('[AI Ask] Claude error:', message);
     const payload = {
       success: false,
       error: 'AI ask request failed',
